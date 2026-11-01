@@ -1,0 +1,440 @@
+/*
+  app.css - styles of the Orthanc Portal.
+
+  Design intent: a quiet clinical work tool. Cool neutral surfaces, one cobalt
+  accent for actions, and colour used as information only: every imaging
+  modality (CT, MR, US...) has its own chip colour, so a worklist can be
+  scanned at a glance. System fonts only (the portal runs on intranets).
+
+  All colours are CSS variables defined in the first two blocks; the dark theme
+  simply redefines them (it follows the operating-system preference).
+*/
+
+/* ---------- 1. Design tokens (light) ---------- */
+:root {
+  --ink: #15212c;          /* main text */
+  --ink-soft: #566574;     /* secondary text, table headers */
+  --paper: #f1f4f7;        /* page background */
+  --panel: #ffffff;        /* cards, tables */
+  --panel-alt: #f7f9fb;    /* zebra / inset areas */
+  --line: #d9e0e7;         /* hairlines */
+  --line-strong: #b7c3cf;  /* input borders */
+  --accent: #2547c8;       /* primary actions */
+  --accent-hover: #1b38a6;
+  --accent-soft: #e5ebfb;
+  --bar: #101a24;          /* top bar */
+  --bar-ink: #d6dee7;
+  --danger: #b3261e;
+  --danger-soft: #fbe9e7;
+  --ok: #0f6e45;
+  --ok-soft: #e1f4ea;
+  --warn: #8a5300;
+  --warn-soft: #fdf1da;
+  --shadow: 0 1px 2px rgba(16, 26, 36, 0.06), 0 8px 24px rgba(16, 26, 36, 0.08);
+
+  --font: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "Cascadia Mono", "SF Mono", Consolas, "Liberation Mono", monospace;
+}
+
+/* ---------- 2. Dark theme: same tokens, different values ---------- */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #e4eaf0;
+    --ink-soft: #97a6b5;
+    --paper: #0d141b;
+    --panel: #151e27;
+    --panel-alt: #19242e;
+    --line: #26323e;
+    --line-strong: #3a4957;
+    --accent: #7f9bff;
+    --accent-hover: #a2b6ff;
+    --accent-soft: #1c2745;
+    --bar: #090f15;
+    --bar-ink: #c4cfda;
+    --danger: #ff8a80;
+    --danger-soft: #3a1f1d;
+    --ok: #62d49b;
+    --ok-soft: #14301f;
+    --warn: #f0b85a;
+    --warn-soft: #33270f;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.35);
+  }
+}
+
+/* ---------- 3. Base ---------- */
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: 14px/1.45 var(--font);
+  font-variant-numeric: tabular-nums; /* digits line up in tables */
+}
+h1, h2, h3 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+h1 { font-size: 1.35rem; }
+h2 { font-size: 1.1rem; }
+p { margin: 0; }
+a { color: var(--accent); }
+.muted { color: var(--ink-soft); }
+.mono { font-family: var(--mono); font-size: 0.86em; }
+[hidden] { display: none !important; }
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+/* ---------- 4. Top bar and navigation ---------- */
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  padding: 0 1.25rem;
+  background: var(--bar);
+  color: var(--bar-ink);
+}
+.brand { display: flex; align-items: center; gap: 0.6rem; font-weight: 600; color: #fff; padding: 0.7rem 0; }
+.brand svg { width: 24px; height: 24px; }
+.nav { display: flex; gap: 0.25rem; flex: 1; overflow-x: auto; }
+.nav button {
+  background: none;
+  border: 0;
+  border-bottom: 3px solid transparent;
+  color: var(--bar-ink);
+  font: inherit;
+  padding: 1rem 0.8rem 0.8rem;
+  cursor: pointer;
+}
+.nav button:hover { color: #fff; }
+.nav button[aria-current="page"] { color: #fff; border-bottom-color: #9fb4ff; font-weight: 600; }
+.userbox { display: flex; align-items: center; gap: 0.75rem; white-space: nowrap; }
+.userbox .btn { background: transparent; color: var(--bar-ink); border-color: #44546a; }
+.userbox .btn:hover { background: #1b2735; }
+
+.page { max-width: 1320px; margin: 0 auto; padding: 1.25rem; display: grid; gap: 1rem; }
+.page-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+
+/* ---------- 5. Buttons and form controls ---------- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.45rem 0.85rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  text-decoration: none;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn:hover { background: var(--panel-alt); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+.btn.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+@media (prefers-color-scheme: dark) { .btn.primary { color: #0d141b; } }
+.btn.danger { color: var(--danger); border-color: var(--danger); }
+.btn.danger:hover { background: var(--danger-soft); }
+.btn.small { padding: 0.25rem 0.55rem; font-size: 0.92em; }
+
+label { display: grid; gap: 0.25rem; font-size: 0.92em; color: var(--ink-soft); }
+input, select {
+  width: 100%;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+}
+input[type="checkbox"], input[type="radio"] { width: auto; }
+
+/* ---------- 6. Panels, filters, tables ---------- */
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.filters { padding: 1rem; display: grid; gap: 0.9rem; }
+.filter-grid { display: grid; gap: 0.75rem; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+.filter-actions { display: flex; gap: 0.5rem; }
+
+.table-wrap { overflow-x: auto; }
+table.data { width: 100%; border-collapse: collapse; }
+table.data th {
+  text-align: left;
+  font-weight: 600;
+  font-size: 0.9em;
+  color: var(--ink-soft);
+  padding: 0.6rem 0.75rem;
+  border-bottom: 1px solid var(--line-strong);
+  white-space: nowrap;
+}
+table.data td { padding: 0.6rem 0.75rem; border-bottom: 1px solid var(--line); vertical-align: middle; }
+table.data tbody tr.study:hover td { background: var(--panel-alt); }
+table.data .num { text-align: right; }
+.actions { display: flex; gap: 0.4rem; justify-content: flex-end; flex-wrap: wrap; }
+.patient { font-weight: 600; }
+.sub { color: var(--ink-soft); font-size: 0.9em; }
+
+/* Expand/collapse arrow of a study row */
+.twisty { width: 1.7rem; padding: 0.1rem; background: none; border: 0; color: var(--ink-soft); cursor: pointer; font-size: 1rem; }
+.twisty[aria-expanded="true"] { transform: rotate(90deg); }
+
+/* The series list that opens under a study: an inset block with an accent rule on the left */
+tr.series-row > td { padding: 0; background: var(--panel-alt); }
+.series-box { margin-left: 1.9rem; border-left: 3px solid var(--accent); padding: 0.25rem 0 0.4rem; }
+.series-box table.data td, .series-box table.data th { padding: 0.4rem 0.75rem; }
+.series-box tr:last-child td { border-bottom: 0; }
+.series-empty { padding: 0.7rem 0.9rem; }
+
+/* Modality chips: colour = information */
+.chip {
+  display: inline-block;
+  padding: 0.05rem 0.45rem;
+  margin-right: 0.25rem;
+  border-radius: 4px;
+  font-size: 0.85em;
+  font-weight: 600;
+  background: var(--panel-alt);
+  border: 1px solid var(--line);
+  color: var(--ink-soft);
+}
+.chip[data-m="CT"]  { background: #e3ecfb; border-color: #bfd1f3; color: #1f3f8f; }
+.chip[data-m="MR"]  { background: #efe6fa; border-color: #d8c5f1; color: #5a2c94; }
+.chip[data-m="US"]  { background: #def4f1; border-color: #b3e3dd; color: #0d6b61; }
+.chip[data-m="CR"], .chip[data-m="DX"], .chip[data-m="XR"], .chip[data-m="RF"], .chip[data-m="MG"]
+                    { background: #fbefd7; border-color: #f0d9a8; color: #7a4d00; }
+.chip[data-m="NM"], .chip[data-m="PT"] { background: #fbe4ea; border-color: #f2bfcc; color: #8d1f40; }
+.chip[data-m="XA"], .chip[data-m="OT"], .chip[data-m="SR"] { background: #e8ecef; border-color: #ced6dc; color: #3b4854; }
+@media (prefers-color-scheme: dark) {
+  .chip[data-m="CT"] { background: #1a2a4d; border-color: #2c4377; color: #a9c1ff; }
+  .chip[data-m="MR"] { background: #2b1f45; border-color: #46346e; color: #cdb5f5; }
+  .chip[data-m="US"] { background: #12342f; border-color: #1f5a51; color: #8fe0d3; }
+  .chip[data-m="CR"], .chip[data-m="DX"], .chip[data-m="XR"], .chip[data-m="RF"], .chip[data-m="MG"]
+                     { background: #3a2c10; border-color: #5e4818; color: #f0c878; }
+  .chip[data-m="NM"], .chip[data-m="PT"] { background: #3d1827; border-color: #66283f; color: #f5a6bd; }
+  .chip[data-m="XA"], .chip[data-m="OT"], .chip[data-m="SR"] { background: #232d36; border-color: #364350; color: #b6c3cf; }
+}
+.chip.perm { background: var(--accent-soft); border-color: transparent; color: var(--accent); }
+.chip.status-on { background: var(--ok-soft); border-color: transparent; color: var(--ok); }
+.chip.status-off { background: var(--danger-soft); border-color: transparent; color: var(--danger); }
+
+.pager { display: flex; align-items: center; justify-content: space-between; padding: 0.7rem 0.9rem; border-top: 1px solid var(--line); }
+.empty { padding: 2.5rem 1rem; text-align: center; color: var(--ink-soft); }
+.loading { padding: 1.2rem; color: var(--ink-soft); }
+
+/* Small drop-down menu (details/summary) used for the download options */
+details.menu { position: relative; display: inline-block; }
+details.menu > summary { list-style: none; }
+details.menu > summary::-webkit-details-marker { display: none; }
+details.menu .menu-list {
+  position: absolute; right: 0; top: calc(100% + 4px); z-index: 5; min-width: 15rem;
+  background: var(--panel); border: 1px solid var(--line-strong); border-radius: 8px; box-shadow: var(--shadow); padding: 0.3rem;
+}
+details.menu .menu-list a { display: block; padding: 0.45rem 0.6rem; border-radius: 5px; color: var(--ink); text-decoration: none; }
+details.menu .menu-list a:hover { background: var(--panel-alt); }
+details.menu .menu-list small { display: block; color: var(--ink-soft); }
+
+/* ---------- 7. Upload ---------- */
+.dropzone {
+  display: grid; place-items: center; gap: 0.6rem; text-align: center;
+  padding: 2.5rem 1rem; border: 2px dashed var(--line-strong); border-radius: 10px; background: var(--panel);
+}
+.dropzone.over { border-color: var(--accent); background: var(--accent-soft); }
+.dropzone .buttons { display: flex; gap: 0.5rem; flex-wrap: wrap; justify-content: center; }
+.progress { height: 10px; background: var(--line); border-radius: 99px; overflow: hidden; }
+.progress > span { display: block; height: 100%; width: 0; background: var(--accent); transition: width 0.15s linear; }
+.upload-stats { display: flex; gap: 1.5rem; flex-wrap: wrap; padding: 1rem; }
+.stat b { display: block; font-size: 1.3rem; }
+.upload-active, .upload-errors { padding: 0 1rem 1rem; display: grid; gap: 0.5rem; }
+.upload-active .row { display: grid; grid-template-columns: minmax(0, 1fr) 140px; gap: 0.75rem; align-items: center; }
+.upload-active .row span.name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.error-line { color: var(--danger); font-size: 0.92em; }
+
+/* ---------- 8. Login ---------- */
+.login-wrap { min-height: 100vh; display: grid; place-items: center; padding: 1rem; }
+.login-card { width: min(380px, 100%); padding: 1.8rem; box-shadow: var(--shadow); display: grid; gap: 1.1rem; }
+.login-card .brand { color: var(--ink); padding: 0; }
+.login-card form { display: grid; gap: 0.85rem; }
+.form-error { color: var(--danger); background: var(--danger-soft); padding: 0.5rem 0.7rem; border-radius: 6px; }
+
+/* ---------- 9. Dialog (user editor) ---------- */
+dialog { border: 1px solid var(--line-strong); border-radius: 10px; background: var(--panel); color: var(--ink); padding: 0; width: min(520px, calc(100vw - 2rem)); box-shadow: var(--shadow); }
+dialog::backdrop { background: rgba(8, 14, 20, 0.55); }
+dialog form { display: grid; gap: 0.9rem; padding: 1.3rem; }
+.perm-list { display: grid; gap: 0.35rem; border: 1px solid var(--line); border-radius: 8px; padding: 0.7rem; margin: 0; }
+.perm-list legend { color: var(--ink-soft); padding: 0 0.3rem; font-size: 0.92em; }
+.perm-list label { display: flex; align-items: flex-start; gap: 0.55rem; color: var(--ink); }
+.perm-list small { display: block; color: var(--ink-soft); }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 0.5rem; }
+
+/* ---------- 10. Toasts ---------- */
+#toasts { position: fixed; right: 1rem; bottom: 1rem; display: grid; gap: 0.5rem; z-index: 50; max-width: min(420px, calc(100vw - 2rem)); }
+.toast { padding: 0.7rem 0.9rem; border-radius: 8px; background: var(--bar); color: #fff; box-shadow: var(--shadow); }
+.toast.error { background: var(--danger); color: #fff; }
+@media (prefers-color-scheme: dark) { .toast.error { color: #1b0a09; } }
+
+/* ---------- 11. Small screens and reduced motion ---------- */
+@media (max-width: 720px) {
+  .topbar { flex-wrap: wrap; gap: 0.5rem; padding: 0 0.75rem; }
+  .nav { order: 3; flex-basis: 100%; }
+  .nav button { padding-top: 0.5rem; }
+  .page { padding: 0.75rem; }
+}
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
+
+/* ---------- 12. Small utilities ---------- */
+.view { display: grid; gap: 1rem; }   /* vertical rhythm inside each tab */
+.nowrap { white-space: nowrap; }
+
+/* ---------- 13. Modality picker, viewer menu, transfers, remote badge ---------- */
+
+/* Filter field that is not a plain <label><input>: a title followed by a group of controls */
+.field { display: grid; gap: 0.25rem; }
+.field.wide { grid-column: 1 / -1; }          /* takes the whole row of the filter grid */
+.field-label { font-size: 0.92em; color: var(--ink-soft); }
+
+/* Modality toggle buttons (CT, MR, US, RX...). aria-pressed="true" = filter active. */
+.mod-picker { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+.chip-toggle {
+  min-width: 2.9rem;
+  padding: 0.3rem 0.7rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.chip-toggle:hover { background: var(--panel-alt); }
+.chip-toggle[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+@media (prefers-color-scheme: dark) { .chip-toggle[aria-pressed="true"] { color: #0d141b; } }
+.mod-other { width: 12rem; }
+
+/* Items of the View / Download drop-down menus (links or buttons, same look) */
+details.menu .menu-list .menu-item {
+  display: block; width: 100%; text-align: left;
+  padding: 0.45rem 0.6rem; border: 0; border-radius: 5px; background: none;
+  font: inherit; color: var(--ink); text-decoration: none; cursor: pointer;
+}
+details.menu .menu-list .menu-item:hover { background: var(--panel-alt); }
+details.menu .menu-list .menu-item small { display: block; color: var(--ink-soft); }
+
+/* State of an Orthanc transfer job */
+.chip.state-success { background: var(--ok-soft); border-color: transparent; color: var(--ok); }
+.chip.state-failure { background: var(--danger-soft); border-color: transparent; color: var(--danger); }
+.chip.state-running, .chip.state-pending, .chip.state-retry { background: var(--warn-soft); border-color: transparent; color: var(--warn); }
+.progress.small { height: 6px; margin-top: 0.35rem; width: 120px; }
+
+/* Shown in the top bar when the session comes from the internet (view only) */
+.badge-remote {
+  padding: 0.15rem 0.55rem;
+  border-radius: 99px;
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 0.85em;
+  font-weight: 600;
+}
+
+/* ---------- 14. Settings, DICOM nodes, notices ---------- */
+textarea {
+  width: 100%;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  resize: vertical;
+}
+
+/* Settings form: one card per topic, a responsive grid of fields inside */
+.settings-form { display: grid; gap: 1rem; }
+.settings-section { padding: 1.1rem 1.2rem; display: grid; gap: 0.8rem; }
+.settings-section h2 { font-size: 1.05rem; }
+.settings-grid { display: grid; gap: 0.9rem 1.2rem; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); align-items: start; }
+.settings-grid .wide, .setting.wide { grid-column: 1 / -1; }
+.setting { display: grid; gap: 0.3rem; }
+.hint { color: var(--ink-soft); font-size: 0.88em; }
+label.check { display: flex; align-items: center; gap: 0.5rem; color: var(--ink); }
+.settings-actions { display: flex; justify-content: flex-end; position: sticky; bottom: 0; padding: 0.7rem 0; background: linear-gradient(transparent, var(--paper) 40%); }
+.listener-status { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.2rem; color: var(--ink-soft); }
+.listener-status b { color: var(--ink); }
+
+/* "Test connection" result */
+.test-result { margin-top: 0.5rem; padding: 0.55rem 0.75rem; border-radius: 6px; background: var(--panel-alt); border: 1px solid var(--line); }
+.test-result.ok { background: var(--ok-soft); border-color: transparent; color: var(--ok); }
+.test-result.bad { background: var(--danger-soft); border-color: transparent; color: var(--danger); }
+
+/* Roles editor */
+.roles { display: grid; gap: 0.6rem; }
+.role-row { display: grid; grid-template-columns: 9rem minmax(10rem, 1fr) auto auto; gap: 0.6rem; align-items: center; padding: 0.5rem; border: 1px solid var(--line); border-radius: 8px; }
+.role-perms { display: flex; flex-wrap: wrap; gap: 0.2rem 0.9rem; }
+@media (max-width: 900px) { .role-row { grid-template-columns: 1fr; } }
+
+/* Notices: orange strip about Orthanc, blue box after saving settings */
+.banner { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; padding: 0.6rem 1.25rem; background: var(--danger-soft); color: var(--danger); font-weight: 600; }
+.notice { padding: 0.7rem 1rem; border-radius: 8px; background: var(--accent-soft); color: var(--ink); display: grid; gap: 0.3rem; }
+.login-notice { white-space: pre-line; padding: 0.6rem 0.8rem; border-radius: 6px; background: var(--warn-soft); color: var(--warn); }
+
+/* ---------- 15. Preview thumbnails ---------- */
+
+/* A dark "film" square: medical images have black backgrounds, so the picture
+   blends in and the box looks the same while loading and when there is no image. */
+.thumb {
+  width: 64px;
+  height: 64px;
+  border-radius: 6px;
+  background: #0b1016;
+  border: 1px solid var(--line);
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  color: #6f8296;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+.thumb.small { width: 44px; height: 44px; font-size: 0.7rem; }
+.thumb img { width: 100%; height: 100%; object-fit: contain; display: block; } /* whole image, never cropped */
+.thumb.loading { animation: thumb-pulse 1.3s ease-in-out infinite; }
+@keyframes thumb-pulse { 50% { opacity: 0.55; } }
+.thumb.empty { background: var(--panel-alt); color: var(--ink-soft); border-style: dashed; }
+
+td.thumb-cell { width: 1%; padding-right: 0; }
+.series-box td.thumb-cell { padding-top: 0.3rem; padding-bottom: 0.3rem; }
+
+/* ---------- 16. Branding: logo in the top bar / login page, and the Settings pickers ---------- */
+
+/* An uploaded logo sits on a light plate, so a dark logo stays readable on the dark top bar
+   (and on the dark theme of the login page). */
+.brand-logo {
+  height: 32px;
+  width: auto;
+  max-width: 220px;
+  object-fit: contain;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: #fff;
+}
+.login-card .brand-logo { height: 48px; max-width: 100%; }
+
+/* Settings > Branding: current image shown on a light and a dark background */
+.brand-picker { display: grid; gap: 0.6rem; padding: 0.8rem; border: 1px solid var(--line); border-radius: 8px; }
+.brand-picker-head { display: flex; align-items: center; gap: 0.6rem; }
+.brand-previews { display: flex; gap: 0.6rem; flex-wrap: wrap; }
+.swatch { display: grid; place-items: center; width: 150px; height: 68px; border-radius: 6px; border: 1px solid var(--line); overflow: hidden; }
+.swatch.light { background: #ffffff; }
+.swatch.dark { background: #101a24; }
+.swatch img { max-width: 90%; max-height: 52px; object-fit: contain; }
+.swatch.favicon { width: 68px; }
+.swatch.favicon img { width: 32px; height: 32px; }

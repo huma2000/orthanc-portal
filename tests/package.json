@@ -1,0 +1,6 @@
+{
+  "name": "orthanc-portal-tests",
+  "private": true,
+  "description": "Browser-side tests (jsdom). Run: npm install && ./ui_tests.sh",
+  "dependencies": { "jsdom": "^26.0.0" }
+}

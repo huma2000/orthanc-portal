@@ -1,0 +1,33 @@
+<!doctype html>
+<!--
+  index.html - the only HTML page of the portal (a single-page app).
+
+  Everything you see is built by /static/app.js into the #app element.
+
+  The title and the icon link below contain markers that the server fills in for every request
+  (see routes/branding.rs) with the window title and website icon an administrator
+  chose in Settings > Branding, so they are right from the first instant and even
+  without JavaScript.
+  There are NO external resources (fonts, CDNs, analytics) on purpose:
+  the portal must work on an intranet without internet access.
+  The Content-Security-Policy sent by the server also forbids inline
+  scripts and inline styles, so keep JS and CSS in their own files.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>{{TITLE}}</title>
+    <link rel="icon" href="{{FAVICON_URL}}" type="{{FAVICON_TYPE}}" />
+    <link rel="stylesheet" href="/static/app.css" />
+  </head>
+  <body>
+    <!-- The whole interface is rendered here by app.js -->
+    <div id="app"></div>
+    <!-- Small notifications (errors, confirmations) appear here -->
+    <div id="toasts" role="status" aria-live="polite"></div>
+    <noscript>This application needs JavaScript.</noscript>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

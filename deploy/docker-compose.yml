@@ -1,0 +1,77 @@
+# =====================================================================
+#  Complete stack: Orthanc (PACS) + Orthanc Portal + Cloudflare Tunnel
+#
+#  Usage (from this "deploy" folder):
+#     1. Edit orthanc.json  -> change the "portal" password (RegisteredUsers)
+#     2. Create a file named ".env" next to this one with:
+#           ORTHANC_PORTAL_PASSWORD=<same password as in orthanc.json>
+#           ADMIN_PASSWORD=<first portal administrator password, 10+ chars>
+#           TUNNEL_TOKEN=<token of your Cloudflare Tunnel>   (see README)
+#     3. docker compose up -d --build
+#     4. Intranet:  http://<this-server>:8080     Internet: your Cloudflare hostname
+#
+#  Network design
+#    * Orthanc's web port 8042 is NOT published: only the portal reaches it.
+#    * The portal listens on TWO ports:
+#        8080  intranet, full features   -> published to the host (LAN users)
+#        8081  remote, VIEW ONLY         -> NOT published; only the cloudflared
+#                                           container reaches it over the Docker network
+#      so whatever comes from the internet can only search and view studies.
+# =====================================================================
+
+services:
+  # ---- The PACS -------------------------------------------------------
+  orthanc:
+    # Official image that already includes the DICOMweb plugin (needed by Weasis).
+    # Pin a specific version tag in production instead of "latest".
+    image: jodogne/orthanc-plugins:latest
+    restart: unless-stopped
+    volumes:
+      - ./orthanc.json:/etc/orthanc/orthanc.json:ro   # configuration
+      - orthanc-db:/var/lib/orthanc/db                # images + index (BACK THIS UP)
+    ports:
+      # DICOM protocol (C-STORE from scanners/modalities). Remove this line if
+      # nothing sends images by DICOM. Keep it on the intranet only.
+      - "4242:4242"
+      # 8042 (HTTP) intentionally NOT published.
+
+  # ---- The portal (this project) --------------------------------------
+  portal:
+    build:
+      context: ..            # project root (Dockerfile + src + static)
+    restart: unless-stopped
+    depends_on:
+      - orthanc
+    environment:
+      # INITIAL values only: after the first start, change them from the web
+      # interface (sign in as admin > Settings). The saved values then win.
+      ORTHANC_URL: http://orthanc:8042          # "orthanc" = service name above
+      ORTHANC_USERNAME: portal                  # must match RegisteredUsers in orthanc.json
+      ORTHANC_PASSWORD: ${ORTHANC_PORTAL_PASSWORD}
+      ADMIN_USERNAME: admin
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      # The listeners keep their defaults inside the container (8080 intranet, 8081
+      # view-only). Do not move them in Settings while running in Docker: the
+      # published ports below are fixed.
+      # RESET_SETTINGS: "true"                  # recovery: forget the settings saved from the web
+    volumes:
+      - portal-data:/data                       # users + audit log (BACK THIS UP)
+    ports:
+      - "8080:8080"                             # intranet access: http://<server>:8080
+      # 8081 is deliberately NOT published: only cloudflared (same Docker network) uses it.
+
+  # ---- Cloudflare Tunnel (internet access, no open inbound port) --------
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    # In the Cloudflare Zero Trust dashboard the tunnel's public hostname must point
+    # to  http://portal:8081  (the VIEW-ONLY port, NOT 8080). See README.
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
+    depends_on:
+      - portal
+
+volumes:
+  orthanc-db:
+  portal-data:

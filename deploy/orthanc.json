@@ -1,0 +1,69 @@
+{
+  // Orthanc accepts "//" comments in its configuration files (this is not strict JSON).
+  // The portal requires Orthanc 1.12.5 or newer (recent releases recommended).
+
+  // Name shown in Orthanc's own interface and in DICOM associations.
+  "Name": "Orthanc PACS",
+
+  // Where images and the index are stored (mounted as a Docker volume).
+  "StorageDirectory": "/var/lib/orthanc/db",
+  "IndexDirectory": "/var/lib/orthanc/db",
+
+  // ----- HTTP / REST API (used by the portal) -----
+  "HttpPort": 8042,
+  // Allow connections from other containers. Port 8042 is NOT published by
+  // docker-compose, so only the portal can reach it.
+  "RemoteAccessAllowed": true,
+  // The portal logs in with this account. CHANGE THE PASSWORD, and use the same
+  // value as ORTHANC_PORTAL_PASSWORD in the .env file next to docker-compose.yml.
+  "AuthenticationEnabled": true,
+  "RegisteredUsers": {
+    "portal": "change-this-password"
+  },
+
+  // ----- DICOM protocol (scanners / modalities send images here) -----
+  "DicomAet": "ORTHANC",
+  "DicomPort": 4242,
+
+  // ----- Remote DICOM nodes the portal can SEND studies to ("Send to..." button) -----
+  // Administrators manage them from the portal's "DICOM nodes" tab. For those
+  // changes to SURVIVE an Orthanc restart, Orthanc must keep them in its database:
+  "DicomModalitiesInDatabase": true,
+  // You can also declare nodes here (an alias plus the AE title, address and DICOM
+  // port of the other system). The other side must also know Orthanc's AET
+  // ("ORTHANC") and address. Example, uncomment and adapt:
+  "DicomModalities": {
+    // "radiology-ws": {
+    //   "AET": "RADWS01",
+    //   "Host": "192.168.1.50",
+    //   "Port": 104,
+    //   "AllowEcho": true,
+    //   "AllowStore": true
+    // }
+  },
+
+  // ----- Plugins -----
+  // Folders where the official image keeps its plugins (DICOMweb and OHIF are among them).
+  "Plugins": [
+    "/usr/share/orthanc/plugins",
+    "/usr/local/share/orthanc/plugins"
+  ],
+
+  // ----- DICOMweb (required for Weasis AND for the OHIF browser viewer) -----
+  // The portal exposes this plugin to the viewers through its authenticated,
+  // read-only /dicom-web proxy; Orthanc itself is never exposed directly.
+  "DicomWeb": {
+    "Enable": true,
+    "Root": "/dicom-web/",
+    "EnableWado": true,
+    "WadoRoot": "/wado"
+  },
+
+  // ----- OHIF web viewer -----
+  // IMPORTANT: use the "dicom-web" data source. The default ("dicom-json") makes OHIF
+  // call Orthanc's own REST routes (/studies/...), which the portal deliberately
+  // does NOT relay. With "dicom-web" OHIF only uses /dicom-web and /wado.
+  "OHIF": {
+    "DataSource": "dicom-web"
+  }
+}

@@ -1,0 +1,25 @@
+# =====================================================================
+#  cloudflared configuration for a LOCALLY-MANAGED tunnel
+#  (use this if you run cloudflared directly on the server instead of the
+#   token-based container from docker-compose.yml).
+#
+#  One-time setup on the server:
+#     cloudflared tunnel login
+#     cloudflared tunnel create orthanc-portal          # prints the tunnel UUID
+#     cloudflared tunnel route dns orthanc-portal pacs.example.com
+#  Then save this file as ~/.cloudflared/config.yml (or /etc/cloudflared/config.yml),
+#  fill in the UUID and run:
+#     cloudflared tunnel run orthanc-portal
+#  (or install it as a service: cloudflared service install)
+# =====================================================================
+
+tunnel: 00000000-0000-0000-0000-000000000000        # <- your tunnel UUID
+credentials-file: /etc/cloudflared/00000000-0000-0000-0000-000000000000.json
+
+ingress:
+  # Public hostname -> the portal's VIEW-ONLY port (8081) on this same machine.
+  # Do NOT use 8080 here: that is the full-featured intranet port.
+  - hostname: pacs.example.com
+    service: http://localhost:8081
+  # Mandatory last rule: anything else gets a 404.
+  - service: http_status:404

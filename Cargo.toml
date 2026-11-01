@@ -1,0 +1,47 @@
+[package]
+name = "orthanc-portal"
+version = "0.1.0"
+edition = "2021"
+description = "Web portal (intranet + Cloudflare Tunnel) for an Orthanc PACS with role-based permissions"
+
+[dependencies]
+# ---- Web framework -------------------------------------------------------
+# axum: HTTP routing / extractors.  tokio: async runtime.
+# http-body-util: lets the upload route enforce a size limit that can be changed
+# at runtime from the Settings screen.
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
+http-body-util = "0.1"
+
+# ---- Talking to Orthanc --------------------------------------------------
+# reqwest: HTTP client used to call Orthanc's REST API.
+#   * "stream"    -> lets us stream uploads/downloads without buffering them in RAM
+#   * "rustls-tls"-> HTTPS support without depending on OpenSSL
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+futures-util = "0.3"
+
+# ---- Data handling -------------------------------------------------------
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+percent-encoding = "2"   # builds the weasis:// URI
+
+# ---- Users, passwords, sessions -------------------------------------------
+# rusqlite (bundled): embedded SQLite database, no external DB server needed.
+# argon2: modern password hashing.   rand: random session tokens.
+rusqlite = { version = "0.40", features = ["bundled"] }
+argon2 = "0.5"
+rand = "0.8"
+
+# ---- Misc ----------------------------------------------------------------
+thiserror = "2"          # ergonomic error enum
+anyhow = "1"             # error handling in main()/config only
+tracing = "0.1"          # logging
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dotenvy = "0.15"         # loads a local .env file (optional)
+
+[profile.release]
+# Smaller, faster binary for production.
+opt-level = 3
+lto = "thin"
+codegen-units = 1   # slower to compile, produces a smaller and faster program
+strip = true
