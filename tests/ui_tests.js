@@ -119,6 +119,42 @@ async function newLink(admin, body) {
   admin.submit(admin.$("form.settings-form")); await sleep(1800);
   check("saving the public address works (the server keeps it)", (await (await admin.call("GET", "/api/admin/settings")).json()).settings.share_public_url === "https://pacs.example.com");
 
+  console.log("--- Orthanc connection: with or without an account");
+  // How the fake Orthanc protects itself can be switched while the tests run (see mock_orthanc.py).
+  const mockAuth = (mode) => fetch("http://127.0.0.1:18042/__mock/auth", { method: "POST", body: JSON.stringify({ mode }) });
+  const savedSettings = async () => (await (await admin.call("GET", "/api/admin/settings")).json()).settings;
+  const orthancBits = () => {
+    const sec = admin.section("Orthanc connection");
+    return { sec, mode: sec.querySelector("#orthanc-mode"), user: admin.labelInput(sec, "Orthanc user name"), pass: admin.labelInput(sec, "Orthanc password"),
+      test: admin.button(sec, "Test connection"), result: sec.querySelector(".test-result") };
+  };
+  const setMode = (el, value) => { el.value = value; el.dispatchEvent(new admin.window.Event("change", { bubbles: true })); };
+  let o = orthancBits();
+  check("the section asks how Orthanc lets the portal in, and shows the saved account", !!o.mode && o.mode.value === "account" && o.user.value === "orthanc" && !o.user.closest(".setting").hidden);
+  setMode(o.mode, "anonymous");
+  check("choosing 'without an account' hides the user name and password", o.user.closest(".setting").hidden && o.pass.closest(".setting").hidden);
+  admin.click(o.test); await until(() => o.result.textContent.length > 12 && !/Testing/.test(o.result.textContent));
+  check("Test connection without an account against an Orthanc that wants one: refused, with advice", /bad/.test(o.result.className) && /connect without an account/.test(o.result.textContent) && /Enter the account/.test(o.result.textContent), o.result.textContent);
+  await mockAuth("none");
+  admin.click(o.test); await until(() => /Connected/.test(o.result.textContent));
+  check("...and against an Orthanc that has no users: connected, saying so", /ok/.test(o.result.className) && /without an account/.test(o.result.textContent), o.result.textContent);
+  check("...testing changed nothing on the server", (await savedSettings()).orthanc_username === "orthanc");
+  admin.submit(admin.$("form.settings-form")); await sleep(1800);
+  let saved = await savedSettings();
+  check("saving 'without an account' stores an empty user name and no password", saved.orthanc_username === "" && saved.orthanc_password_set === false, JSON.stringify([saved.orthanc_username, saved.orthanc_password_set]));
+  o = orthancBits();
+  check("the form comes back in 'without an account' mode, account fields hidden", o.mode.value === "anonymous" && o.user.closest(".setting").hidden);
+  setMode(o.mode, "account");
+  admin.submit(admin.$("form.settings-form")); await sleep(600);
+  check("'with an account' and no user name is not saved: the user is told", /Enter the Orthanc user name/.test(admin.$$(".toast.error").map((e) => e.textContent).join()) && (await savedSettings()).orthanc_username === "");
+  o = orthancBits(); setMode(o.mode, "account");
+  o.user.value = "orthanc"; o.pass.value = "s3cr3tpw";
+  await mockAuth("basic");
+  admin.submit(admin.$("form.settings-form")); await sleep(1800);
+  saved = await savedSettings();
+  check("saving an account again keeps the user name and the (hidden) password", saved.orthanc_username === "orthanc" && saved.orthanc_password_set === true);
+  check("...and the portal works against an Orthanc that wants that account", (await admin.call("GET", "/api/studies")).status === 200);
+
   console.log("--- sharing: the dialog (a staff member invites somebody)");
   await admin.tab("Studies");
   admin.click(admin.button(admin.$("tr.study"), "Share..."));

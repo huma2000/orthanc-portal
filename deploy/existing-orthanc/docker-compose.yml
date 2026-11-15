@@ -1,0 +1,125 @@
+# =====================================================================
+#  Orthanc Portal + Cloudflare Tunnel - for an Orthanc server you ALREADY have
+#
+#  Starts the portal and the Cloudflare Tunnel, so the intranet (staff) and the
+#  internet (invitation links) both work out of the box. It does NOT start
+#  Orthanc. (Want Orthanc as well, preconfigured? Use ../docker-compose.yml.)
+#
+#  Usage (from this "existing-orthanc" folder):
+#     1. cp .env.example .env     and edit .env   (ORTHANC_URL and TUNNEL_TOKEN)
+#     2. docker compose up -d --build
+#     3. Intranet:  http://<this-server>:8080
+#        Sign in as "admin". If you left ADMIN_PASSWORD empty, the generated
+#        password is printed once:   docker compose logs portal
+#     4. Cloudflare Zero Trust > Networks > Tunnels > your tunnel > Public hostname:
+#        add your hostname (e.g. pacs.example.com) with service  HTTP  portal:8081
+#        (the invitation-links port, NOT 8080). See README, section 10.
+#     5. Portal > Settings > Share links: type that public address
+#        (https://pacs.example.com). Then use "Share..." on a study to invite somebody
+#        outside: they get a link and a password for THAT study.
+#     6. Settings > Orthanc connection > "Test connection" tells you at once whether
+#        Orthanc accepts the portal (and how to fix it if it does not).
+#
+#  WITH OR WITHOUT AN ORTHANC ACCOUNT
+#     * Orthanc has users                  -> set ORTHANC_USERNAME and ORTHANC_PASSWORD.
+#     * Orthanc has NO users and only a    -> leave both EMPTY. The portal then sends no
+#       list of allowed clients / IPs         credentials; Orthanc must simply accept the
+#                                             machine the portal runs on (see below).
+#     You can change this later from the web interface (Settings > Orthanc
+#     connection); the values in .env are only used the first time the portal starts.
+#
+#  WHERE IS YOUR ORTHANC? set ORTHANC_URL accordingly
+#     A. On another computer of the network   ORTHANC_URL=http://192.168.1.50:8042
+#        Orthanc sees the connection coming from THIS server's LAN address
+#        (Docker translates the container's address). Put that address in Orthanc's
+#        allowed list.
+#     B. On THIS computer (a service, or a   ORTHANC_URL=http://host.docker.internal:8042
+#        container with port 8042 published)
+#        Orthanc sees an address of Docker's private network (172.x.x.x), NOT
+#        127.0.0.1: allow Docker's range (for example 172.16.0.0/12), or use option D.
+#     C. A container of ANOTHER compose project on this computer
+#        Join its Docker network: uncomment the "networks" lines below (the portal must
+#        stay on "default" too, so the tunnel can reach it), put the network's name
+#        (docker network ls) and use ORTHANC_URL=http://<its service>:8042
+#        Orthanc sees the portal container's address on that network (172.x.x.x).
+#     D. You need Orthanc to see the real address of this server (or 127.0.0.1)
+#        Run BOTH services on the host's own network: delete the "ports:" block of the
+#        portal, add "network_mode: host" to the portal AND to cloudflared, use
+#        ORTHANC_URL=http://127.0.0.1:8042 and point the tunnel's public hostname at
+#        http://localhost:8081 (Linux only. The portal then listens directly on the
+#        ports of Settings > Network).
+#
+#  Network design
+#    * The portal listens on TWO ports:
+#        8080  intranet, staff portal      -> published to the LAN (INTRANET_BIND)
+#        8081  internet, INVITATIONS ONLY  -> NOT published; only the cloudflared
+#                                             container reaches it over the Docker network
+#      Whatever comes from the internet can only open the study an invitation link +
+#      password was created for (no accounts, no search, nothing else).
+#    * Never forward port 8080 to the internet.
+#    * Intranet only? Remove the "cloudflared" service (and TUNNEL_TOKEN) below.
+# =====================================================================
+
+services:
+  # ---- The portal (this project) --------------------------------------
+  portal:
+    build:
+      context: ../..           # project root (Dockerfile + src + static)
+      dockerfile: Dockerfile
+    image: orthanc-portal:latest
+    restart: unless-stopped
+    environment:
+      # INITIAL values only: after the first start, change them from the web
+      # interface (sign in as admin > Settings). The saved values then win.
+      # To go back to the values of this file once: RESET_SETTINGS: "true" (one start).
+      ORTHANC_URL: ${ORTHANC_URL:?Set ORTHANC_URL in the .env file, e.g. http://192.168.1.50:8042}
+      # Both EMPTY = connect to Orthanc WITHOUT an account (Orthanc trusts a list of clients/IPs).
+      ORTHANC_USERNAME: ${ORTHANC_USERNAME:-}
+      ORTHANC_PASSWORD: ${ORTHANC_PASSWORD:-}
+      ADMIN_USERNAME: admin
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}       # empty = a random one is printed in the log
+      # Inside the container the listeners keep their defaults (8080 intranet, 8081 share
+      # links only). Do not move them in Settings while running in Docker: the published
+      # port below is fixed. Change INTRANET_PORT in .env instead.
+    volumes:
+      - portal-data:/data                       # users, audit log and settings (BACK THIS UP)
+    ports:
+      - "${INTRANET_BIND:-0.0.0.0}:${INTRANET_PORT:-8080}:8080"     # staff portal (intranet)
+      # 8081 is deliberately NOT published: only cloudflared (same Docker network) uses it.
+    # Lets "host.docker.internal" mean this computer on Linux too (option B above).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # Hardening. The only thing the portal writes is its database in /data.
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Option C: also join the network of the compose project that runs Orthanc.
+    # networks:
+    #   - default
+    #   - orthanc
+
+  # ---- Cloudflare Tunnel (internet access, no open inbound port) --------
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    # In the Cloudflare Zero Trust dashboard the tunnel's public hostname must point
+    # to  http://portal:8081  (the invitation-links port, NOT 8080). See README.
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?Set TUNNEL_TOKEN in the .env file (Cloudflare Zero Trust > Networks > Tunnels). For intranet only, remove the cloudflared service from this file}
+    depends_on:
+      - portal
+
+# Option C (continued): the name of that existing Docker network.
+# networks:
+#   orthanc:
+#     name: orthanc_default
+#     external: true
+
+volumes:
+  portal-data:

@@ -1434,7 +1434,7 @@ const SETTINGS_FIELDS = {
   ],
   orthanc: [
     { key: "orthanc_url", label: "Orthanc address", placeholder: "http://orthanc:8042", hint: "REST API of Orthanc, as seen from the machine running the portal." },
-    { key: "orthanc_username", label: "Orthanc user name", hint: "Leave empty if Orthanc has no authentication." },
+    { key: "orthanc_username", label: "Orthanc user name", hint: "The account the portal uses in Orthanc (one of the users in Orthanc's RegisteredUsers)." },
   ],
   network: [
     { key: "bind_addr", label: "Intranet address (the whole portal)", placeholder: "0.0.0.0:8080", hint: "IP:PORT. 0.0.0.0 = every network card." },
@@ -1588,9 +1588,30 @@ function buildSettingsView() {
     const section = (title, intro, ...children) => h("section", { class: "panel settings-section" },
       h("h2", null, title), intro ? h("p", { class: "muted" }, intro) : null, h("div", { class: "settings-grid" }, children));
 
-    // ---- Orthanc connection: password is write-only, plus a "Test connection" button
+    // ---- Orthanc connection. Orthanc can be protected by an account (user name + password) OR
+    // have no users at all and only accept a list of allowed clients / IP addresses. The
+    // selector makes that choice explicit; "without an account" means the portal sends no
+    // credentials, which the server stores as an empty user name (and no password).
+    const [urlField, userField] = SETTINGS_FIELDS.orthanc.map(field);
+    const modeSelect = h("select", { id: "orthanc-mode" },
+      h("option", { value: "account", selected: Boolean(s.orthanc_username) }, "With an account (user name and password)"),
+      h("option", { value: "anonymous", selected: !s.orthanc_username }, "Without an account (Orthanc only accepts a list of allowed clients / IP addresses)"));
+    const modeField = h("div", { class: "setting wide" },
+      h("label", null, "How does Orthanc let the portal in?", modeSelect),
+      h("p", { class: "hint" }, "Choose \"without an account\" when Orthanc has no users and only accepts certain computers. Then make sure Orthanc's allowed list includes the address the portal connects from. In Docker that is the server's address, or an address of Docker's private network (172.x.x.x), not 127.0.0.1."));
+
+    // The password is write-only: the browser never receives it.
     const password = h("input", { type: "password", autocomplete: "new-password", placeholder: s.orthanc_password_set ? "A password is saved. Leave empty to keep it." : "No password saved" });
     const clearPassword = h("input", { type: "checkbox" });
+    const passwordField = h("div", { class: "setting" },
+      h("label", null, "Orthanc password", password),
+      h("label", { class: "check" }, clearPassword, "Remove the saved password"));
+    const withoutAccount = () => modeSelect.value === "anonymous";
+    /** The user name to use or test: always empty when the portal connects without an account. */
+    const accountName = () => (withoutAccount() ? "" : inputs.orthanc_username.value);
+    const showAccountFields = () => { userField.hidden = passwordField.hidden = withoutAccount(); };
+    modeSelect.addEventListener("change", showAccountFields);
+    showAccountFields();
     const testBox = h("div", { class: "test-result", hidden: true, role: "status" });
     const testButton = h("button", { class: "btn", type: "button" }, "Test connection");
     testButton.addEventListener("click", async () => {
@@ -1600,7 +1621,8 @@ function buildSettingsView() {
       testBox.textContent = "Testing...";
       try {
         const r = await api("POST", "/api/admin/orthanc/test", {
-          url: inputs.orthanc_url.value, username: inputs.orthanc_username.value, password: password.value,
+          // Without an account the user name is sent empty; the server then ignores any saved password.
+          url: inputs.orthanc_url.value, username: accountName(), password: withoutAccount() ? "" : password.value,
         });
         testBox.className = `test-result ${r.ok ? "ok" : "bad"}`;
         const details = r.version
@@ -1636,6 +1658,10 @@ function buildSettingsView() {
       class: "settings-form",
       onsubmit: async (event) => {
         event.preventDefault();
+        if (!withoutAccount() && !inputs.orthanc_username.value.trim()) {
+          toast("Enter the Orthanc user name, or choose \"Without an account\".", "error");
+          return;
+        }
         save.disabled = true;
         // Collect the values of every control into the object the server expects.
         const body = {};
@@ -1643,8 +1669,14 @@ function buildSettingsView() {
           body[key] = input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value;
         }
         body.roles = rolesEditor.get();
-        if (password.value) body.orthanc_password = password.value;
-        if (clearPassword.checked) body.clear_orthanc_password = true;
+        if (withoutAccount()) {
+          // No account: no user name and no stored password (the server enforces this too).
+          body.orthanc_username = "";
+          body.clear_orthanc_password = true;
+        } else {
+          if (password.value) body.orthanc_password = password.value;
+          if (clearPassword.checked) body.clear_orthanc_password = true;
+        }
         try {
           doc = await api("PUT", "/api/admin/settings", body);
           await refreshBrand();
@@ -1674,10 +1706,7 @@ function buildSettingsView() {
         buildBrandImagePicker("logo", "Logo", "PNG, JPEG, WebP, GIF or SVG, up to 1 MB. Shown in the top bar (about 32 px high, on a light plate so any logo is readable) and on the login page.", "image/png,image/jpeg,image/webp,image/gif,image/svg+xml"),
         buildBrandImagePicker("favicon", "Website icon", "PNG, ICO, SVG, JPEG, WebP or GIF, up to 256 KB. Square, at least 64 x 64 pixels. Shown in the browser tab and in bookmarks.", "image/png,image/x-icon,image/vnd.microsoft.icon,image/svg+xml,image/jpeg,image/webp,image/gif")),
       section("Orthanc connection", "The PACS this portal works with. Changes apply immediately, without restarting.",
-        SETTINGS_FIELDS.orthanc.map(field),
-        h("div", { class: "setting" },
-          h("label", null, "Orthanc password", password),
-          h("label", { class: "check" }, clearPassword, "Remove the saved password")),
+        urlField, modeField, userField, passwordField,
         h("div", { class: "setting wide" }, testButton, testBox)),
       section("Network", "Two listeners: the intranet one (the whole portal, for staff) and the internet one (ONLY invitation links, for the Cloudflare Tunnel). Changing an address re-opens the listener right away; if the new address cannot be opened, nothing is changed. Running in Docker? Leave the two addresses as they are: Docker publishes fixed ports.",
         SETTINGS_FIELDS.network.map(field), listenerInfo),

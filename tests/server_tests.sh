@@ -412,6 +412,78 @@ has "API answers are no-store" "$(curl -sI -H "Cookie: portal_session=$A" $F/api
 has "HSTS only over HTTPS" "$(curl -sI -H 'X-Forwarded-Proto: https' $F/)" "strict-transport-security"
 ok "database file is private (600)" "$(stat -c %a $WORK/portal.db)" "600"
 
+echo "== Orthanc with and without an account"
+# Orthanc may be protected by users (HTTP Basic) or have NO users and only accept a list of allowed
+# clients / IPs. The portal must work with both, tell the administrator which one it is using, and
+# explain a refusal in the words that fit that setup. The fake Orthanc switches between the setups.
+otest() { body $F $A /api/admin/orthanc/test -X POST -H "$J" -d "${1:-{\}}"; }
+sview() { body $F $A /api/admin/settings | py "$1"; }
+sent()  { python3 -c "import json;L=[json.loads(l) for l in open('$WORK/auth.log')];print(len(L)>0, sum(1 for r in L if r['authorization']), sum(1 for r in L if (r['authorization'] or '').startswith('Basic ')))"; }
+
+T=$(otest)
+has "with an account: the test says which one it used" "$(echo "$T" | py "d['message']")" "with the account 'orthanc'"
+ok "...and reports it" "$(echo "$T" | py "d['account']")" "orthanc"
+ok "the saved account has a password" "$(sview "d['settings']['orthanc_password_set']")" "True"
+
+# --- the portal is switched to "no account" while Orthanc still wants one
+ok "switching to 'no account' is accepted" "$(put $A '{"orthanc_username":"","clear_orthanc_password":true}' | tail -1)" "200"
+ok "...the user name is empty" "$(sview "repr(d['settings']['orthanc_username'])")" "''"
+ok "...and no password is kept" "$(sview "d['settings']['orthanc_password_set']")" "False"
+ok "Orthanc wants an account and the portal has none: 502" "$(code $F $V GET /api/studies)" "502"
+has "...the message says the portal connects without an account" "$(body $F $V /api/studies)" "set to connect without an account"
+T=$(otest)
+ok "Test connection: refused" "$(echo "$T" | py "d['ok']")" "False"
+has "...and advises entering the account" "$(echo "$T" | py "d['message']")" "Enter the account"
+
+# --- an Orthanc without users, which accepts this machine
+mock_auth none; : > "$WORK/auth.log"
+ok "Orthanc without users: the study list works" "$(code $F $V GET /api/studies)" "200"
+ok "...a study's series" "$(code $F $V GET /api/studies/$SID/series)" "200"
+ok "...a ZIP download" "$(code $F $A GET /api/studies/$SID/download)" "200"
+ok "...a thumbnail" "$(code $F $V GET /api/studies/$SID/thumbnail)" "200"
+ok "...the viewer proxy (DICOMweb)" "$(code $F $V GET /dicom-web/studies)" "200"
+ok "...sending to a DICOM node" "$(code $F $S POST /api/studies/$SID/send -H "$J" -d '{"target":"ris"}')" "200"
+ok "no Authorization header is ever sent without an account" "$(sent)" "True 0 0"
+T=$(otest)
+ok "Test connection works without an account" "$(echo "$T" | py "str(d['ok'])+' '+str(d['account'])")" "True None"
+has "...and says so" "$(echo "$T" | py "d['message']")" "without an account"
+
+# --- an Orthanc without users that does NOT accept this machine
+mock_auth deny
+ok "machine not on Orthanc's allowed list: 502" "$(code $F $V GET /api/studies)" "502"
+has "...the message points at the allowed list" "$(body $F $V /api/studies)" "allowed"
+has "...and at the address used from Docker" "$(body $F $V /api/studies)" "Docker"
+ok "...the viewer proxy refuses too (502)" "$(code $F $V GET /dicom-web/studies)" "502"
+T=$(otest)
+has "Test connection: Orthanc refuses this machine" "$(echo "$T" | py "d['message']")" "refuses this machine"
+ok "...not ok" "$(echo "$T" | py "d['ok']")" "False"
+
+# --- an account is configured: credentials are sent, whatever Orthanc does with them
+put $A '{"orthanc_username":"orthanc","orthanc_password":"s3cr3tpw"}' > /dev/null
+T=$(otest)
+has "account configured but Orthanc still forbids: the message names the account" "$(echo "$T" | py "d['message']")" "does not allow the account 'orthanc'"
+mock_auth basic; : > "$WORK/auth.log"
+ok "Orthanc with users and the right account: works" "$(code $F $V GET /api/studies)" "200"
+ok "...every request carried the account's credentials" "$(sent | awk '{print ($1=="True" && $2==$3 && $2>0) ? "yes" : "no"}')" "yes"
+mock_auth none; : > "$WORK/auth.log"
+ok "an account is sent even to an Orthanc that ignores it" "$(code $F $V GET /api/studies)/$(sent | awk '{print ($1=="True" && $2==$3) ? "sent" : "missing"}')" "200/sent"
+mock_auth basic
+put $A '{"orthanc_password":"wrong-password"}' > /dev/null
+T=$(otest)
+has "a wrong password is reported as such" "$(echo "$T" | py "d['message']")" "refused the account 'orthanc'"
+ok "...the portal then answers 502" "$(code $F $V GET /api/studies)" "502"
+put $A '{"orthanc_password":"s3cr3tpw"}' > /dev/null
+ok "the right password restores service" "$(code $F $V GET /api/studies)" "200"
+
+# --- the rules of the settings themselves
+put $A '{"orthanc_username":""}' > /dev/null
+ok "an empty user name forgets the password too (even without asking)" "$(sview "d['settings']['orthanc_password_set']")" "False"
+T=$(otest '{"username":"orthanc","password":"s3cr3tpw"}')
+ok "Test connection can try an account that is not saved yet" "$(echo "$T" | py "str(d['ok'])+' '+d['account']")" "True orthanc"
+ok "...without changing the saved settings" "$(sview "repr(d['settings']['orthanc_username'])")" "''"
+put $A '{"orthanc_username":"orthanc","orthanc_password":"s3cr3tpw"}' > /dev/null
+ok "the account can be set again" "$(code $F $V GET /api/studies)" "200"
+
 echo "== administrators"
 mkuser admin2 AdminTwoPass123 '"read","visualize","upload","download","send","admin"'
 ID1=$(body $F $A /api/admin/users | py "[u['id'] for u in d['users'] if u['username']=='admin'][0]")
@@ -421,6 +493,18 @@ B=$(login $F admin2 AdminTwoPass123)
   curl -s -o /dev/null -w "%{http_code}" -X PUT -H "Cookie: portal_session=$B" -H "$H" -H "$J" -d '{"permissions":["read"]}' $F/api/admin/users/$ID1 > c2.out & wait )
 ok "two administrators demoting each other: exactly one succeeds" "$(printf '%s\n%s\n' "$(cat c1.out)" "$(cat c2.out)" | grep -c '^200$')" "1"
 ok "...and one active administrator always remains" "$(python3 -c "import sqlite3;print(sqlite3.connect('$WORK/portal.db').execute(\"select count(*) from users where active=1 and permissions like '%admin%'\").fetchone()[0])")" "1"
+
+echo "== first start without an account"
+# First start without any account, as the compose file of deploy/existing-orthanc does it
+# (it passes ORTHANC_USERNAME and ORTHANC_PASSWORD as EMPTY values, and Orthanc has no users)
+export MOCK_AUTH=none
+stack_fresh ORTHANC_USERNAME= ORTHANC_PASSWORD=
+unset MOCK_AUTH
+cd "$WORK"
+A=$(login $F admin SuperSecret123)
+ok "empty ORTHANC_USERNAME / ORTHANC_PASSWORD start the portal without an account" "$(sview "repr(d['settings']['orthanc_username'])+str(d['settings']['orthanc_password_set'])")" "''False"
+ok "...and it works against an Orthanc that has no users" "$(code $F $A GET /api/studies)" "200"
+has "...Test connection says it is connected without an account" "$(otest | py "d['message']")" "Connected to Orthanc 1.12.10 without an account"
 
 echo; echo "RESULT: $PASS passed, $FAIL failed"
 stack_stop

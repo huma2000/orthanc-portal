@@ -130,9 +130,12 @@ pub struct Settings {
     // ---- Orthanc connection -----------------------------------------------
     /// REST API of Orthanc, no trailing slash (e.g. `http://orthanc:8042`).
     pub orthanc_url: String,
-    /// Orthanc account used by the portal. Empty = no authentication.
+    /// Orthanc account used by the portal. EMPTY = the portal connects WITHOUT an account
+    /// (no `Authorization` header), for an Orthanc that has no users and only accepts a
+    /// list of allowed clients / IP addresses.
     pub orthanc_username: String,
-    /// Its password. Never sent to the browser (see [`Settings::to_view`]).
+    /// Its password. Never sent to the browser (see [`Settings::to_view`]). Always empty
+    /// when there is no account (see [`Settings::normalise`]).
     pub orthanc_password: Secret,
 
     // ---- Network ------------------------------------------------------------
@@ -303,6 +306,10 @@ impl Settings {
         self.login_notice = self.login_notice.trim().to_string();
         self.orthanc_url = self.orthanc_url.trim().trim_end_matches('/').to_string();
         self.orthanc_username = self.orthanc_username.trim().to_string();
+        // No account means no password: never keep a hidden, unused secret around.
+        if self.orthanc_username.is_empty() {
+            self.orthanc_password = Secret::default();
+        }
         self.bind_addr = self.bind_addr.trim().to_string();
         self.remote_bind_addr = self.remote_bind_addr.trim().to_string();
         self.public_base_url = self.public_base_url.trim().trim_end_matches('/').to_string();

@@ -4,6 +4,16 @@ It answers just enough of Orthanc's REST API, the DICOMweb plugin and the OHIF p
 and records what it receives in $MOCK_LOG_DIR/*.log so tests can check what the portal asked.
 
     python3 mock_orthanc.py [port]          (default 18042; user "orthanc", password "s3cr3tpw")
+
+How it protects its REST API can be changed while it runs (POST /__mock/auth {"mode": ...}) or at
+start-up (environment variable MOCK_AUTH). The three real-world setups the portal must cope with:
+
+    basic   Orthanc has users: HTTP Basic credentials are required (401 without them)   [default]
+    none    Orthanc has NO users and accepts this client (an "allowed clients / IPs" list that includes us)
+    deny    Orthanc has NO users and this client is NOT on the allowed list (403 for everything)
+
+Every request's Authorization header is recorded in auth.log, so tests can prove that the portal
+sends credentials only when it was told to.
 """
 import base64, json, os, re, sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -31,6 +41,7 @@ MODALITIES = {"ris": {"AET": "RIS", "Host": "10.0.0.20", "Port": 104, "Manufactu
               "archive-only": {"AET": "ARC", "Host": "10.0.0.21", "Port": 104, "AllowStore": False},
               "down": {"AET": "DOWN", "Host": "10.9.9.9", "Port": 104, "AllowStore": True, "AllowEcho": True}}
 job_polls = {"n": 0}
+MODE = {"auth": os.environ.get("MOCK_AUTH", "basic")}   # see the docstring
 
 
 def log(name, obj):
@@ -48,13 +59,22 @@ class H(BaseHTTPRequestHandler):
         self.end_headers(); self.wfile.write(body)
 
     def _json(self, obj, code=200): self._send(json.dumps(obj).encode(), "application/json", code)
-    def _auth_ok(self): return self.headers.get("Authorization") == "Basic " + base64.b64encode(b"orthanc:s3cr3tpw").decode()
+    def _gate(self):
+        """Decides whether this request may pass, like Orthanc's authentication / allowed-clients setup.
+        Answers 401 or 403 itself and returns False when it may not."""
+        auth = self.headers.get("Authorization")
+        log("auth", {"method": self.command, "path": self.path.split("?")[0], "authorization": auth})
+        if MODE["auth"] == "none": return True
+        if MODE["auth"] == "deny":
+            self._json({"error": "forbidden"}, 403); return False
+        if auth == "Basic " + base64.b64encode(b"orthanc:s3cr3tpw").decode(): return True
+        self._json({"error": "unauthorized"}, 401); return False
     def _body(self):
         n = int(self.headers.get("Content-Length") or 0)
         return self.rfile.read(n) if n else b""   # always consumed BEFORE answering, like a real server
 
     def do_GET(self):
-        if not self._auth_ok(): return self._json({"error": "unauthorized"}, 401)
+        if not self._gate(): return
         p = self.path.split("?")[0]
         if p == "/system": return self._json({"Version": VERSION, "Capabilities": ["HasExtendedFind", "HasExtendedChanges"]})
         if p == "/plugins": return self._json(["dicom-web", "ohif", "explorer.html"])
@@ -90,7 +110,9 @@ class H(BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = self._body()
-        if not self._auth_ok(): return self._json({"error": "unauthorized"}, 401)
+        if self.path == "/__mock/auth":   # test control, not part of Orthanc: switches the protection mode
+            MODE["auth"] = json.loads(body)["mode"]; return self._json({"mode": MODE["auth"]})
+        if not self._gate(): return
         m = re.match(r"^/modalities/([^/]+)/echo$", self.path)
         if m:
             alias = unquote(m.group(1))
@@ -109,7 +131,7 @@ class H(BaseHTTPRequestHandler):
 
     def do_PUT(self):
         raw = self._body()
-        if not self._auth_ok(): return self._json({"error": "unauthorized"}, 401)
+        if not self._gate(): return
         m = re.match(r"^/modalities/([^/]+)$", self.path)
         if not m: return self._json({"error": "nf"}, 404)
         alias = unquote(m.group(1)); body = json.loads(raw or b"{}"); log("modput", {"alias": alias, "body": body})
@@ -117,7 +139,7 @@ class H(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         self._body()
-        if not self._auth_ok(): return self._json({"error": "unauthorized"}, 401)
+        if not self._gate(): return
         m = re.match(r"^/modalities/([^/]+)$", self.path)
         if not m or unquote(m.group(1)) not in MODALITIES: return self._json({"error": "nf"}, 404)
         del MODALITIES[unquote(m.group(1))]; return self._json({})

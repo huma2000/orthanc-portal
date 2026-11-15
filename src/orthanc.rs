@@ -17,9 +17,22 @@
 //! | Feature detection       | `GET /system`, `GET /plugins`                         |
 //! | Manage DICOM nodes (admin) | `PUT/DELETE /modalities/{id}`, `POST /modalities/{id}/echo` |
 //!
-//! The portal is the ONLY thing that talks to Orthanc, using the credentials
-//! from the configuration. Orthanc itself never has to be exposed to the
-//! intranet or the internet.
+//! The portal is the ONLY thing that talks to Orthanc. Orthanc itself never has
+//! to be exposed to the intranet or the internet.
+//!
+//! ## With or without an account
+//!
+//! Orthanc can protect its REST API in two common ways, and the portal supports both:
+//!
+//! * **With an account** - Orthanc has `AuthenticationEnabled: true` and a user list.
+//!   The portal sends HTTP Basic credentials with every request.
+//! * **Without an account** - Orthanc has no users and instead only accepts a list of
+//!   allowed clients / IP addresses (its own `RemoteAccessAllowed`, an authorization
+//!   plugin, or a reverse proxy in front of it). The portal then sends NO
+//!   `Authorization` header: it simply relies on being one of the allowed clients.
+//!
+//! Which one is used is decided by a single setting: an EMPTY Orthanc user name means
+//! "no account". See [`Endpoint::from_settings`] and the wording of [`OrthancClient::refusal`].
 
 use crate::error::AppError;
 use crate::models::ModalityNode;
@@ -88,6 +101,11 @@ impl Endpoint {
         };
         Self { base_url: settings.orthanc_url.clone(), credentials }
     }
+
+    /// The account name sent to Orthanc, or `None` when the portal connects anonymously.
+    fn account(&self) -> Option<&str> {
+        self.credentials.as_ref().map(|(user, _)| user.as_str())
+    }
 }
 
 /// Outcome of "Test connection" in the Settings screen.
@@ -99,6 +117,8 @@ pub struct Diagnosis {
     pub message: String,
     pub version: Option<String>,
     pub supported: bool,
+    /// The account the test used, or `None` when it connected without one.
+    pub account: Option<String>,
     /// Names of the loaded plugins (`GET /plugins`).
     pub plugins: Vec<String>,
     pub dicomweb: bool,
@@ -161,14 +181,48 @@ impl OrthancClient {
         }
     }
 
+    /// The account the portal currently presents to Orthanc (`None` = no account).
+    pub fn account(&self) -> Option<String> {
+        self.endpoint.read().unwrap_or_else(|e| e.into_inner()).account().map(str::to_string)
+    }
+
+    /// One sentence explaining why Orthanc answered 401 or 403, written for the
+    /// administrator and different for the two ways of connecting, because the fix is
+    /// different: with an account the credentials are wrong; without one the portal is
+    /// usually not on Orthanc's list of allowed clients.
+    fn refusal(&self, status: StatusCode) -> String {
+        match (self.account(), status) {
+            (Some(user), StatusCode::UNAUTHORIZED) => format!(
+                "Orthanc refused the account '{user}' (wrong user name or password). \
+                 Correct it in Settings > Orthanc connection"
+            ),
+            (Some(user), _) => format!(
+                "Orthanc does not allow the account '{user}' to do this (HTTP 403). Check that account's \
+                 permissions in Orthanc and that Orthanc accepts the address the portal connects from"
+            ),
+            (None, StatusCode::UNAUTHORIZED) => "Orthanc asks for a user name and password, but the portal is set \
+                 to connect without an account. Enter the account in Settings > Orthanc connection, or let \
+                 Orthanc accept this machine without one"
+                .to_string(),
+            (None, _) => "Orthanc refuses this machine (HTTP 403). It probably only accepts a list of allowed \
+                 clients: add the address the portal connects from. When the portal runs in Docker, Orthanc sees \
+                 the Docker host's address (Orthanc on another computer) or an address of Docker's private \
+                 network (172.x.x.x), not 127.0.0.1"
+                .to_string(),
+        }
+    }
+
     /// Turns a non-2xx Orthanc answer into an [`AppError`].
-    async fn check(resp: Response) -> Result<Response, AppError> {
+    async fn check(&self, resp: Response) -> Result<Response, AppError> {
         let status = resp.status();
         if status.is_success() {
             return Ok(resp);
         }
         if status == StatusCode::NOT_FOUND {
             return Err(AppError::NotFound);
+        }
+        if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+            return Err(AppError::Upstream(self.refusal(status)));
         }
         let body = resp.text().await.unwrap_or_default();
         // Orthanc's own wording is useful to the administrator but it is shown to every
@@ -182,13 +236,13 @@ impl OrthancClient {
     /// `GET path` and parse the answer as JSON.
     pub async fn get_json(&self, path: &str) -> Result<Value, AppError> {
         let resp = self.request(Method::GET, path).timeout(JSON_TIMEOUT).send().await?;
-        Ok(Self::check(resp).await?.json::<Value>().await?)
+        Ok(self.check(resp).await?.json::<Value>().await?)
     }
 
     /// `POST /tools/find` - returns the array of matching resources.
     pub async fn find(&self, body: &Value) -> Result<Vec<Value>, AppError> {
         let resp = self.request(Method::POST, "/tools/find").json(body).timeout(JSON_TIMEOUT).send().await?;
-        match Self::check(resp).await?.json::<Value>().await? {
+        match self.check(resp).await?.json::<Value>().await? {
             Value::Array(items) => Ok(items),
             _ => Err(AppError::Upstream("unexpected answer from /tools/find".into())),
         }
@@ -259,17 +313,25 @@ impl OrthancClient {
             message,
             version: None,
             supported: false,
+            account: self.account(),
             plugins: Vec::new(),
             dicomweb: false,
             ohif: false,
             modalities: 0,
         };
 
+        // A bare first request, only to tell "Orthanc refuses the portal" (wrong account, or
+        // this machine is not on the allowed list) apart from every other kind of problem.
+        match self.request(Method::GET, "/system").timeout(JSON_TIMEOUT).send().await {
+            Ok(resp) if matches!(resp.status(), StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) => {
+                return failed(self.refusal(resp.status()))
+            }
+            Ok(_) => {}
+            Err(e) => return failed(AppError::from(e).to_string()),
+        }
+
         let info = match self.info().await {
             Ok(info) => info,
-            Err(AppError::Upstream(m)) if m.contains("HTTP 401") => {
-                return failed("Orthanc refused the user name or password".into())
-            }
             Err(AppError::Upstream(m)) => return failed(format!("Cannot use this Orthanc: {m}")),
             Err(AppError::NotFound) => return failed("The address answers, but it is not an Orthanc REST API".into()),
             Err(e) => return failed(e.to_string()),
@@ -283,7 +345,10 @@ impl OrthancClient {
         let modalities = self.modalities_raw().await.map(|m| m.len()).unwrap_or(0);
 
         let message = if info.supported {
-            format!("Connected to Orthanc {}", info.version)
+            match self.account() {
+                Some(user) => format!("Connected to Orthanc {} with the account '{user}'", info.version),
+                None => format!("Connected to Orthanc {} without an account", info.version),
+            }
         } else {
             format!(
                 "Orthanc {} is too old: version {}.{}.{} or newer with the HasExtendedFind capability is required",
@@ -295,6 +360,7 @@ impl OrthancClient {
             message,
             version: Some(info.version),
             supported: info.supported,
+            account: self.account(),
             dicomweb: has("dicom-web") || has("dicomweb"),
             ohif: has("ohif"),
             plugins,
@@ -321,7 +387,7 @@ impl OrthancClient {
                 "Orthanc rejected this file (is it a valid DICOM file or ZIP archive?)".into(),
             ));
         }
-        Ok(Self::check(resp).await?.json::<Value>().await?)
+        Ok(self.check(resp).await?.json::<Value>().await?)
     }
 
     // ------------------------------------------------------------ thumbnails
@@ -354,7 +420,7 @@ impl OrthancClient {
             return Ok(Some((resp.bytes().await?, content_type)));
         }
         if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
-            return Err(AppError::Upstream("Orthanc refused the portal's credentials".into()));
+            return Err(AppError::Upstream(self.refusal(status)));
         }
         Ok(None) // 400 / 404 / 415 / 500: this image cannot be previewed
     }
@@ -373,7 +439,7 @@ impl OrthancClient {
         };
         let suffix = if dicomdir { "media" } else { "archive" };
         let resp = self.request(Method::GET, &format!("/{resource}/{id}/{suffix}")).send().await?;
-        Self::check(resp).await
+        self.check(resp).await
     }
 
     // ------------------------------------------- sending to DICOM "modalities"
@@ -416,14 +482,14 @@ impl OrthancClient {
             .timeout(JSON_TIMEOUT)
             .send()
             .await?;
-        Self::check(resp).await.map(|_| ())
+        self.check(resp).await.map(|_| ())
     }
 
     /// Removes a DICOM node: `DELETE /modalities/{alias}`.
     pub async fn delete_modality(&self, alias: &str) -> Result<(), AppError> {
         let alias = utf8_percent_encode(alias, PATH_SEGMENT);
         let resp = self.request(Method::DELETE, &format!("/modalities/{alias}")).timeout(JSON_TIMEOUT).send().await?;
-        Self::check(resp).await.map(|_| ())
+        self.check(resp).await.map(|_| ())
     }
 
     /// DICOM "ping" (C-ECHO) to a node: `POST /modalities/{alias}/echo`.
@@ -458,7 +524,7 @@ impl OrthancClient {
             .timeout(JSON_TIMEOUT)
             .send()
             .await?;
-        let answer: Value = Self::check(resp).await?.json().await?;
+        let answer: Value = self.check(resp).await?.json().await?;
         answer["ID"]
             .as_str()
             .map(str::to_string)
@@ -504,11 +570,53 @@ impl OrthancClient {
                 .header("x-forwarded-proto", public_proto);
         }
         let resp = request.send().await?;
-        // If Orthanc refuses the PORTAL's own credentials, say so clearly instead
-        // of relaying a 401 that would make the viewer ask the user to log in.
+        // If Orthanc refuses the PORTAL itself (its account, or its network address), say
+        // so clearly instead of relaying a 401 that would make the viewer ask the user to log in.
         if matches!(resp.status(), StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
-            return Err(AppError::Upstream("Orthanc refused the portal's credentials".into()));
+            return Err(AppError::Upstream(self.refusal(resp.status())));
         }
         Ok(resp)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The portal sends an account only when a user name is configured.
+    #[test]
+    fn an_empty_user_name_means_no_account() {
+        let without = OrthancClient::for_test("http://orthanc:8042/", "", "ignored").unwrap();
+        assert_eq!(without.account(), None);
+        let with = OrthancClient::for_test("http://orthanc:8042", "portal", "secret").unwrap();
+        assert_eq!(with.account().as_deref(), Some("portal"));
+    }
+
+    /// A refusal is explained in the words of the setup in use: the fix differs (a wrong
+    /// account vs. an address missing from Orthanc's list of allowed clients).
+    #[test]
+    fn refusals_are_explained_for_each_way_of_connecting() {
+        let without = OrthancClient::for_test("http://orthanc:8042", "", "").unwrap();
+        let forbidden = without.refusal(StatusCode::FORBIDDEN);
+        assert!(
+            forbidden.contains("refuses this machine") && forbidden.contains("allowed") && forbidden.contains("Docker")
+        );
+        assert!(without.refusal(StatusCode::UNAUTHORIZED).contains("without an account"));
+
+        let with = OrthancClient::for_test("http://orthanc:8042", "portal", "secret").unwrap();
+        assert!(with.refusal(StatusCode::UNAUTHORIZED).contains("refused the account 'portal'"));
+        assert!(with.refusal(StatusCode::FORBIDDEN).contains("does not allow the account 'portal'"));
+        // The password must never appear in a message shown to users.
+        assert!(!with.refusal(StatusCode::UNAUTHORIZED).contains("secret"));
+    }
+
+    /// Settings: no account means no stored password either.
+    #[test]
+    fn clearing_the_user_name_forgets_the_password() {
+        let mut settings = Settings::defaults();
+        settings.orthanc_username = "portal".into();
+        settings.orthanc_password = crate::settings::Secret("secret".into());
+        let updated = settings.with_patch(&json!({ "orthanc_username": "" })).unwrap();
+        assert!(updated.orthanc_username.is_empty() && updated.orthanc_password.0.is_empty());
     }
 }

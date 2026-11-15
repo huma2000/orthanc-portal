@@ -21,9 +21,10 @@ A web front-end for an **Orthanc PACS** (recent releases), written in Rust. One 
 | **Send a study to a remote DICOM node** and follow the transfer | yes | no |
 | User management, audit log | yes | no |
 | **Configuration from the web**: Orthanc connection, ports, share links, sessions, upload limit, roles, **DICOM nodes**, portal name | yes (admins) | no |
+| Talks to Orthanc **with an account or without one** (an Orthanc that only accepts a list of allowed computers) | choose in Settings | - |
 
 One self-contained executable: the web UI is compiled into it, users and settings live in a SQLite file,
-and the only other thing it needs is Orthanc.
+and the only other thing it needs is Orthanc (yours: **three ways to install it**, see section 3).
 
 ---
 
@@ -44,7 +45,8 @@ and the only other thing it needs is Orthanc.
 * **Second safeguard:** a request that carries Cloudflare headers (`CF-Connecting-IP`, `CF-Ray`,
   `CDN-Loop: cloudflare`) is **refused on port 8080** (403). If someone points the tunnel at the wrong port,
   the internet gets an error, not the staff portal.
-* Orthanc is never exposed: only the portal talks to it, with its own Orthanc account.
+* Orthanc is never exposed: only the portal talks to it, **with its own Orthanc account, or without any
+  account** when your Orthanc has no users and only accepts a list of allowed computers (section 3).
 
 ---
 
@@ -62,28 +64,81 @@ and the only other thing it needs is Orthanc.
 
 ---
 
-## 3. Quick start
+## 3. Quick start: three ways to install it
 
-### Option A: Docker Compose (Orthanc + portal + tunnel)
+| | Method | Where | What it starts | Choose it when |
+|:-:|---|---|---|---|
+| **A** | **Portal + Cloudflare** (Docker Compose) | `deploy/existing-orthanc/` | the portal and the Cloudflare Tunnel | you **already have an Orthanc**. Intranet and internet work out of the box |
+| **B** | **Everything** (Docker Compose) | `deploy/` | a **preconfigured Orthanc**, the portal and the Cloudflare Tunnel | you have **no Orthanc yet**. Intranet and internet work out of the box |
+| **C** | **Bare metal** (the executable) | the project root | the portal only | you do not use Docker. The intranet works at once; for the internet you install `cloudflared` yourself (section 10) |
+
+In A and B the tunnel needs a **Cloudflare tunnel token** (section 10). Without it, remove the `cloudflared`
+service from the compose file and you have an intranet-only install.
+
+### Option A: Docker Compose, portal + Cloudflare (you already have an Orthanc)
+
+For a server that **already has an Orthanc** (on this computer, in another container or on another machine of
+the network). `deploy/existing-orthanc/` starts the **portal and the Cloudflare Tunnel**, but not Orthanc.
+
+```bash
+cd deploy/existing-orthanc
+cp .env.example .env            # edit it: ORTHANC_URL and TUNNEL_TOKEN
+docker compose up -d --build
+docker compose logs portal      # prints the first administrator's password if ADMIN_PASSWORD was left empty
+```
+
+1. **`ORTHANC_URL`**, for example `http://192.168.1.50:8042`. Use `http://host.docker.internal:8042` for an
+   Orthanc on this same computer, or join the network of the container that runs Orthanc (the compose file
+   explains each case at the top).
+2. **`ORTHANC_USERNAME` / `ORTHANC_PASSWORD`** are optional: **leave both empty when your Orthanc has no users**
+   and only accepts a list of allowed computers (see *Talking to Orthanc* below).
+3. **`TUNNEL_TOKEN`**: the token of your Cloudflare tunnel. In the Cloudflare dashboard add a public hostname
+   with service **HTTP `portal:8081`** (section 10), and type that public address in the portal under
+   *Settings > Share links*.
+4. Open `http://<server>:8080`, sign in as `admin` and press **Test connection** in *Settings > Orthanc
+   connection*: it says whether Orthanc accepts the portal and, if not, why.
+
+Things to know:
+
+* The staff portal is published on `8080` (change `INTRANET_BIND` / `INTRANET_PORT` in `.env`). The
+  invitation-links port `8081` is **not published**: only the tunnel container reaches it over the Docker
+  network. Port `8080` must never be forwarded to the internet.
+* The portal container is hardened (read-only file system, no Linux capabilities, no privilege escalation); the
+  only thing it writes is its database, in the `portal-data` volume (**back it up**: users, audit log, settings).
+* The values in `.env` are only the **initial** ones. After the first start, change them in the browser
+  (*Settings*). Editing `.env` later does not change a portal that already started; start once with
+  `RESET_SETTINGS=true` if you want to go back to the values of the file.
+* The image rebuilds quickly after code changes (third-party crates are cached in their own Docker layer) and
+  reports `healthy` / `unhealthy` through a built-in health check of port 8080.
+* Updating: `git pull`, then `docker compose up -d --build` again. Users and settings are kept.
+
+### Option B: Docker Compose, everything (Orthanc + portal + Cloudflare)
+
+For a server **without an Orthanc yet**. `deploy/` starts a **preconfigured Orthanc**, the portal and the
+Cloudflare Tunnel.
 
 ```bash
 cd deploy
-# 1. edit orthanc.json: change the password of the "portal" account
-#    (remote DICOM nodes are added later from the web interface, see section 9)
-# 2. create deploy/.env with:
-#      ORTHANC_PORTAL_PASSWORD=<same password as in orthanc.json>
-#      ADMIN_PASSWORD=<first portal administrator password, at least 10 characters>
+# 1. edit orthanc.json: change the password of the "portal" account under "RegisteredUsers"
+cp .env.example .env
+# 2. edit .env:
+#      ORTHANC_PORTAL_PASSWORD=<the same password as in orthanc.json>
 #      TUNNEL_TOKEN=<Cloudflare tunnel token, see section 10>
+#      ADMIN_PASSWORD=<first portal administrator password, at least 10 characters (or empty: printed in the log)>
 docker compose up -d --build
 ```
 
-The image rebuilds quickly after code changes (third-party crates are cached in their own Docker layer) and
-reports `healthy` / `unhealthy` through a built-in health check of port 8080.
+What the Orthanc is already set up with (`deploy/orthanc.json`, official `jodogne/orthanc-plugins` image):
+the account the portal uses, the **DICOMweb** plugin and the **OHIF** plugin with the `dicom-web` data source,
+DICOM nodes kept in its database (so the ones you add in the portal survive a restart), DICOM port `4242`
+published for your scanners (remove that line if nothing sends images by DICOM) and its web port `8042`
+**not published**: only the portal can reach it. Images and index live in the `orthanc-db` volume (**back it
+up**). Pin a version tag in the compose file instead of `latest` for production.
 
-Open `http://<server>:8080`, sign in as `admin` and open **Settings**: everything else is configured there
-(section 4). Without `TUNNEL_TOKEN`, remove the `cloudflared` service from the compose file (intranet only).
+Then follow steps 3 and 4 of option A (public hostname `portal:8081`, public address in the portal, **Test
+connection**). Updating the portal: `git pull` and `docker compose up -d --build`.
 
-### Option B: run the binary directly (you already have an Orthanc)
+### Option C: bare metal, the executable (you already have an Orthanc)
 
 Requires Rust (stable).
 
@@ -93,8 +148,44 @@ cargo run --release        # works with no configuration at all
 
 If `ADMIN_PASSWORD` is empty, a random password is generated and printed **once** in the log on the first
 start (the administrator is only created automatically when the user table is empty). Sign in on
-`http://localhost:8080`, open **Settings > Orthanc connection**, enter your Orthanc address and
-credentials and press **Test connection**. Optionally copy `.env.example` to `.env` to pre-fill values.
+`http://localhost:8080`, open **Settings > Orthanc connection**, enter your Orthanc address and, if it has
+users, the account, then press **Test connection**. Optionally copy `.env.example` to `.env` to pre-fill values.
+
+For the internet, install `cloudflared` on the same server and point the tunnel's public hostname to
+`http://localhost:8081` (section 10; `deploy/cloudflared-config.yml` is a ready-made example for a
+locally-managed tunnel).
+
+### Talking to Orthanc: with or without an account
+
+Orthanc protects its REST API in one of two ways, and the portal works with both. You choose in
+**Settings > Orthanc connection > How does Orthanc let the portal in?**
+
+| Your Orthanc | Choose | What the portal does |
+|---|---|---|
+| **Has users** (`"AuthenticationEnabled": true` and `"RegisteredUsers"`) | **With an account** | Sends the user name and password (HTTP Basic) with every request |
+| **Has no users** and only lets certain computers in (a firewall, a reverse proxy with `allow` / `deny`, or an `IncomingHttpRequestFilter` that checks the client address) | **Without an account** | Sends **no credentials at all**: the portal's computer has to be one of the allowed ones |
+
+* "Without an account" is stored as an empty user name, and the saved password is erased. In the environment
+  (first start only) it means leaving `ORTHANC_USERNAME` and `ORTHANC_PASSWORD` empty.
+* An account that Orthanc does not need is harmless: Orthanc ignores the credentials.
+* **Test connection** tells you which mode it used (*Connected to Orthanc 1.12.x without an account*) and, when
+  Orthanc says no, why: a wrong account is reported as such; a refusal without an account says that Orthanc
+  *refuses this machine* and that its allowed list must include the portal's address.
+* Orthanc itself has no HTTP address list: it is done in front of it (firewall, reverse proxy) or with the
+  `IncomingHttpRequestFilter` callback, which receives the client's address. Whatever you use, the question is
+  the same: **which address does Orthanc see?**
+
+| Where the portal runs | Orthanc is... | Orthanc sees the portal as |
+|---|---|---|
+| Directly on the server (option C) | on the same computer | `127.0.0.1` |
+| Directly or in Docker | on another computer | this server's LAN address (Docker translates the container's address) |
+| Docker | on this same computer | an address of Docker's private network (`172.x.x.x`), **not** `127.0.0.1` |
+| Docker, joined to the network of Orthanc's container | in another container | the portal container's address on that network (`172.x.x.x`) |
+| Docker with `network_mode: host` (Linux) | on the same computer | `127.0.0.1` or the server's own address |
+
+When the allowed list is the problem, the simplest fixes are to allow the whole Docker range (for example
+`172.16.0.0/12`) or the server's address, or to run the portal with `network_mode: host`. The log of Orthanc
+(or of the reverse proxy in front of it) shows the address it actually sees.
 
 ---
 
@@ -107,7 +198,7 @@ requires the `admin` permission.
 | Where | What you can change |
 |---|---|
 | **Settings > Branding** | **Browser window title**, **website icon**, **logo**, portal name, whether the name is shown next to the logo, notice shown on the login page (see below) |
-| **Settings > Orthanc connection** | Address, user name, password (write-only: it is never sent back to the browser), **Test connection** (version, DICOMweb/OHIF plugins, number of DICOM nodes; works on values you have typed but not yet saved) |
+| **Settings > Orthanc connection** | Address; **with an account** (user name + password, write-only: never sent back to the browser) **or without an account** (for an Orthanc that only accepts a list of allowed computers); **Test connection** (mode used, version, DICOMweb/OHIF plugins, number of DICOM nodes; works on values you have typed but not yet saved) |
 | **Settings > Network** | Intranet address, enable/disable the internet listener (invitation links only) and its address, optional fixed public address for Weasis |
 | **Settings > Share links** | **The public address of the share links** (your Cloudflare hostname; sharing stays off until it is set), the default and maximum validity (hours) and the default and maximum number of ZIP downloads |
 | **Settings > Sessions and sign-in security** | Session length, Weasis link validity, failed sign-ins before lockout, lockout length, secure-cookie mode, how long to keep the audit log (0 = forever) |
@@ -360,8 +451,8 @@ The tunnel makes an **outbound** connection from your server to Cloudflare: no p
 Cloudflare provides HTTPS.
 
 1. Cloudflare dashboard, **Zero Trust**, **Networks**, **Tunnels**: create a tunnel (type *Cloudflared*).
-2. Copy its **token** into `TUNNEL_TOKEN` (docker-compose), or follow `deploy/cloudflared-config.yml` for a
-   locally-managed tunnel running on the host.
+2. Copy its **token** into `TUNNEL_TOKEN` (options A and B, Docker Compose), or follow
+   `deploy/cloudflared-config.yml` for a locally-managed tunnel running on the host (option C).
 3. Add a **public hostname** (e.g. `pacs.example.com`) with service **HTTP** pointing to the **internet
    port**: `portal:8081` (`localhost:8081` when cloudflared runs on the host). **Not 8080.**
 4. In the portal, **Settings > Share links**, type that address (`https://pacs.example.com`) as the public
@@ -502,7 +593,8 @@ All JSON. State-changing calls need the header `X-Requested-With: portal`.
 Cargo.toml            dependencies
 .env.example          every setting, documented
 Dockerfile            container image
-deploy/               docker-compose.yml, orthanc.json, cloudflared-config.yml
+deploy/               option B: docker-compose.yml (preconfigured Orthanc + portal + tunnel), .env.example, orthanc.json; cloudflared-config.yml (tunnel run on the host, option C)
+deploy/existing-orthanc/  option A: docker-compose.yml + .env.example (portal + tunnel, for an Orthanc you already have)
 static/               staff UI: index.html + app.js; guest page: share.html + share.js; app.css (both), favicon.svg (the default mark); all embedded in the binary. The two HTML files are templates: title and icon are filled in per request
 src/main.rs           start-up, background cleanup, graceful shutdown
 src/config.rs         the few bootstrap values from the environment
@@ -530,24 +622,26 @@ The code compiles without warnings on Rust 1.91, passes `cargo clippy --all-targ
 formatted with `rustfmt` (see `rustfmt.toml`), and its dependencies were checked against the RustSec advisory
 database (no known vulnerable version in `Cargo.lock`). The automated tests live in the **`tests/`** folder:
 
-* `tests/server_tests.sh`: **293 checks** of the server against a fake Orthanc (`tests/mock_orthanc.py`):
+* `tests/server_tests.sh`: **332 checks** of the server against a fake Orthanc (`tests/mock_orthanc.py`):
   the two doors (staff portal vs invitation links only, Cloudflare headers refused on the intranet port), creating
   links with the default and the limited validity/downloads, the password gate and its throttling, what a guest
   sees, **the confinement to the shared study** (other studies, unfiltered searches, whole DICOM files, WADO
   without a picture type), the **counted downloads** (including 8 simultaneous clicks on a 3-download link),
   running out of downloads while viewing continues, expiry, revocation, search and modality filters,
   thumbnails, sending and job tracking, upload/download, branding including malicious files, live settings,
-  login hardening, caps, ETag/headers, concurrent administrators;
-* `tests/ui_tests.js`: **64 checks** of both web pages in a simulated browser (jsdom): the Share dialog and the
+  login hardening, caps, ETag/headers, concurrent administrators, and **talking to Orthanc with an account, without
+  one, and when it refuses the portal** (what is sent, what is not, the message for each case);
+* `tests/ui_tests.js`: **74 checks** of both web pages in a simulated browser (jsdom): the Share dialog and the
   Shares tab, the guest page (password, study, series, countdown, downloads left, expiry, revoked, 0-download
-  links, no OHIF), what each kind of staff account sees, search;
-* `cargo test`: **10 unit tests** (image validation; password and link generation; the rules that confine a guest
-  to one study).
+  links, no OHIF), what each kind of staff account sees, search, the with/without-account choice in Settings;
+* `cargo test`: **13 unit tests** (image validation; password and link generation; the rules that confine a guest
+  to one study; account / no account and the wording of Orthanc refusals).
 
 Run them all with `tests/run_all.sh` (needs `python3`, `curl`, and `npm install` once inside `tests/`; build
 first with `cargo build`; set `PORTAL_BIN=target/release/orthanc-portal` to test the release binary). The
 portal has **not** been run against a real Orthanc, a real OHIF
-plugin, a real Weasis or a real DICOM destination here, so on first use please verify:
+plugin, a real Weasis or a real DICOM destination here, and the compose files were validated with
+`docker compose config` but **never started** (no Docker daemon was available), so on first use please verify:
 
 0. **Settings > Orthanc connection > Test connection** shows your Orthanc version, the DICOMweb and OHIF
    plugins and the number of DICOM nodes.
@@ -572,7 +666,10 @@ plugin, a real Weasis or a real DICOM destination here, so on first use please v
 | A DICOM node I added disappears after restarting Orthanc | Orthanc is not running with `"DicomModalitiesInDatabase": true` |
 | Saving settings says "Cannot listen on ..." | That address is already used by another program or is not an address of this machine |
 | "The Orthanc server is unreachable" | Wrong `ORTHANC_URL`, Orthanc down, or firewall between them |
-| "PACS returned an error: HTTP 401" | Wrong `ORTHANC_USERNAME` / `ORTHANC_PASSWORD` |
+| "Orthanc refused the account '...' (wrong user name or password)" | Correct the account in **Settings > Orthanc connection** |
+| "Orthanc asks for a user name and password, but the portal is set to connect without an account" | Your Orthanc has users: choose *With an account* and enter it, or let Orthanc accept this computer without one |
+| "Orthanc refuses this machine (HTTP 403)" | Orthanc (or the proxy in front of it) only accepts a list of allowed computers and the portal's address is not in it. See the table *Which address does Orthanc see?* in section 3; in Docker it is not `127.0.0.1` |
+| "Orthanc does not allow the account '...' to do this (HTTP 403)" | The account exists but lacks permissions in Orthanc, or the portal's address is not accepted |
 | Search error mentioning `Limit`/`Since` or a tag | Orthanc refused that filter for your index; the message comes from Orthanc |
 | No "Browser viewer" entry | OHIF plugin not loaded (see `GET /plugins` on Orthanc) or `OHIF_ENABLED=false` |
 | OHIF opens but shows no images / 404 on `/studies/...` | The plugin uses its default `dicom-json` data source: set `"OHIF": {"DataSource": "dicom-web"}` |

@@ -1,9 +1,12 @@
 # =====================================================================
-#  Complete stack: Orthanc (PACS) + Orthanc Portal + Cloudflare Tunnel
+#  EVERYTHING: Orthanc (PACS, preconfigured) + Orthanc Portal + Cloudflare Tunnel
+#
+#  Already have an Orthanc? Use existing-orthanc/docker-compose.yml instead: portal +
+#  Cloudflare Tunnel only, for an Orthanc with or without user accounts.
 #
 #  Usage (from this "deploy" folder):
 #     1. Edit orthanc.json  -> change the "portal" password (RegisteredUsers)
-#     2. Create a file named ".env" next to this one with:
+#     2. cp .env.example .env   and fill it in:
 #           ORTHANC_PORTAL_PASSWORD=<same password as in orthanc.json>
 #           ADMIN_PASSWORD=<first portal administrator password, 10+ chars>
 #           TUNNEL_TOKEN=<token of your Cloudflare Tunnel>   (see README)
@@ -51,9 +54,9 @@ services:
       # interface (sign in as admin > Settings). The saved values then win.
       ORTHANC_URL: http://orthanc:8042          # "orthanc" = service name above
       ORTHANC_USERNAME: portal                  # must match RegisteredUsers in orthanc.json
-      ORTHANC_PASSWORD: ${ORTHANC_PORTAL_PASSWORD}
+      ORTHANC_PASSWORD: ${ORTHANC_PORTAL_PASSWORD:?Set ORTHANC_PORTAL_PASSWORD in the .env file, with the same value as the "portal" password in orthanc.json}
       ADMIN_USERNAME: admin
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}       # empty = a random one is printed in the log
       # The listeners keep their defaults inside the container (8080 intranet, 8081
       # share links only). Do not move them in Settings while running in Docker: the
       # published ports below are fixed.
@@ -72,7 +75,7 @@ services:
     # to  http://portal:8081  (the invitation-links port, NOT 8080). See README.
     command: tunnel --no-autoupdate run
     environment:
-      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?Set TUNNEL_TOKEN in the .env file (Cloudflare Zero Trust > Networks > Tunnels). For intranet only, remove the cloudflared service from this file}
     depends_on:
       - portal
 

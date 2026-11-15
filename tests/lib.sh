@@ -18,6 +18,9 @@ PASS=0; FAIL=0
 # also called "orthanc-portal", so `pkill -f` would kill the test script itself.
 stack_stop() { pkill -f "mock_orthanc.py" 2>/dev/null; pkill -x "$(basename "$PORTAL_BIN")" 2>/dev/null; sleep 0.8; }
 mock_start() { python3 "$TESTS/mock_orthanc.py" > "$WORK/mock.out" 2>&1 & sleep 0.6; }
+# mock_auth MODE  -> changes how the fake Orthanc protects itself while it runs:
+#   basic = needs the account, none = no users and we are an allowed client, deny = no users and we are NOT allowed
+mock_auth() { curl -s -X POST -d "{\"mode\":\"$1\"}" http://127.0.0.1:18042/__mock/auth > /dev/null; }
 # portal_start [ENV=value ...]  (first start: environment values seed the settings)
 portal_start() {
   env ORTHANC_URL=http://127.0.0.1:18042 ORTHANC_USERNAME=orthanc ORTHANC_PASSWORD=s3cr3tpw DATABASE_PATH="$WORK/portal.db" \
