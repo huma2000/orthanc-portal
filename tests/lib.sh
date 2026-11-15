@@ -5,12 +5,13 @@ TESTS="$ROOT/tests"
 PORTAL_BIN="${PORTAL_BIN:-$ROOT/target/debug/orthanc-portal}"
 export MOCK_LOG_DIR="${MOCK_LOG_DIR:-/tmp/portal-tests}"
 WORK="$MOCK_LOG_DIR"
-F=http://127.0.0.1:18080     # intranet listener (full)
-R=http://127.0.0.1:18081     # remote listener (view only)
+F=http://127.0.0.1:18080     # intranet listener: the staff portal (accounts + permissions)
+G=http://127.0.0.1:18081     # internet listener: ONLY invitation (share) links, for guests
 H='X-Requested-With: portal'; J='Content-Type: application/json'
 SID=aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee
 SER=11111111-22222222-33333333-44444444-55555555
 SR=99999999-88888888-77777777-66666666-55555555
+UID_=1.2.826.0.1.3680043.8.498.1   # StudyInstanceUID of the study the fake Orthanc holds
 PASS=0; FAIL=0
 
 # NOTE: the portal is matched by its exact process name (-x), not with -f: the project folder is
@@ -35,3 +36,17 @@ login() { local base=$1 u=$2 p=$3; shift 3; curl -s -D - -o /dev/null "$@" -H "$
 code()  { local base=$1 cookie=$2 method=$3 path=$4; shift 4; curl -s -o /dev/null -w "%{http_code}" --max-time 8 -X "$method" -H "Cookie: portal_session=$cookie" -H "$H" "$@" "$base$path"; }
 body()  { local base=$1 cookie=$2 path=$3; shift 3; curl -s --max-time 8 -H "Cookie: portal_session=$cookie" -H "$H" "$@" "$base$path"; }
 put()   { curl -s --max-time 10 -w "\n%{http_code}" -X PUT -H "Cookie: portal_session=$1" -H "$H" -H "$J" -d "$2" "$F/api/admin/settings"; }
+
+# ---- the guest side (internet listener, invitation links) -----------------------------------------
+# Guests have no account: they hold the cookie `share_session`, issued when the password is right.
+# mkshare COOKIE JSON  -> JSON of a new invitation for the test study (made by a staff member)
+mkshare() { body $F $1 /api/studies/$SID/share -X POST -H "$J" -d "$2"; }
+# unlock_code TOKEN PASSWORD [curl args] -> HTTP status of the password check
+unlock_code() { local t=$1 p=$2; shift 2; curl -s -o /dev/null -w "%{http_code}" --max-time 15 "$@" -H "$H" -H "$J" -d "{\"password\":\"$p\"}" "$G/api/share/$t/unlock"; }
+# unlock TOKEN PASSWORD [curl args] -> the guest session cookie value (empty when refused)
+unlock() { local t=$1 p=$2; shift 2; curl -s -D - -o /dev/null --max-time 15 "$@" -H "$H" -H "$J" -d "{\"password\":\"$p\"}" "$G/api/share/$t/unlock" | grep -i set-cookie | sed 's/.*share_session=\([0-9a-f]*\);.*/\1/'; }
+# gcode COOKIE METHOD PATH [curl args] -> HTTP status on the internet listener
+gcode() { local cookie=$1 method=$2 path=$3; shift 3; curl -s -o /dev/null -w "%{http_code}" --max-time 8 -X "$method" -H "Cookie: share_session=$cookie" -H "$H" "$@" "$G$path"; }
+gbody() { local cookie=$1 path=$2; shift 2; curl -s --max-time 8 -H "Cookie: share_session=$cookie" -H "$H" "$@" "$G$path"; }
+# sql "statement"  -> runs it on the portal's database (used to move a link's expiry into the past)
+sql() { python3 -c "import sqlite3,sys;c=sqlite3.connect('$WORK/portal.db', timeout=10);c.execute(sys.argv[1]);c.commit()" "$1"; }

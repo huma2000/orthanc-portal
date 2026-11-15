@@ -34,7 +34,7 @@ ENV BIND_ADDR=0.0.0.0:8080 \
     REMOTE_BIND_ADDR=0.0.0.0:8081 \
     DATABASE_PATH=/data/portal.db
 VOLUME /data
-# 8080 = intranet (full), 8081 = remote (view only, for the Cloudflare Tunnel)
+# 8080 = intranet (staff portal), 8081 = internet (invitation links only, for the Cloudflare Tunnel)
 EXPOSE 8080 8081
 
 # Docker marks the container "unhealthy" if the portal stops answering. (Uses bash's

@@ -4,8 +4,9 @@
 //! the program is running**, which is what lets an administrator change the
 //! ports from the Settings screen without restarting anything.
 //!
-//! * the **intranet** listener (full features), and
-//! * the optional **remote** listener (view only, for the Cloudflare Tunnel).
+//! * the **intranet** listener (the whole portal, for staff), and
+//! * the optional **internet** listener, which only serves invitation (share)
+//!   links to guests; it is the one the Cloudflare Tunnel points at.
 //!
 //! Changing an address is done carefully:
 //!   1. the new address is opened FIRST; if that fails nothing changes and the
@@ -15,8 +16,7 @@
 //!   3. if the second listener cannot be changed, the first one is put back.
 
 use crate::error::AppError;
-use crate::permissions::AccessScope;
-use crate::routes;
+use crate::routes::{self, Audience};
 use crate::settings::Settings;
 use crate::state::AppState;
 use serde::Serialize;
@@ -68,8 +68,8 @@ impl ListenerManager {
         Self { slots: Arc::new(Mutex::new(Slots::default())), stop }
     }
 
-    /// Starts serving `listener` with the router of the given scope.
-    fn spawn(&self, listener: TcpListener, addr: String, scope: AccessScope, state: &AppState) -> Running {
+    /// Starts serving `listener` with the router of the given audience.
+    fn spawn(&self, listener: TcpListener, addr: String, scope: Audience, state: &AppState) -> Running {
         let app = routes::router(state.clone(), scope);
         let mut stop = self.stop.clone();
         let log_addr = addr.clone();
@@ -93,7 +93,7 @@ impl ListenerManager {
     async fn ensure(
         &self,
         slot: &mut Option<Running>,
-        scope: AccessScope,
+        scope: Audience,
         wanted: Option<&str>,
         state: &AppState,
     ) -> Result<Option<String>, AppError> {
@@ -101,8 +101,8 @@ impl ListenerManager {
             return Ok(None);
         }
         let label = match scope {
-            AccessScope::Full => "The intranet listener",
-            AccessScope::Remote => "The remote (view-only) listener",
+            Audience::Staff => "The intranet listener",
+            Audience::Guest => "The internet (share links) listener",
         };
 
         // Nothing wanted: just stop it.
@@ -158,16 +158,16 @@ impl ListenerManager {
         let previous_full = slots.full.as_ref().map(|r| r.addr.clone());
 
         let mut messages = Vec::new();
-        if let Some(m) = self.ensure(&mut slots.full, AccessScope::Full, Some(&wanted_full), state).await? {
+        if let Some(m) = self.ensure(&mut slots.full, Audience::Staff, Some(&wanted_full), state).await? {
             messages.push(m);
         }
-        match self.ensure(&mut slots.remote, AccessScope::Remote, wanted_remote.as_deref(), state).await {
+        match self.ensure(&mut slots.remote, Audience::Guest, wanted_remote.as_deref(), state).await {
             Ok(Some(m)) => messages.push(m),
             Ok(None) => {}
             Err(e) => {
                 // Put the intranet listener back where it was.
                 if slots.full.as_ref().map(|r| r.addr.clone()) != previous_full {
-                    let _ = self.ensure(&mut slots.full, AccessScope::Full, previous_full.as_deref(), state).await;
+                    let _ = self.ensure(&mut slots.full, Audience::Staff, previous_full.as_deref(), state).await;
                 }
                 return Err(e);
             }
@@ -183,7 +183,7 @@ impl ListenerManager {
             addr: slot.as_ref().map(|r| r.addr.clone()),
             running: slot.as_ref().map(|r| !r.task.is_finished()).unwrap_or(false),
         };
-        vec![describe("Intranet (full access)", &slots.full), describe("Remote (view only)", &slots.remote)]
+        vec![describe("Intranet (staff portal)", &slots.full), describe("Internet (share links only)", &slots.remote)]
     }
 
     /// Waits (up to 10 s each) for the listeners to finish after the stop signal.

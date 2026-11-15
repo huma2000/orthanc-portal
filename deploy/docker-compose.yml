@@ -9,14 +9,18 @@
 #           TUNNEL_TOKEN=<token of your Cloudflare Tunnel>   (see README)
 #     3. docker compose up -d --build
 #     4. Intranet:  http://<this-server>:8080     Internet: your Cloudflare hostname
+#     5. Sign in as admin, open Settings > Share links and type the public address
+#        (e.g. https://pacs.example.com). Then use "Share..." on a study to invite
+#        somebody outside: they get a link and a password for THAT study.
 #
 #  Network design
 #    * Orthanc's web port 8042 is NOT published: only the portal reaches it.
 #    * The portal listens on TWO ports:
-#        8080  intranet, full features   -> published to the host (LAN users)
-#        8081  remote, VIEW ONLY         -> NOT published; only the cloudflared
+#        8080  intranet, staff portal    -> published to the host (LAN users)
+#        8081  internet, INVITATIONS ONLY -> NOT published; only the cloudflared
 #                                           container reaches it over the Docker network
-#      so whatever comes from the internet can only search and view studies.
+#      so whatever comes from the internet can only open the study an invitation
+#      link + password was created for (no accounts, no search, nothing else).
 # =====================================================================
 
 services:
@@ -51,7 +55,7 @@ services:
       ADMIN_USERNAME: admin
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
       # The listeners keep their defaults inside the container (8080 intranet, 8081
-      # view-only). Do not move them in Settings while running in Docker: the
+      # share links only). Do not move them in Settings while running in Docker: the
       # published ports below are fixed.
       # RESET_SETTINGS: "true"                  # recovery: forget the settings saved from the web
     volumes:
@@ -65,7 +69,7 @@ services:
     image: cloudflare/cloudflared:latest
     restart: unless-stopped
     # In the Cloudflare Zero Trust dashboard the tunnel's public hostname must point
-    # to  http://portal:8081  (the VIEW-ONLY port, NOT 8080). See README.
+    # to  http://portal:8081  (the invitation-links port, NOT 8080). See README.
     command: tunnel --no-autoupdate run
     environment:
       TUNNEL_TOKEN: ${TUNNEL_TOKEN}

@@ -1,56 +1,50 @@
 //! # routes/viewer.rs
 //!
-//! Viewing studies. Two viewers are supported; both are fed by the portal, so
-//! Orthanc itself is never exposed. Both need the `visualize` permission.
+//! Viewing studies. Two viewers, both fed by the portal so Orthanc itself is never exposed.
 //!
-//! **Over the internet only the browser viewer (OHIF) is allowed.** Weasis saves the
-//! images on the user's computer, which would let patient images leave the building, so:
-//!  * the Weasis link route is not registered on the remote listener (and is refused for
-//!    requests carrying Cloudflare headers);
-//!  * a Weasis bearer token is ignored over the internet, even a genuine one issued on the
-//!    intranet (`auth::authenticate_viewer` accepts only the session cookie there);
-//!  * unless switched off in Settings, requests that return WHOLE DICOM files are refused
-//!    over the internet: a viewer only needs metadata and pixel frames, so this closes the
-//!    "type the DICOMweb address and save the .dcm" route (`is_whole_dicom_retrieval`).
+//! ## Staff (intranet) - Weasis and OHIF
+//! * **Weasis** (desktop viewer, must be installed on the user's PC):
+//!   1. The user clicks "Weasis". The browser calls `GET /api/weasis/link?study_uid=...`.
+//!   2. The portal creates a short-lived **bearer token** and answers with
+//!      `weasis://<url-encoded command>`:
 //!
-//! On the intranet both viewers work without restriction.
+//!      ```text
+//!      $dicom:rs --url "https://pacs.example.com/dicom-web"
+//!                -r "studyUID=1.2.840..." -H "Authorization: Bearer <token>"
+//!      ```
+//!   3. The browser hands the link to Weasis, which then calls `/dicom-web/...` on THIS portal
+//!      with the token.
+//! * **OHIF** (web viewer, nothing to install): Orthanc's OHIF plugin (configured with
+//!   `"DataSource": "dicom-web"`) serves the app at `/ohif/`; the portal relays it. OHIF runs
+//!   in the portal's own origin, so it authenticates with the user's session cookie.
 //!
-//! ## 1. Weasis (desktop viewer, must be installed on the user's PC)
-//! 1. The user clicks "Weasis". The browser calls `GET /api/weasis/link?study_uid=...`.
-//! 2. The portal creates a short-lived **bearer token** and answers with
-//!    `weasis://<url-encoded command>` where the command is:
-//!
-//!    ```text
-//!    $dicom:rs --url "https://pacs.example.com/dicom-web"
-//!              -r "studyUID=1.2.840..." -H "Authorization: Bearer <token>"
-//!    ```
-//! 3. The browser hands the link to Weasis (the `weasis://` protocol handler
-//!    registered by the Weasis installer). Weasis then calls `/dicom-web/...` on
-//!    THIS portal, sending the token.
-//!
-//! ## 2. OHIF (web viewer, nothing to install)
-//! Orthanc's **OHIF plugin** (configured with `"DataSource": "dicom-web"`) serves
-//! the OHIF web application at `/ohif/`. The portal relays it, together with the
-//! DICOMweb data it reads, so the viewer works in a normal browser tab:
-//! `/ohif/viewer?StudyInstanceUIDs=<uid>`. OHIF runs inside the portal's own
-//! origin, so it authenticates with the user's session cookie.
+//! ## Guests (internet, invitation link) - OHIF only
+//! A person with an invitation sees the shared study in OHIF, authenticated by the cookie
+//! set when they entered the link's password (`routes/guest.rs`). The very same proxy
+//! serves them, but **confined to that one study**, and without ever returning whole DICOM
+//! files: see `sharing.rs` for the exact rules and the reasons (other patients' data, and the
+//! "N downloads" limit of the invitation). Weasis is never available to guests: it would save
+//! the images on their computer.
 //!
 //! ## The read-only proxy
-//! `/dicom-web/*`, `/wado` and `/ohif/*` are forwarded to Orthanc with **GET only**,
-//! after checking the token/cookie and the permission. A viewer can therefore never
-//! modify the PACS, and paths are validated so nothing else of Orthanc is reachable.
+//! `/dicom-web/*`, `/wado` and `/ohif/*` are forwarded to Orthanc with **GET only**, after
+//! checking who is asking. Paths are validated so nothing else of Orthanc is reachable, and
+//! the DICOMweb plugin's other resources (such as queries to OTHER DICOMweb servers) are not
+//! relayed.
 
-use crate::auth::{self, authenticate_viewer, AuthUser};
+use crate::auth::{self, authenticate_share, authenticate_viewer, AuthUser};
 use crate::error::{AppError, AppResult};
-use crate::permissions::{AccessScope, Permission};
+use crate::permissions::Permission;
+use crate::routes::Audience;
+use crate::sharing;
 use crate::state::AppState;
 use crate::util::{is_https, is_valid_dicom_uid, public_base_url};
 use axum::body::Body;
 use axum::extract::{Path, Query, RawQuery, State};
 use axum::http::{header, HeaderMap};
 use axum::response::{Redirect, Response};
-use axum::Json;
-use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
+use axum::{Extension, Json};
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -70,18 +64,6 @@ pub async fn weasis_link(
     Query(params): Query<WeasisParams>,
 ) -> AppResult<Json<Value>> {
     user.require(Permission::Visualize)?;
-
-    // Weasis saves the images on the user's computer. Over the internet that would put
-    // patient images on machines nobody controls, so there the browser viewer (OHIF) is the
-    // only way to look at them. (This route is not even registered on the remote listener;
-    // this check covers requests that carry Cloudflare headers on the intranet port.)
-    if user.scope == AccessScope::Remote {
-        return Err(AppError::Denied(
-            "Weasis is not available over the internet because it downloads the images to the computer. \
-             Use the browser viewer instead."
-                .into(),
-        ));
-    }
 
     // The UID goes inside a quoted command line: only digits and dots are allowed.
     if !is_valid_dicom_uid(&params.study_uid) {
@@ -132,39 +114,6 @@ enum Area {
 /// Accepts only harmless relative paths: `studies/{uid}/series/...`, `metadata`,
 /// `assets/app.bundle.js`... Rejects `..`, empty segments and any unusual
 /// character, so the proxy can never be used to reach other Orthanc endpoints.
-fn is_whole_dicom_retrieval(path: &str) -> bool {
-    let parts: Vec<&str> = path.split('/').collect();
-    matches!(
-        parts.as_slice(),
-        ["studies", _]
-            | ["series", _]
-            | ["instances", _]
-            | ["studies", _, "series", _]
-            | ["studies", _, "series", _, "instances", _]
-    )
-}
-
-/// WADO-URI (`/wado?requestType=WADO&...`) answers with a whole DICOM file unless a picture
-/// format is requested with `contentType=image/jpeg` (or png...). True only when every
-/// `contentType` given is a picture type and there is at least one.
-fn is_rendered_wado_request(query: Option<&str>) -> bool {
-    let Some(query) = query else { return false };
-    let types: Vec<String> = query
-        .split('&')
-        .filter_map(|pair| pair.split_once('='))
-        .filter(|(key, _)| key.eq_ignore_ascii_case("contenttype"))
-        .flat_map(|(_, value)| {
-            percent_decode_str(value)
-                .decode_utf8_lossy()
-                .to_ascii_lowercase()
-                .split(',')
-                .map(|t| t.trim().to_string())
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    !types.is_empty() && types.iter().all(|t| t.starts_with("image/"))
-}
-
 fn is_safe_path(path: &str) -> bool {
     path.len() <= 512
         && path.split('/').all(|segment| {
@@ -202,28 +151,21 @@ const RELAYED_HEADERS: [&str; 9] = [
 async fn forward(
     state: &AppState,
     headers: &HeaderMap,
+    audience: Audience,
     area: Area,
     path: &str,
     query: Option<String>,
 ) -> AppResult<Response> {
-    // Bearer token (Weasis, intranet only) or session cookie (OHIF) + the `visualize` permission.
-    let user = authenticate_viewer(state, headers)?;
-
-    // Over the internet a viewer needs metadata and pixel frames, never WHOLE DICOM files.
-    // Refusing those closes the "type the DICOMweb address and save the .dcm" route.
-    if user.scope == AccessScope::Remote && state.settings.get().remote_block_dicom_files {
-        let whole_file = match area {
-            Area::DicomWeb => is_whole_dicom_retrieval(path),
-            Area::Wado => !is_rendered_wado_request(query.as_deref()),
-            Area::Ohif => false,
-        };
-        if whole_file {
-            return Err(AppError::Denied(
-                "Downloading whole DICOM files is not allowed over the internet. Images can be viewed in the browser viewer."
-                    .into(),
-            ));
+    // Who is asking? Staff: the session cookie or a Weasis token, with the `visualize`
+    // permission. Guest: the cookie set by an invitation's password; the viewer then only
+    // gets what belongs to that invitation's study (checked below).
+    let guest_study_uid: Option<String> = match audience {
+        Audience::Staff => {
+            authenticate_viewer(state, headers)?;
+            None
         }
-    }
+        Audience::Guest => Some(authenticate_share(state, headers)?.study_uid),
+    };
 
     // Where the request goes inside Orthanc.
     let mut upstream = match area {
@@ -242,6 +184,19 @@ async fn forward(
             format!("{root}/{path}")
         }
     };
+    // A guest may only read THEIR study, and never whole DICOM files: the only way to get the
+    // files is the counted ZIP download (see sharing.rs for the rules and the reasons).
+    if let Some(study_uid) = &guest_study_uid {
+        let allowed = match area {
+            Area::DicomWeb => sharing::guest_may_read_dicomweb(path, query.as_deref(), study_uid),
+            Area::Wado => sharing::guest_may_read_wado(query.as_deref(), study_uid),
+            Area::Ohif => true, // the viewer application itself (static files)
+        };
+        if !allowed {
+            return Err(AppError::Denied("This link only gives access to the shared study.".into()));
+        }
+    }
+
     if let Some(q) = query.filter(|q| !q.is_empty()) {
         upstream.push('?');
         upstream.push_str(&q);
@@ -272,39 +227,43 @@ async fn forward(
 /// `GET /dicom-web/{*path}`
 pub async fn dicomweb_proxy(
     State(state): State<AppState>,
+    Extension(audience): Extension<Audience>,
     headers: HeaderMap,
     Path(path): Path<String>,
     RawQuery(query): RawQuery,
 ) -> AppResult<Response> {
-    forward(&state, &headers, Area::DicomWeb, &path, query).await
+    forward(&state, &headers, audience, Area::DicomWeb, &path, query).await
 }
 
 /// `GET /wado?requestType=WADO&...`
 pub async fn wado_proxy(
     State(state): State<AppState>,
+    Extension(audience): Extension<Audience>,
     headers: HeaderMap,
     RawQuery(query): RawQuery,
 ) -> AppResult<Response> {
-    forward(&state, &headers, Area::Wado, "", query).await
+    forward(&state, &headers, audience, Area::Wado, "", query).await
 }
 
 /// `GET /ohif/{*path}` - the OHIF web application and its pages.
 pub async fn ohif_proxy(
     State(state): State<AppState>,
+    Extension(audience): Extension<Audience>,
     headers: HeaderMap,
     Path(path): Path<String>,
     RawQuery(query): RawQuery,
 ) -> AppResult<Response> {
-    forward(&state, &headers, Area::Ohif, &path, query).await
+    forward(&state, &headers, audience, Area::Ohif, &path, query).await
 }
 
 /// `GET /ohif/` - OHIF's own study list.
 pub async fn ohif_index(
     State(state): State<AppState>,
+    Extension(audience): Extension<Audience>,
     headers: HeaderMap,
     RawQuery(query): RawQuery,
 ) -> AppResult<Response> {
-    forward(&state, &headers, Area::Ohif, "", query).await
+    forward(&state, &headers, audience, Area::Ohif, "", query).await
 }
 
 /// `GET /ohif` -> `/ohif/` (OHIF's relative links need the trailing slash).

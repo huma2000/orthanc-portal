@@ -268,7 +268,8 @@ details.menu .menu-list small { display: block; color: var(--ink-soft); }
 /* ---------- 9. Dialog (user editor) ---------- */
 dialog { border: 1px solid var(--line-strong); border-radius: 10px; background: var(--panel); color: var(--ink); padding: 0; width: min(520px, calc(100vw - 2rem)); box-shadow: var(--shadow); }
 dialog::backdrop { background: rgba(8, 14, 20, 0.55); }
-dialog form { display: grid; gap: 0.9rem; padding: 1.3rem; }
+/* (the Share dialog's result and "not set up" steps are a plain div, not a form) */
+dialog form, dialog .dialog-form { display: grid; gap: 0.9rem; padding: 1.3rem; }
 .perm-list { display: grid; gap: 0.35rem; border: 1px solid var(--line); border-radius: 8px; padding: 0.7rem; margin: 0; }
 .perm-list legend { color: var(--ink-soft); padding: 0 0.3rem; font-size: 0.92em; }
 .perm-list label { display: flex; align-items: flex-start; gap: 0.55rem; color: var(--ink); }
@@ -335,16 +336,6 @@ details.menu .menu-list .menu-item small { display: block; color: var(--ink-soft
 .chip.state-failure { background: var(--danger-soft); border-color: transparent; color: var(--danger); }
 .chip.state-running, .chip.state-pending, .chip.state-retry { background: var(--warn-soft); border-color: transparent; color: var(--warn); }
 .progress.small { height: 6px; margin-top: 0.35rem; width: 120px; }
-
-/* Shown in the top bar when the session comes from the internet (view only) */
-.badge-remote {
-  padding: 0.15rem 0.55rem;
-  border-radius: 99px;
-  background: var(--warn-soft);
-  color: var(--warn);
-  font-size: 0.85em;
-  font-weight: 600;
-}
 
 /* ---------- 14. Settings, DICOM nodes, notices ---------- */
 textarea {
@@ -438,3 +429,33 @@ td.thumb-cell { width: 1%; padding-right: 0; }
 .swatch img { max-width: 90%; max-height: 52px; object-fit: contain; }
 .swatch.favicon { width: 68px; }
 .swatch.favicon img { width: 32px; height: 32px; }
+
+/* ---------- 17. Invitation page (the internet side) and the Share dialog ---------- */
+.share-wrap { max-width: 780px; margin: 0 auto; padding: 1.2rem; display: grid; gap: 1rem; }
+.share-head { display: flex; align-items: center; gap: 0.7rem; padding: 0.4rem 0; }
+.share-head .brand-name { font-weight: 600; font-size: 1.15rem; }
+.share-card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 1.3rem; display: grid; gap: 1.1rem; box-shadow: var(--shadow); }
+.share-card h1 { font-size: 1.35rem; }
+dl.share-details { display: grid; grid-template-columns: max-content 1fr; gap: 0.4rem 1.3rem; margin: 0; }
+dl.share-details dt { color: var(--ink-soft); }
+dl.share-details dd { margin: 0; font-weight: 600; }
+.share-actions { display: flex; flex-wrap: wrap; gap: 0.7rem; }
+/* the grid would stretch a lone small button across the card */
+.share-card > .btn.small { justify-self: start; }
+.btn.big { padding: 0.7rem 1.3rem; font-size: 1.02rem; }
+.share-meta { display: grid; gap: 0.35rem; padding: 0.8rem 1rem; border-radius: 8px; background: var(--panel-alt); }
+.share-meta b { font-variant-numeric: tabular-nums; }
+.share-password { display: grid; gap: 1rem; }
+.share-password input { font-family: var(--mono); font-size: 1.25rem; letter-spacing: 0.08em; text-transform: uppercase; text-align: center; padding: 0.7rem; }
+
+/* Phones: keep the series table inside the card (the body part is the least useful column) */
+@media (max-width: 560px) {
+  .share-wrap { padding: 0.8rem; }
+  .share-card { padding: 1rem; }
+  .share-card table.data th:nth-child(4), .share-card table.data td:nth-child(4) { display: none; }
+}
+
+/* Share dialog (staff): the link and the one-time password */
+.secret-box { display: flex; gap: 0.5rem; align-items: center; }
+.secret-box input { font-family: var(--mono); flex: 1; min-width: 0; }
+.secret-box .password { font-family: var(--mono); font-size: 1.4rem; font-weight: 700; letter-spacing: 0.08em; padding: 0.5rem 0.8rem; border: 2px dashed var(--accent); border-radius: 8px; user-select: all; }

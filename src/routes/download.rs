@@ -33,7 +33,7 @@ pub struct DownloadParams {
 }
 
 /// Wraps Orthanc's ZIP stream in a response that makes the browser save a file.
-fn zip_response(upstream: reqwest::Response, file_name: &str) -> AppResult<Response> {
+pub(crate) fn zip_response(upstream: reqwest::Response, file_name: &str) -> AppResult<Response> {
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/zip")

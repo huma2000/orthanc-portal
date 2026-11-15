@@ -87,11 +87,7 @@ pub fn default_roles() -> Vec<Role> {
         permissions: permissions.to_vec(),
     };
     vec![
-        role(
-            "viewer",
-            "Viewer (search + view; the only role useful remotely)",
-            &[Permission::Read, Permission::Visualize],
-        ),
+        role("viewer", "Viewer (search + view)", &[Permission::Read, Permission::Visualize]),
         role(
             "contributor",
             "Contributor (viewer + upload)",
@@ -99,13 +95,20 @@ pub fn default_roles() -> Vec<Role> {
         ),
         role(
             "exporter",
-            "Exporter (viewer + download + send)",
-            &[Permission::Read, Permission::Visualize, Permission::Download, Permission::Send],
+            "Exporter (viewer + download + send + share)",
+            &[Permission::Read, Permission::Visualize, Permission::Download, Permission::Send, Permission::Share],
         ),
         role(
             "clinical",
             "Full clinical (everything except administration)",
-            &[Permission::Read, Permission::Visualize, Permission::Upload, Permission::Download, Permission::Send],
+            &[
+                Permission::Read,
+                Permission::Visualize,
+                Permission::Upload,
+                Permission::Download,
+                Permission::Send,
+                Permission::Share,
+            ],
         ),
         role("administrator", "Administrator (everything)", &Permission::ALL),
     ]
@@ -133,16 +136,12 @@ pub struct Settings {
     pub orthanc_password: Secret,
 
     // ---- Network ------------------------------------------------------------
-    /// INTRANET listener, e.g. `0.0.0.0:8080`: every feature.
+    /// INTRANET listener, e.g. `0.0.0.0:8080`: the whole portal, for staff.
     pub bind_addr: String,
-    /// Is the internet-facing, VIEW-ONLY listener running?
+    /// Is the internet-facing listener running? It serves ONLY invitation links (shared studies).
     pub remote_enabled: bool,
     /// Its address, e.g. `0.0.0.0:8081`. Point the Cloudflare Tunnel here.
     pub remote_bind_addr: String,
-    /// Over the internet, refuse requests that return WHOLE DICOM files (a viewer only needs
-    /// the metadata and the pixel frames). Stops "save as .dcm" through the viewer's own
-    /// address. Recommended; switch it off only if a special object type fails to display.
-    pub remote_block_dicom_files: bool,
     /// Force the address given to Weasis (e.g. `https://pacs.example.com`).
     /// Empty = detect per request, which suits intranet and Cloudflare at once.
     pub public_base_url: String,
@@ -164,6 +163,17 @@ pub struct Settings {
     pub ohif: OhifMode,
     /// Largest single uploaded file, in megabytes.
     pub max_upload_mb: u64,
+
+    // ---- Sharing studies with people outside (invitation links) -----------------
+    /// Public address of the internet-facing listener as outsiders reach it, e.g.
+    /// `https://pacs.example.com`. Links are `<this>/s/<token>`. Must be set to share.
+    pub share_public_url: String,
+    /// Suggested validity of a new link, in hours, and the longest an administrator allows.
+    pub share_default_hours: u64,
+    pub share_max_hours: u64,
+    /// Suggested number of ZIP downloads of a new link (0 = view only), and the most allowed.
+    pub share_default_downloads: u64,
+    pub share_max_downloads: u64,
 
     // ---- Preview thumbnails -----------------------------------------------------
     /// Show a small preview image next to every study and series?
@@ -189,7 +199,11 @@ impl Settings {
             bind_addr: "0.0.0.0:8080".into(),
             remote_enabled: true,
             remote_bind_addr: "0.0.0.0:8081".into(),
-            remote_block_dicom_files: true,
+            share_public_url: String::new(),
+            share_default_hours: 48,
+            share_max_hours: 720,
+            share_default_downloads: 1,
+            share_max_downloads: 20,
             public_base_url: String::new(),
             session_hours: 12,
             weasis_token_minutes: 240,
@@ -292,6 +306,7 @@ impl Settings {
         self.bind_addr = self.bind_addr.trim().to_string();
         self.remote_bind_addr = self.remote_bind_addr.trim().to_string();
         self.public_base_url = self.public_base_url.trim().trim_end_matches('/').to_string();
+        self.share_public_url = self.share_public_url.trim().trim_end_matches('/').to_string();
         for role in &mut self.roles {
             role.key = role.key.trim().to_string();
             role.label = role.label.trim().to_string();
@@ -361,6 +376,23 @@ impl Settings {
             }
         }
 
+        // --- sharing
+        if !self.share_public_url.is_empty() {
+            // It is written into links people will click: allow nothing exotic.
+            let chars_ok = self.share_public_url.chars().all(|c| c.is_ascii_alphanumeric() || ":/.-_[]".contains(c));
+            if !(self.share_public_url.starts_with("https://") || self.share_public_url.starts_with("http://"))
+                || !chars_ok
+            {
+                return bad("The public address for share links must look like https://pacs.example.com".into());
+            }
+        }
+        if self.share_default_hours > self.share_max_hours {
+            return bad("The default validity of a share link cannot be longer than the maximum".into());
+        }
+        if self.share_default_downloads > self.share_max_downloads {
+            return bad("The default number of downloads cannot be larger than the maximum".into());
+        }
+
         // --- numbers
         let range = |name: &str, v: u64, lo: u64, hi: u64| -> Result<(), AppError> {
             if (lo..=hi).contains(&v) {
@@ -376,6 +408,10 @@ impl Settings {
         range("Audit log retention (days)", self.audit_retention_days, 0, 3650)?;
         range("Maximum upload size (MB)", self.max_upload_mb, 1, 102_400)?;
         range("Thumbnail cache (MB)", self.thumbnail_cache_mb, 0, 1024)?;
+        range("Share link validity, default (hours)", self.share_default_hours, 1, 8760)?;
+        range("Share link validity, maximum (hours)", self.share_max_hours, 1, 8760)?;
+        range("Share downloads, default", self.share_default_downloads, 0, 1000)?;
+        range("Share downloads, maximum", self.share_max_downloads, 0, 1000)?;
 
         // --- roles
         if self.roles.len() > 30 {

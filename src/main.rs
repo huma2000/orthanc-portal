@@ -40,6 +40,7 @@
 //! | `auth.rs`            | passwords, sessions, tokens, scope detection, guards   |
 //! | `orthanc.rs`         | client for Orthanc's REST API (reconfigurable live)    |
 //! | `branding.rs`        | uploaded logo / website icon: validation + memory copy |
+//! | `sharing.rs`         | invitation links: password/token generation, guest rules |
 //! | `thumbnails.rs`      | picks the preview image of a study/series + memory cache |
 //! | `models.rs`          | study / series / DICOM-node DTOs sent to the browser   |
 //! | `util.rs`            | validation and helper functions                        |
@@ -57,6 +58,7 @@ mod permissions;
 mod routes;
 mod server;
 mod settings;
+mod sharing;
 mod state;
 mod thumbnails;
 mod util;
@@ -66,7 +68,6 @@ use crate::branding::BrandingStore;
 use crate::config::Bootstrap;
 use crate::db::Db;
 use crate::orthanc::{OrthancClient, MIN_VERSION};
-use crate::permissions::AccessScope;
 use crate::server::ListenerManager;
 use crate::settings::{Settings, SettingsStore};
 use crate::state::AppState;
@@ -101,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let settings = Settings::merged_with_stored(Settings::from_env()?, db.load_settings()?);
 
-    // 4. Shared state. Each listener gets its own copy, differing only in `listener_scope`.
+    // 4. Shared state, used by both listeners (which differ only in the routes they serve).
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let mut stop_wait = stop_rx.clone();
     let listeners = ListenerManager::new(stop_rx);
@@ -113,8 +114,8 @@ async fn main() -> anyhow::Result<()> {
         orthanc: orthanc.clone(),
         sessions: TokenStore::default(),
         weasis_tokens: TokenStore::default(),
+        share_sessions: TokenStore::default(),
         throttle: LoginThrottle::default(),
-        listener_scope: AccessScope::Full,
         listeners: listeners.clone(),
         thumbs: ThumbnailCache::new(),
         branding,
@@ -141,6 +142,7 @@ async fn main() -> anyhow::Result<()> {
                 tick.tick().await;
                 state.sessions.purge_expired();
                 state.weasis_tokens.purge_expired();
+                state.share_sessions.purge_expired();
                 state.throttle.purge_old();
 
                 let days = state.settings.get().audit_retention_days;
@@ -177,10 +179,10 @@ async fn main() -> anyhow::Result<()> {
         effective.remote_enabled = true;
         effective.remote_bind_addr = settings.remote_bind_addr.clone();
         if let Err(e) = listeners.apply(&state, &effective).await {
-            tracing::error!("The remote (view-only) listener could not start: {e}");
+            tracing::error!("The internet (share links only) listener could not start: {e}");
         }
     } else {
-        tracing::warn!("The remote listener is disabled: there is no internet-facing access");
+        tracing::warn!("The internet listener is disabled: share links cannot be opened from outside");
     }
 
     // 9. Run until asked to stop, then let the listeners finish their requests.

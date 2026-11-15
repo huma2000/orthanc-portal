@@ -4,18 +4,12 @@
 //!
 //! * `POST /api/login`  body `{ "username": "...", "password": "..." }`
 //! * `POST /api/logout`
-//! * `GET  /api/me`     -> the logged-in user, **effective** permissions, access
-//!   scope and available features. The web UI uses it to decide which tabs and
-//!   buttons to show.
-//!
-//! "Effective" permissions are the user's own permissions narrowed to what the
-//! access scope allows: on the internet (remote scope) only `read` and
-//! `visualize` ever appear, even for an administrator.
+//! * `GET  /api/me`     -> the logged-in user, their permissions and the available
+//!   features. The web UI uses it to decide which tabs and buttons to show.
 
 use crate::auth::{self, AuthUser, SESSION_COOKIE};
 use crate::db::User;
 use crate::error::{AppError, AppResult};
-use crate::permissions::AccessScope;
 use crate::state::AppState;
 use axum::{
     extract::{ConnectInfo, State},
@@ -26,20 +20,31 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 
+/// What the "Share..." dialog needs to know about sharing.
+#[derive(Serialize)]
+pub struct ShareFeature {
+    /// The public address for share links is set (Settings > Network): without it nothing can be shared.
+    configured: bool,
+    /// Suggested validity (hours) and downloads of a new link, and the limits an administrator allows.
+    default_hours: u64,
+    max_hours: u64,
+    default_downloads: u64,
+    max_downloads: u64,
+}
+
 /// Optional capabilities of the installation, shown or hidden by the UI.
 #[derive(Serialize)]
 pub struct Features {
-    /// Orthanc's OHIF plugin is available: offer "View in browser".
+    /// Orthanc's OHIF plugin is available: offer the browser viewer.
     ohif: bool,
     /// Preview thumbnails are switched on (Settings > Viewers and uploads).
     thumbnails: bool,
-    /// Weasis may be used: on the intranet only. Over the internet images can only be
-    /// looked at in the browser viewer, because Weasis would download them.
-    weasis: bool,
+    /// Sharing with people outside (invitation links).
+    share: ShareFeature,
 }
 
 /// Answer of `/api/login` and `/api/me`: the user fields (id, username,
-/// permissions, scope...) plus the features.
+/// permissions...) plus the features.
 #[derive(Serialize)]
 pub struct Me {
     #[serde(flatten)]
@@ -50,8 +55,14 @@ pub struct Me {
 async fn me_response(state: &AppState, user: User) -> Me {
     let settings = state.settings.get();
     let ohif = state.orthanc.ohif_available(settings.ohif).await;
-    let weasis = user.scope == AccessScope::Full;
-    Me { user, features: Features { ohif, thumbnails: settings.thumbnails_enabled, weasis } }
+    let share = ShareFeature {
+        configured: !settings.share_public_url.is_empty(),
+        default_hours: settings.share_default_hours,
+        max_hours: settings.share_max_hours,
+        default_downloads: settings.share_default_downloads,
+        max_downloads: settings.share_max_downloads,
+    };
+    Me { user, features: Features { ohif, thumbnails: settings.thumbnails_enabled, share } }
 }
 
 #[derive(Deserialize)]
@@ -69,7 +80,6 @@ pub async fn login(
 ) -> AppResult<Response> {
     let username = req.username.trim().to_string();
     let settings = state.settings.get();
-    let scope = auth::effective_scope(&state, &headers);
     let ip = auth::client_ip(&headers, peer);
     let ip_key = auth::ip_key(&ip);
     // One address may fail more often than one account (an office shares an address),
@@ -97,7 +107,7 @@ pub async fn login(
         _ => {
             state.throttle.record_failure(&username, settings.login_max_failures, settings.lockout_secs());
             state.throttle.record_failure(&ip_key, ip_limit, settings.lockout_secs());
-            state.db.audit(&username, "login_failed", &format!("ip={ip} scope={scope:?}"));
+            state.db.audit(&username, "login_failed", &format!("ip={ip}"));
             // One generic message for every failure reason.
             return Err(AppError::BadRequest("Wrong username or password".into()));
         }
@@ -106,14 +116,14 @@ pub async fn login(
     // 3. Success: create the session and send the cookie.
     state.throttle.record_success(&username);
     state.db.touch_login(user.id)?;
-    state.db.audit(&user.username, "login", &format!("ip={ip} scope={scope:?}"));
+    state.db.audit(&user.username, "login", &format!("ip={ip}"));
 
     let ttl = settings.session_ttl_secs();
     let token = state.sessions.issue(user.id, ttl as i64, auth::MAX_SESSIONS_PER_USER);
     let secure = auth::cookie_secure(&settings, &headers);
     let cookie = auth::session_cookie(&token, ttl, secure);
 
-    let mut response = Json(me_response(&state, user.with_scope(scope)).await).into_response();
+    let mut response = Json(me_response(&state, user).await).into_response();
     response
         .headers_mut()
         .insert(header::SET_COOKIE, HeaderValue::from_str(&cookie).map_err(|e| AppError::Internal(e.to_string()))?);

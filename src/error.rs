@@ -31,6 +31,10 @@ pub enum AppError {
     #[error("{0}")]
     Denied(String),
 
+    /// The thing existed but is no longer available (an expired or revoked share link) -> HTTP 410.
+    #[error("{0}")]
+    Gone(String),
+
     /// The request itself is invalid (bad parameter, bad JSON...) -> HTTP 400.
     #[error("{0}")]
     BadRequest(String),
@@ -64,6 +68,7 @@ impl IntoResponse for AppError {
             AppError::Forbidden(_) | AppError::Denied(_) => StatusCode::FORBIDDEN,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::NotFound => StatusCode::NOT_FOUND,
+            AppError::Gone(_) => StatusCode::GONE,
             AppError::Conflict(_) => StatusCode::CONFLICT,
             AppError::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
             AppError::Upstream(_) => StatusCode::BAD_GATEWAY,

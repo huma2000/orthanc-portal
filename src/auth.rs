@@ -7,8 +7,8 @@
 //!   - **sessions**: the `portal_session` cookie set after login;
 //!   - **Weasis tokens**: short-lived bearer tokens placed in `weasis://` links;
 //! * [`LoginThrottle`]: temporary lockout after repeated failed logins;
-//! * [`effective_scope`]: decides whether a request comes from the intranet
-//!   (`Full`) or from the internet through Cloudflare (`Remote`, view-only);
+//! * guest sessions: people outside the building have no account, only a share link; entering
+//!   its password sets a separate cookie checked by [`authenticate_share`];
 //! * the [`AuthUser`] extractor: add `AuthUser(user): AuthUser` to a handler's
 //!   arguments and the request is rejected with 401 unless a valid session exists.
 //!
@@ -16,9 +16,9 @@
 //! disabling an account or changing its permissions takes effect immediately.
 
 use crate::config::Bootstrap;
-use crate::db::{Db, User};
+use crate::db::{Db, Share, User};
 use crate::error::{AppError, AppResult};
-use crate::permissions::{AccessScope, Permission, PermissionSet};
+use crate::permissions::{Permission, PermissionSet};
 use crate::settings::{CookieSecure, Settings};
 use crate::state::AppState;
 use crate::util::{is_https, now_unix, random_token};
@@ -315,13 +315,12 @@ pub fn clear_session_cookie(secure: bool) -> String {
     session_cookie("", 0, secure)
 }
 
-// ============================================================ request guards
-
-// ================================================================ access scope
+// ============================================================ where a request comes from
 
 /// Does the request carry the headers that Cloudflare adds to everything it forwards?
-/// A browser or Weasis on the intranet never sends them, and a remote visitor
-/// cannot remove them: Cloudflare sets them on its way in.
+/// A browser or Weasis on the intranet never sends them, and a visitor from the internet
+/// cannot remove them: Cloudflare sets them on its way in. The intranet listener uses this
+/// to refuse anything that reached it through the tunnel by mistake.
 pub fn is_cloudflare_request(headers: &HeaderMap) -> bool {
     headers.contains_key("cf-connecting-ip")
         || headers.contains_key("cf-ray")
@@ -332,23 +331,8 @@ pub fn is_cloudflare_request(headers: &HeaderMap) -> bool {
             .unwrap_or(false)
 }
 
-/// Decides whether this request is **Full** (intranet) or **Remote** (view-only).
-///
-/// Two independent safeguards, either one is enough to make it `Remote`:
-///  1. it arrived on the remote listener (`state.listener_scope`) - the port the
-///     Cloudflare Tunnel is configured to use;
-///  2. it carries Cloudflare headers - this protects you if the tunnel is
-///     mistakenly pointed at the intranet port.
-pub fn effective_scope(state: &AppState, headers: &HeaderMap) -> AccessScope {
-    if state.listener_scope == AccessScope::Remote || is_cloudflare_request(headers) {
-        AccessScope::Remote
-    } else {
-        AccessScope::Full
-    }
-}
-
-/// Best-effort client address for the audit log: the real visitor address given
-/// by Cloudflare when present, otherwise the TCP peer.
+/// Best-effort client address for the audit log and the throttles: the real visitor
+/// address given by Cloudflare when present, otherwise the TCP peer.
 pub fn client_ip(headers: &HeaderMap, peer: std::net::SocketAddr) -> String {
     headers
         .get("cf-connecting-ip")
@@ -357,21 +341,20 @@ pub fn client_ip(headers: &HeaderMap, peer: std::net::SocketAddr) -> String {
         .unwrap_or_else(|| peer.ip().to_string())
 }
 
-// ============================================================ request guards
+// ============================================================ request guards (staff)
 
 /// Loads the user behind a token and checks the account is still enabled.
-/// The permissions are already narrowed to the request's scope.
-fn active_user(state: &AppState, user_id: i64, headers: &HeaderMap) -> AppResult<User> {
+fn active_user(state: &AppState, user_id: i64) -> AppResult<User> {
     let user = state.db.get_user(user_id)?.ok_or(AppError::Unauthorized)?;
     if !user.active {
         return Err(AppError::Unauthorized);
     }
-    Ok(user.with_scope(effective_scope(state, headers)))
+    Ok(user)
 }
 
-/// Extractor for "a logged-in user". Usage: `AuthUser(user): AuthUser`.
+/// Extractor for "a logged-in user" (staff, on the intranet). Usage: `AuthUser(user): AuthUser`.
 /// It only proves WHO the caller is; handlers still call `user.require(...)`
-/// to check WHAT the caller may do (already limited by the intranet/internet scope).
+/// to check WHAT the caller may do.
 pub struct AuthUser(pub User);
 
 impl FromRequestParts<AppState> for AuthUser {
@@ -380,11 +363,11 @@ impl FromRequestParts<AppState> for AuthUser {
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
         let token = read_cookie(&parts.headers, SESSION_COOKIE).ok_or(AppError::Unauthorized)?;
         let user_id = state.sessions.lookup(&token).ok_or(AppError::Unauthorized)?;
-        Ok(AuthUser(active_user(state, user_id, &parts.headers)?))
+        Ok(AuthUser(active_user(state, user_id)?))
     }
 }
 
-/// Authentication for everything the viewers read through the portal:
+/// Authentication of STAFF for everything the viewers read through the portal:
 /// `/dicom-web/*`, `/wado` and `/ohif/*`.
 ///
 /// * **Weasis** is a separate program without our cookie, so it sends
@@ -392,19 +375,13 @@ impl FromRequestParts<AppState> for AuthUser {
 /// * **OHIF** runs inside a browser tab of the portal, so the normal session
 ///   cookie is sent automatically.
 ///
-/// The user must hold the `visualize` permission (allowed remotely too). Over the internet only the
-/// cookie is accepted: Weasis (bearer token) is an intranet-only viewer.
+/// The user must hold the `visualize` permission.
 pub fn authenticate_viewer(state: &AppState, headers: &HeaderMap) -> AppResult<User> {
-    // Over the internet only the browser's session cookie is accepted. A Weasis token (even a
-    // genuine one, issued on the intranet) is ignored there: Weasis saves the images on the
-    // computer, and images must not leave the building that way.
-    let remote = effective_scope(state, headers) == AccessScope::Remote;
     let bearer = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|t| t.trim().to_string())
-        .filter(|_| !remote);
+        .map(|t| t.trim().to_string());
 
     let user_id = if let Some(token) = bearer {
         state.weasis_tokens.lookup(&token).ok_or(AppError::Unauthorized)?
@@ -414,9 +391,44 @@ pub fn authenticate_viewer(state: &AppState, headers: &HeaderMap) -> AppResult<U
         return Err(AppError::Unauthorized);
     };
 
-    let user = active_user(state, user_id, headers)?;
+    let user = active_user(state, user_id)?;
     user.require(Permission::Visualize)?;
     Ok(user)
+}
+
+// ============================================================ request guards (guests)
+
+/// Name of the cookie an outside guest receives once the password of a share link was entered
+/// correctly. Separate from the staff cookie: the two worlds never mix.
+pub const SHARE_COOKIE: &str = "share_session";
+
+/// `Set-Cookie` value for a guest session. Same protections as the staff cookie.
+pub fn share_cookie(token: &str, max_age_secs: u64, secure: bool) -> String {
+    format!(
+        "{SHARE_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age_secs}{}",
+        if secure { "; Secure" } else { "" }
+    )
+}
+
+/// `Set-Cookie` value that ends a guest session in the browser.
+pub fn clear_share_cookie(secure: bool) -> String {
+    share_cookie("", 0, secure)
+}
+
+/// Authentication of an outside GUEST: the cookie set when the password was entered correctly.
+/// Returns the invitation if it is still usable (not revoked, not expired). Every request is
+/// checked against the database, so revoking a link or its expiry takes effect at once.
+pub fn authenticate_share(state: &AppState, headers: &HeaderMap) -> AppResult<Share> {
+    let cookie = read_cookie(headers, SHARE_COOKIE).ok_or(AppError::Unauthorized)?;
+    let share_id = state.share_sessions.lookup(&cookie).ok_or(AppError::Unauthorized)?;
+    let share = state.db.get_share(share_id)?.ok_or(AppError::Unauthorized)?;
+    if share.revoked_at.is_some() {
+        return Err(AppError::Gone("This link is no longer available.".into()));
+    }
+    if !share.is_active(now_unix()) {
+        return Err(AppError::Gone("This link has expired.".into()));
+    }
+    Ok(share)
 }
 
 // ============================================================ first start-up

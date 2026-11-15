@@ -16,6 +16,7 @@
     7. Viewers (Weasis / OHIF), downloads and sending to DICOM nodes
     8. Upload                       (queue, parallel XHR uploads, drag & drop)
     9. Transfers, Users (admin) and Audit log
+   9a. Sharing studies with people outside (Share dialog, Shares tab)
    9b. Settings and DICOM nodes (admin, intranet only): the whole configuration,
        including the branding (window title, website icon, logo)
    10. Start-up
@@ -52,7 +53,7 @@ const MODALITY_CHIPS = [
 
 /** Global UI state. `user` is null while signed out. */
 const state = {
-  user: null,     // { id, username, permissions: ["read", ...], scope: "full"|"remote", features: { ohif, thumbnails } }
+  user: null,     // { id, username, permissions: ["read", ...], features: { ohif, thumbnails, share: {...} } }
   view: null,     // id of the visible tab ("studies", "series", "upload", "users", "audit")
   notice: "",     // message shown on the login form (e.g. "Your session expired")
   // Identity of this installation (Settings > Branding). Filled from /api/public.
@@ -69,16 +70,6 @@ const can = (permission) => !!state.user && state.user.permissions.includes(perm
 
 /** Is the OHIF browser viewer available? (decided by the server from Orthanc's plugins) */
 const hasOhif = () => !!(state.user && state.user.features && state.user.features.ohif);
-
-/**
- * May Weasis be used? Only on the intranet. Weasis saves the images on the computer, so over
- * the internet the browser viewer (OHIF) is the only way to look at them (the server also
- * refuses Weasis links and tokens there; hiding the button is just the polite part).
- */
-const hasWeasis = () => !!(state.user && state.user.features && state.user.features.weasis);
-
-/** Is this session limited to viewing (internet access through Cloudflare)? */
-const isRemote = () => !!state.user && state.user.scope === "remote";
 
 /* ====================================================================
    2. DOM HELPER
@@ -203,6 +194,7 @@ const VIEWS = [
   { id: "series", label: "Series", needs: "read", build: () => buildSearchView(SERIES_SEARCH) },
   { id: "upload", label: "Upload", needs: "upload", build: buildUploadView },
   { id: "transfers", label: "Transfers", needs: "send", build: buildTransfersView },
+  { id: "shares", label: "Shares", needs: "share", build: buildSharesView },
   { id: "users", label: "Users", needs: "admin", build: buildUsersView },
   { id: "nodes", label: "DICOM nodes", needs: "admin", build: buildNodesView },
   { id: "settings", label: "Settings", needs: "admin", build: buildSettingsView },
@@ -233,9 +225,6 @@ function renderApp() {
     h("div", { class: "brand brand-slot", "data-size": "24" }, ...brandContent(24, false)),
     nav,
     h("div", { class: "userbox" },
-      isRemote()
-        ? h("span", { class: "badge-remote", title: "Connected through the internet: you can search and view studies, nothing else." }, "Remote access, view only")
-        : null,
       h("span", null, state.user.username),
       h("button", { class: "btn small", type: "button", onclick: signOut }, "Sign out")));
 
@@ -590,20 +579,12 @@ function buildSearchView(cfg) {
         onclick: () => { for (const input of Object.values(inputs)) input.value = ""; run(0); },
       }, "Clear filters")));
 
-  let hint = null;
-  if (can("visualize")) {
-    if (!hasWeasis()) {
-      // Over the internet: images are shown in the browser only, never downloaded to the computer.
-      hint = h("p", { class: "muted" }, hasOhif()
-        ? "Images open in the browser viewer in a new tab. They are not downloaded to this computer."
-        : "Images cannot be viewed over the internet: the browser viewer (OHIF) is not available on this server.");
-    } else {
-      hint = h("p", { class: "muted" }, "Weasis needs to be ",
+  const hint = can("visualize")
+    ? h("p", { class: "muted" }, "Weasis needs to be ",
         h("a", { href: "https://weasis.org", target: "_blank", rel: "noopener" }, "installed"),
         " on this computer",
-        hasOhif() ? "; the browser viewer (OHIF) works without installing anything." : ".");
-    }
-  }
+        hasOhif() ? "; the browser viewer (OHIF) works without installing anything." : ".")
+    : null;
 
   run(0); // show the most recent studies right away
   return h("div", { class: "view" },
@@ -667,6 +648,7 @@ function studyActions(study) {
   return [
     can("visualize") ? viewMenu(study) : null,
     can("send") ? h("button", { class: "btn small", type: "button", onclick: () => openSendDialog(study) }, "Send to...") : null,
+    can("share") ? h("button", { class: "btn small", type: "button", onclick: () => openShareDialog(study) }, "Share...") : null,
     can("download") ? downloadMenu("studies", study.id) : null,
   ];
 }
@@ -753,17 +735,9 @@ const ohifUrl = (studyUid) => `/ohif/viewer?StudyInstanceUIDs=${encodeURICompone
 
 /**
  * "View" control of a study. With OHIF available it is a small menu offering both
- * viewers; otherwise it is just the Weasis button. This works for remote
- * (internet) users too, because viewing is the one thing they are allowed to do.
+ * viewers; otherwise it is just the Weasis button.
  */
 function viewMenu(study) {
-  if (!hasWeasis()) {
-    // Over the internet: one button, the browser viewer. (No viewer at all when the OHIF
-    // plugin is missing; the search page explains why.)
-    return hasOhif()
-      ? h("a", { class: "btn small view-link", href: ohifUrl(study.study_instance_uid), target: "_blank", rel: "noopener", title: "Opens in a new tab" }, "View")
-      : null;
-  }
   if (!hasOhif()) return weasisButton(study.study_instance_uid, "Open in Weasis");
 
   const weasisItem = h("button", { class: "menu-item", type: "button" },
@@ -1257,6 +1231,166 @@ function buildAuditView() {
 }
 
 /* ====================================================================
+   9a. SHARING STUDIES WITH PEOPLE OUTSIDE
+   A staff member creates an invitation: a link plus a generated password that opens ONE
+   study for someone outside (online viewing + a limited number of ZIP downloads, until the
+   link expires). The password is shown only once, when the link is created.
+   ==================================================================== */
+
+/**
+ * Copies text to the clipboard. `navigator.clipboard` only exists on secure pages (HTTPS or
+ * localhost) and the intranet is often plain HTTP, so fall back to the old way.
+ */
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); return true; }
+  } catch { /* use the fallback */ }
+  const area = h("textarea", null, text);
+  area.style.position = "fixed";
+  area.style.opacity = "0";
+  document.body.append(area);
+  area.select();
+  let copied = false;
+  try { copied = document.execCommand("copy"); } catch { copied = false; }
+  area.remove();
+  return copied;
+}
+
+/** A button that copies `getText()` and says so. */
+function copyButton(label, getText) {
+  return h("button", {
+    class: "btn small", type: "button",
+    onclick: async () => toast((await copyText(getText())) ? "Copied." : "Could not copy: select the text and copy it by hand.", "info", 2500),
+  }, label);
+}
+
+/** "1 d 3 h 20 min" / "45 min" / "30 s". */
+function formatDuration(seconds) {
+  const s = Math.max(0, Math.floor(seconds));
+  const days = Math.floor(s / 86400), hours = Math.floor((s % 86400) / 3600), minutes = Math.floor((s % 3600) / 60);
+  if (days > 0) return `${days} d ${hours} h ${minutes} min`;
+  if (hours > 0) return `${hours} h ${minutes} min`;
+  if (minutes > 0) return `${minutes} min`;
+  return `${s} s`;
+}
+
+/** Dialog to invite somebody outside to look at a study (the "Share..." button of a study). */
+function openShareDialog(study) {
+  const feature = state.user.features.share;
+  const dialog = h("dialog", { class: "share-dialog" });
+  dialog.addEventListener("close", () => dialog.remove());
+  document.body.append(dialog);
+  const close = h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Close");
+  const who = h("p", null, h("b", null, formatName(study.patient_name)), " ", formatDicomDate(study.study_date), study.study_description ? `, ${study.study_description}` : "");
+
+  /** Step 1: how long and how many downloads. */
+  function showForm() {
+    if (!feature.configured) {
+      dialog.replaceChildren(h("div", { class: "dialog-form" },
+        h("h2", null, "Sharing is not set up yet"),
+        h("p", null, "An administrator must first enter the public address of the share links in Settings, section Share links."),
+        h("div", { class: "dialog-actions" },
+          can("admin") ? h("button", { class: "btn primary", type: "button", onclick: () => { dialog.close(); state.view = "settings"; renderApp(); } }, "Open settings") : null,
+          close)));
+      return;
+    }
+    const error = h("div", { class: "form-error", role: "alert", hidden: true });
+    const hours = h("input", { type: "number", min: 1, max: feature.max_hours, value: feature.default_hours, required: true });
+    const downloads = h("input", { type: "number", min: 0, max: feature.max_downloads, value: feature.default_downloads, required: true });
+    const note = h("input", { maxlength: 120, placeholder: "For your own records, e.g. Dr. Smith, second opinion", autocomplete: "off" });
+    const submit = h("button", { class: "btn primary", type: "submit" }, "Create link and password");
+    dialog.replaceChildren(h("form", {
+      class: "dialog-form",
+      onsubmit: async (event) => {
+        event.preventDefault();
+        error.hidden = true;
+        submit.disabled = true;
+        try {
+          showResult(await api("POST", `/api/studies/${study.id}/share`, { hours: Number(hours.value), downloads: Number(downloads.value), note: note.value }));
+        } catch (e) {
+          error.textContent = e.message;
+          error.hidden = false;
+          submit.disabled = false;
+        }
+      },
+    },
+      h("h2", null, "Share this study with somebody outside"),
+      who, error,
+      h("label", null, `The link works for (hours, up to ${feature.max_hours})`, hours),
+      h("label", null, `Downloads allowed as ZIP (0 = online viewing only, up to ${feature.max_downloads})`, downloads),
+      h("label", null, "Note (optional)", note),
+      h("p", { class: "muted" }, "The person gets a link and a password that opens only this study. They can look at it online until the link expires; running out of downloads does not stop that."),
+      h("div", { class: "dialog-actions" }, h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Cancel"), submit)));
+  }
+
+  /** Step 2: the link and the password, the only time the password can be read. */
+  function showResult(result) {
+    const expires = new Date(result.expires_at * 1000).toLocaleString();
+    const link = h("input", { readonly: true, value: result.url, "aria-label": "Link", onfocus: (e) => e.target.select() });
+    const invitation = () => `You have been invited to look at an imaging study.\nLink: ${result.url}\nThe link works until ${expires}.\nThe password is sent to you separately.`;
+    dialog.replaceChildren(h("div", { class: "dialog-form" },
+      h("h2", null, "Link and password created"),
+      who,
+      h("label", null, "Link", h("div", { class: "secret-box" }, link, copyButton("Copy link", () => result.url))),
+      h("div", null, h("div", { class: "muted" }, "Password"),
+        h("div", { class: "secret-box" }, h("span", { class: "password" }, result.password), copyButton("Copy password", () => result.password))),
+      h("p", { class: "form-error" }, "The password is shown only now and cannot be recovered. Give it to the person by a different channel than the link (a phone call, an SMS)."),
+      h("p", { class: "muted" }, `Valid until ${expires}. Downloads allowed: ${result.max_downloads}.`),
+      h("div", { class: "dialog-actions" }, copyButton("Copy invitation text (without the password)", invitation), close)));
+  }
+
+  showForm();
+  dialog.showModal();
+}
+
+/** The "Shares" tab: the invitations, with time and downloads left, and a Revoke button. */
+function buildSharesView() {
+  const container = h("section", { class: "panel" });
+
+  async function load() {
+    container.replaceChildren(h("div", { class: "loading" }, "Loading..."));
+    try {
+      const shares = await api("GET", "/api/shares");
+      container.replaceChildren(shares.length ? renderTable(shares) : h("div", { class: "empty" }, 'No invitation yet. Use "Share..." on a study.'));
+    } catch (e) {
+      container.replaceChildren(h("div", { class: "empty" }, e.message));
+      toastError(e);
+    }
+  }
+
+  function renderTable(shares) {
+    const now = Date.now() / 1000;
+    return h("div", { class: "table-wrap" }, h("table", { class: "data" },
+      h("thead", null, h("tr", null, ["Study", "By", "Created", "Time left", "Downloads", "Opened", "Status", "Actions"].map((t) => h("th", { class: t === "Actions" ? "num" : null }, t)))),
+      h("tbody", null, shares.map((s) => h("tr", null,
+        h("td", null, s.label.replaceAll(" | ", " - "), s.note ? h("div", { class: "sub" }, s.note) : null),
+        h("td", null, s.created_by),
+        h("td", { class: "nowrap" }, formatTimestamp(s.created_at)),
+        h("td", { class: "nowrap" }, s.status === "active" ? formatDuration(s.expires_at - now) : "-"),
+        h("td", { class: "nowrap" }, `${s.downloads_used} of ${s.max_downloads}`),
+        h("td", { class: "nowrap" }, s.access_count ? `${s.access_count}x, last ${formatTimestamp(s.last_access_at)}` : "never"),
+        h("td", null, h("span", { class: `chip ${s.status === "active" ? "status-on" : "status-off"}` }, s.status)),
+        h("td", null, h("div", { class: "actions" },
+          s.url && s.status === "active" ? copyButton("Copy link", () => s.url) : null,
+          s.status === "active"
+            ? h("button", {
+                class: "btn small danger", type: "button",
+                onclick: async () => {
+                  if (!confirm("Revoke this link? The person will not be able to open it any more.")) return;
+                  try { await api("POST", `/api/shares/${s.id}/revoke`); toast("Link revoked."); load(); } catch (e) { toastError(e); }
+                },
+              }, "Revoke")
+            : null)))))));
+  }
+
+  load();
+  return h("div", { class: "view" },
+    h("div", { class: "page-head" }, h("h1", null, "Shares"), h("button", { class: "btn", type: "button", onclick: load }, "Refresh")),
+    h("p", { class: "muted" }, "Invitations for people outside: a link plus a password that opens one study. The password cannot be shown again; revoke a link if it was sent to the wrong person."),
+    container);
+}
+
+/* ====================================================================
    9b. SETTINGS AND DICOM NODES
    Only administrators on the intranet see these tabs: the server does not even
    register their routes on the internet-facing port.
@@ -1303,11 +1437,17 @@ const SETTINGS_FIELDS = {
     { key: "orthanc_username", label: "Orthanc user name", hint: "Leave empty if Orthanc has no authentication." },
   ],
   network: [
-    { key: "bind_addr", label: "Intranet address (all features)", placeholder: "0.0.0.0:8080", hint: "IP:PORT. 0.0.0.0 = every network card." },
-    { key: "remote_enabled", label: "Enable the remote (internet) listener", type: "checkbox", wide: true },
-    { key: "remote_bind_addr", label: "Remote address (view only)", placeholder: "0.0.0.0:8081", hint: "Point the Cloudflare Tunnel here. Only searching and viewing work through it." },
-    { key: "remote_block_dicom_files", label: "Internet viewers cannot download whole DICOM files (recommended)", type: "checkbox", wide: true, hint: "Over the internet only the browser viewer (OHIF) is available, because Weasis would download the images. This also refuses requests for entire .dcm files through the viewer's address: the viewer only needs metadata and pixel frames. Switch it off only if some special object type fails to display remotely." },
-    { key: "public_base_url", label: "Public address for Weasis (optional)", placeholder: "https://pacs.example.com", hint: "Empty = automatic: intranet users get the intranet address, internet users the Cloudflare one." },
+    { key: "bind_addr", label: "Intranet address (the whole portal)", placeholder: "0.0.0.0:8080", hint: "IP:PORT. 0.0.0.0 = every network card." },
+    { key: "remote_enabled", label: "Enable the internet listener (share links only)", type: "checkbox", wide: true },
+    { key: "remote_bind_addr", label: "Internet address (share links only)", placeholder: "0.0.0.0:8081", hint: "Point the Cloudflare Tunnel here. Only invitation links work through it: there are no accounts and no search on this side." },
+    { key: "public_base_url", label: "Public address for Weasis (optional)", placeholder: "https://pacs.example.com", hint: "Empty = automatic: the address you used to open the portal. (Weasis is for staff on the intranet; guests only get the browser viewer.)" },
+  ],
+  sharing: [
+    { key: "share_public_url", label: "Public address of the share links", placeholder: "https://pacs.example.com", wide: true, hint: "The address outsiders use to reach the internet listener (your Cloudflare hostname). Links look like <this address>/s/<code>. Sharing stays switched off until this is set." },
+    { key: "share_default_hours", label: "Link validity, default (hours)", type: "number", min: 1, max: 8760, hint: "48 hours = two days." },
+    { key: "share_max_hours", label: "Link validity, maximum (hours)", type: "number", min: 1, max: 8760, hint: "Nobody can create a longer link." },
+    { key: "share_default_downloads", label: "Downloads allowed, default", type: "number", min: 0, max: 1000, hint: "0 = online viewing only. Running out of downloads never stops the online viewing: only the time does." },
+    { key: "share_max_downloads", label: "Downloads allowed, maximum", type: "number", min: 0, max: 1000 },
   ],
   security: [
     { key: "session_hours", label: "Session duration (hours)", type: "number", min: 1, max: 720, hint: "Applies to the next sign-ins." },
@@ -1508,7 +1648,18 @@ function buildSettingsView() {
         try {
           doc = await api("PUT", "/api/admin/settings", body);
           await refreshBrand();
-          if (state.user.features) state.user.features.thumbnails = doc.settings.thumbnails_enabled;
+          if (state.user.features) {
+            state.user.features.thumbnails = doc.settings.thumbnails_enabled;
+            // The "Share..." dialog reads these: keep them in step with what was just saved, so
+            // an administrator who enters the public address can share right away.
+            state.user.features.share = {
+              configured: Boolean(doc.settings.share_public_url),
+              default_hours: doc.settings.share_default_hours,
+              max_hours: doc.settings.share_max_hours,
+              default_downloads: doc.settings.share_default_downloads,
+              max_downloads: doc.settings.share_max_downloads,
+            };
+          }
           refreshOrthancStatus(true);
           toast("Settings saved.");
           draw(doc.messages || []);
@@ -1528,8 +1679,9 @@ function buildSettingsView() {
           h("label", null, "Orthanc password", password),
           h("label", { class: "check" }, clearPassword, "Remove the saved password")),
         h("div", { class: "setting wide" }, testButton, testBox)),
-      section("Network", "Two listeners: the intranet one (everything) and the remote one (view only, for the Cloudflare Tunnel). Changing an address re-opens the listener right away; if the new address cannot be opened, nothing is changed. Running in Docker? Leave the two addresses as they are: Docker publishes fixed ports.",
+      section("Network", "Two listeners: the intranet one (the whole portal, for staff) and the internet one (ONLY invitation links, for the Cloudflare Tunnel). Changing an address re-opens the listener right away; if the new address cannot be opened, nothing is changed. Running in Docker? Leave the two addresses as they are: Docker publishes fixed ports.",
         SETTINGS_FIELDS.network.map(field), listenerInfo),
+      section("Share links (invitations for people outside)", "A staff member with the share permission can invite somebody outside: a link plus a generated password that opens ONE study, to look at online and to download a limited number of times, until the link expires. These are the defaults offered when creating a link, and the limits nobody can exceed.", SETTINGS_FIELDS.sharing.map(field)),
       section("Sessions and sign-in security", null, SETTINGS_FIELDS.security.map(field)),
       section("Viewers and uploads", null, SETTINGS_FIELDS.viewers.map(field)),
       section("Roles", "Shortcuts that pre-tick permissions when you create or edit a user. Users keep their own permissions: changing a role does not change existing users.", rolesEditor.node),

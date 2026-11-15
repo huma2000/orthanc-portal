@@ -5,7 +5,8 @@
 //!   * **audit_log**: who did what and when (login, upload, download, user changes...);
 //!   * **transfers**: studies sent to remote DICOM nodes, with the Orthanc job id;
 //!   * **settings**: the configuration saved from the web interface (one JSON document);
-//!   * **branding**: the logo and website icon uploaded from the Settings screen.
+//!   * **branding**: the logo and website icon uploaded from the Settings screen;
+//!   * **shares**: invitation links that give one outside person access to one study.
 //!
 //! The connection is wrapped in a `std::sync::Mutex`. Queries here are tiny
 //! (a handful of users), so they finish in microseconds and it is fine to run
@@ -13,7 +14,7 @@
 //! `.await`, which would risk a deadlock.
 
 use crate::error::AppError;
-use crate::permissions::{AccessScope, Permission, PermissionSet};
+use crate::permissions::{Permission, PermissionSet};
 use crate::util::now_unix;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
@@ -32,20 +33,9 @@ pub struct User {
     pub active: bool,
     pub created_at: i64,
     pub last_login: Option<i64>,
-    /// Where the CURRENT request comes from (intranet or internet). Not stored in
-    /// the database: set per request by `auth.rs`, see [`User::with_scope`].
-    pub scope: AccessScope,
 }
 
 impl User {
-    /// Narrows the user's permissions to what the request's scope allows, so every
-    /// later `require()` check automatically honours the intranet/internet split.
-    pub fn with_scope(mut self, scope: AccessScope) -> Self {
-        self.permissions = self.permissions.restricted_to(scope);
-        self.scope = scope;
-        self
-    }
-
     /// Server-side permission gate used at the top of every protected handler.
     pub fn require(&self, permission: Permission) -> Result<(), AppError> {
         if self.permissions.contains(permission) {
@@ -54,6 +44,83 @@ impl User {
             Err(AppError::Forbidden(permission.as_str()))
         }
     }
+}
+
+/// An invitation: a password-protected link that lets ONE outside person look at ONE study
+/// (and download it a limited number of times) until it expires. See `routes/guest.rs`.
+#[derive(Debug, Clone, Serialize)]
+pub struct Share {
+    pub id: i64,
+    /// Random, unguessable part of the link (`/s/<token>`).
+    pub token: String,
+    /// Argon2 hash of the generated password; the password itself is shown once, at creation.
+    #[serde(skip)]
+    pub password_hash: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub created_by: String,
+    /// Orthanc id of the study (used to read and download it).
+    pub study_id: String,
+    /// DICOM StudyInstanceUID (what the viewer asks for; the only study a guest may reach).
+    pub study_uid: String,
+    /// Readable description kept for the Shares list: patient / date / description.
+    pub label: String,
+    /// Optional free text of the person who created it ("Dr. Smith, second opinion").
+    pub note: String,
+    pub max_downloads: i64,
+    pub downloads_used: i64,
+    pub revoked_at: Option<i64>,
+    /// How many times the password was entered correctly, and the last time.
+    pub access_count: i64,
+    pub last_access_at: Option<i64>,
+}
+
+impl Share {
+    /// Can the link still be used at time `now`? (Viewing does not depend on downloads left.)
+    pub fn is_active(&self, now: i64) -> bool {
+        self.revoked_at.is_none() && now < self.expires_at
+    }
+
+    pub fn downloads_left(&self) -> i64 {
+        (self.max_downloads - self.downloads_used).max(0)
+    }
+}
+
+/// What is needed to create a [`Share`].
+pub struct NewShare<'a> {
+    pub token: &'a str,
+    pub password_hash: &'a str,
+    pub expires_at: i64,
+    pub created_by: &'a str,
+    pub study_id: &'a str,
+    pub study_uid: &'a str,
+    pub label: &'a str,
+    pub note: &'a str,
+    pub max_downloads: i64,
+}
+
+const SHARE_COLUMNS: &str =
+    "id, token, password_hash, created_at, expires_at, created_by, study_id, study_uid, label, \
+                             note, max_downloads, downloads_used, revoked_at, access_count, last_access_at";
+
+fn row_to_share(row: &Row) -> rusqlite::Result<Share> {
+    Ok(Share {
+        id: row.get(0)?,
+        token: row.get(1)?,
+        password_hash: row.get(2)?,
+        created_at: row.get(3)?,
+        expires_at: row.get(4)?,
+        created_by: row.get(5)?,
+        study_id: row.get(6)?,
+        study_uid: row.get(7)?,
+        label: row.get(8)?,
+        note: row.get(9)?,
+        max_downloads: row.get(10)?,
+        downloads_used: row.get(11)?,
+        revoked_at: row.get(12)?,
+        access_count: row.get(13)?,
+        last_access_at: row.get(14)?,
+    })
 }
 
 /// One line of the audit trail.
@@ -117,7 +184,6 @@ fn row_to_user(row: &Row) -> rusqlite::Result<User> {
         active: row.get::<_, i64>(4)? != 0,
         created_at: row.get(5)?,
         last_login: row.get(6)?,
-        scope: AccessScope::Full, // overwritten per request by `with_scope`
     })
 }
 
@@ -172,6 +238,25 @@ impl Db {
                  job_id   TEXT    NOT NULL,
                  final_state TEXT,                                      -- set once the job has ended
                  final_error TEXT
+             );
+
+             -- Invitation links for people outside (see routes/guest.rs).
+             CREATE TABLE IF NOT EXISTS shares (
+                 id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                 token          TEXT    NOT NULL UNIQUE,
+                 password_hash  TEXT    NOT NULL,
+                 created_at     INTEGER NOT NULL,
+                 expires_at     INTEGER NOT NULL,
+                 created_by     TEXT    NOT NULL,
+                 study_id       TEXT    NOT NULL,
+                 study_uid      TEXT    NOT NULL,
+                 label          TEXT    NOT NULL,
+                 note           TEXT    NOT NULL DEFAULT '',
+                 max_downloads  INTEGER NOT NULL,
+                 downloads_used INTEGER NOT NULL DEFAULT 0,
+                 revoked_at     INTEGER,
+                 access_count   INTEGER NOT NULL DEFAULT 0,
+                 last_access_at INTEGER
              );
 
              -- Logo and website icon uploaded from the Settings screen (kind = 'logo' | 'favicon').
@@ -452,6 +537,99 @@ impl Db {
         let conn = self.lock();
         let audit = conn.execute("DELETE FROM audit_log WHERE ts < ?1", params![cutoff])?;
         let transfers = conn.execute("DELETE FROM transfers WHERE ts < ?1", params![cutoff])?;
-        Ok(audit + transfers)
+        // Links that expired before the cut-off are no use any more either.
+        let shares = conn.execute("DELETE FROM shares WHERE expires_at < ?1", params![cutoff])?;
+        Ok(audit + transfers + shares)
+    }
+
+    // ---------------------------------------------------------------- shares
+
+    /// Creates an invitation and returns it.
+    pub fn create_share(&self, new: &NewShare) -> Result<Share, AppError> {
+        let id = {
+            let conn = self.lock();
+            conn.execute(
+                "INSERT INTO shares (token, password_hash, created_at, expires_at, created_by, study_id, study_uid,
+                                     label, note, max_downloads)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    new.token,
+                    new.password_hash,
+                    now_unix(),
+                    new.expires_at,
+                    new.created_by,
+                    new.study_id,
+                    new.study_uid,
+                    new.label,
+                    new.note,
+                    new.max_downloads
+                ],
+            )?;
+            conn.last_insert_rowid()
+        };
+        self.get_share(id)?.ok_or(AppError::NotFound)
+    }
+
+    pub fn get_share(&self, id: i64) -> Result<Option<Share>, AppError> {
+        let conn = self.lock();
+        let sql = format!("SELECT {SHARE_COLUMNS} FROM shares WHERE id = ?1");
+        Ok(conn.query_row(&sql, params![id], row_to_share).optional()?)
+    }
+
+    pub fn get_share_by_token(&self, token: &str) -> Result<Option<Share>, AppError> {
+        let conn = self.lock();
+        let sql = format!("SELECT {SHARE_COLUMNS} FROM shares WHERE token = ?1");
+        Ok(conn.query_row(&sql, params![token], row_to_share).optional()?)
+    }
+
+    /// Newest first. `only_user = Some(name)` lists just the invitations that user created.
+    pub fn list_shares(&self, only_user: Option<&str>, limit: i64) -> Result<Vec<Share>, AppError> {
+        let conn = self.lock();
+        let sql = format!(
+            "SELECT {SHARE_COLUMNS} FROM shares WHERE (?1 IS NULL OR created_by = ?1 COLLATE NOCASE)
+             ORDER BY id DESC LIMIT ?2"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![only_user, limit], row_to_share)?;
+        let shares = rows.collect::<Result<Vec<_>, _>>()?;
+        Ok(shares)
+    }
+
+    /// Takes ONE download from the invitation, atomically: the condition and the increment
+    /// are a single SQL statement, so two simultaneous downloads cannot both use the last
+    /// one. Returns `false` when nothing was taken (none left, expired or revoked).
+    pub fn reserve_download(&self, id: i64, now: i64) -> Result<bool, AppError> {
+        let conn = self.lock();
+        let changed = conn.execute(
+            "UPDATE shares SET downloads_used = downloads_used + 1
+             WHERE id = ?1 AND revoked_at IS NULL AND expires_at > ?2 AND downloads_used < max_downloads",
+            params![id, now],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Gives a reserved download back (the archive could not even be started).
+    pub fn refund_download(&self, id: i64) -> Result<(), AppError> {
+        let conn = self.lock();
+        conn.execute("UPDATE shares SET downloads_used = MAX(downloads_used - 1, 0) WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Switches an invitation off. Returns `false` if it was already revoked or does not exist.
+    pub fn revoke_share(&self, id: i64, now: i64) -> Result<bool, AppError> {
+        let conn = self.lock();
+        let changed =
+            conn.execute("UPDATE shares SET revoked_at = ?2 WHERE id = ?1 AND revoked_at IS NULL", params![id, now])?;
+        Ok(changed == 1)
+    }
+
+    /// Counts a successful password entry.
+    pub fn record_share_access(&self, id: i64, now: i64) -> Result<(), AppError> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE shares SET access_count = access_count + 1, last_access_at = ?2 WHERE id = ?1",
+            params![id, now],
+        )?;
+        Ok(())
     }
 }

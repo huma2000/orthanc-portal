@@ -1,0 +1,30 @@
+<!doctype html>
+<!--
+  share.html - the ONLY page served on the internet-facing side of the portal.
+
+  A guest opens the invitation link /s/<token>; /static/share.js then asks the server what
+  to show: a password form, the study (details, "View online", "Download") or a message
+  saying the link is no longer available. Nothing else lives on this side: no accounts,
+  no search, no administration.
+
+  The title and the icon link below contain markers that the server fills in for every
+  request (the window title and website icon chosen in Settings > Branding). There are no
+  external resources (fonts, CDNs): everything is served by the portal itself.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <!-- A private page: keep it out of search engines -->
+    <meta name="robots" content="noindex, nofollow" />
+    <title>{{TITLE}}</title>
+    <link rel="icon" href="{{FAVICON_URL}}" type="{{FAVICON_TYPE}}" />
+    <link rel="stylesheet" href="/static/app.css" />
+  </head>
+  <body class="share-body">
+    <div id="app"></div>
+    <noscript>This page needs JavaScript.</noscript>
+    <script src="/static/share.js"></script>
+  </body>
+</html>

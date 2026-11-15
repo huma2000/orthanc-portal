@@ -1,32 +1,26 @@
 //! # permissions.rs
 //!
-//! The permission model of the portal, in two layers:
+//! The permission model of the portal. Every user owns a **set of permissions**; each API
+//! route checks the one it needs (`user.require(Permission::X)`), so access control is
+//! enforced on the server - hiding a button in the web UI is only cosmetic.
 //!
-//! 1. **Permissions** - what each *user* may do. Every user owns a set of them.
-//!    Each API route checks the one it needs (`user.require(Permission::X)`), so
-//!    access control is enforced on the server; hiding a button in the web UI is
-//!    only cosmetic.
-//! 2. **Access scope** - where the request comes *from*. Requests arriving
-//!    through the Cloudflare Tunnel (internet) get the `Remote` scope, which only
-//!    ever allows viewing, whatever the user's own permissions are. Requests
-//!    from the intranet get the `Full` scope.
+//! | Permission  | What it allows                                                         |
+//! |-------------|------------------------------------------------------------------------|
+//! | `read`      | Search / list studies and series, see their metadata                   |
+//! | `visualize` | Open a study in Weasis or OHIF, see preview thumbnails                 |
+//! | `upload`    | Upload DICOM files (or ZIP archives) into the PACS                     |
+//! | `download`  | Download studies / series as a ZIP file                                |
+//! | `send`      | Send a study to a remote DICOM node (an Orthanc "modality")            |
+//! | `share`     | Invite somebody OUTSIDE: password-protected link to ONE study          |
+//! | `admin`     | Manage users and settings, read the audit log                          |
 //!
-//! The permissions a request really has are `user permissions  ∩  scope allows`
-//! (see [`PermissionSet::restricted_to`]).
+//! All accounts live on the **intranet**. People outside never have an account: they get a
+//! one-study invitation link (see `routes/shares.rs` and `routes/guest.rs`), which has its
+//! own rules and is not part of this permission model.
 //!
-//! | Permission  | What it allows                                                      |
-//! |-------------|---------------------------------------------------------------------|
-//! | `read`      | Search / list studies and series, see their metadata  (remote: yes) |
-//! | `visualize` | Open a study in Weasis or OHIF; see preview thumbnails  (remote: yes) |
-//! | `upload`    | Upload DICOM files (or ZIP archives) into the PACS     (intranet only)|
-//! | `download`  | Download studies / series as a ZIP file                (intranet only)|
-//! | `send`      | Send a study to a remote DICOM node (Orthanc "modality") (intranet only)|
-//! | `admin`     | Manage users and read the audit log                    (intranet only)|
-//!
-//! To add a new permission (e.g. `delete`): add a variant to [`Permission`],
-//! extend `ALL`, `as_str` and `description`, decide in [`AccessScope::allows`]
-//! whether it may be used remotely, then call `user.require(...)` in the new
-//! route. Nothing else changes (the database stores permissions as text).
+//! To add a new permission (e.g. `delete`): add a variant to [`Permission`], extend `ALL`,
+//! `as_str` and `description`, then call `user.require(...)` in the new route. Nothing else
+//! changes (the database stores permissions as text).
 
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
@@ -41,17 +35,19 @@ pub enum Permission {
     Upload,
     Download,
     Send,
+    Share,
     Admin,
 }
 
 impl Permission {
     /// Every permission, in the order shown in the admin screen.
-    pub const ALL: [Permission; 6] = [
+    pub const ALL: [Permission; 7] = [
         Permission::Read,
         Permission::Visualize,
         Permission::Upload,
         Permission::Download,
         Permission::Send,
+        Permission::Share,
         Permission::Admin,
     ];
 
@@ -63,6 +59,7 @@ impl Permission {
             Permission::Upload => "upload",
             Permission::Download => "download",
             Permission::Send => "send",
+            Permission::Share => "share",
             Permission::Admin => "admin",
         }
     }
@@ -70,42 +67,21 @@ impl Permission {
     /// Short explanation displayed next to the checkbox in the admin screen.
     pub fn description(self) -> &'static str {
         match self {
-            Permission::Read => "Search and browse studies and series (also available remotely)",
-            Permission::Visualize => {
-                "Open studies in Weasis or OHIF and see preview thumbnails (also available remotely)"
+            Permission::Read => "Search and browse studies and series",
+            Permission::Visualize => "Open studies in Weasis or OHIF and see preview thumbnails",
+            Permission::Upload => "Upload DICOM files into the PACS",
+            Permission::Download => "Download studies and series as ZIP files",
+            Permission::Send => "Send studies to remote DICOM nodes",
+            Permission::Share => {
+                "Invite people outside: password-protected link to one study (view + limited downloads)"
             }
-            Permission::Upload => "Upload DICOM files into the PACS (intranet only)",
-            Permission::Download => "Download studies and series as ZIP files (intranet only)",
-            Permission::Send => "Send studies to remote DICOM nodes (intranet only)",
-            Permission::Admin => "Manage users and view the audit log (intranet only)",
+            Permission::Admin => "Manage users and settings, view the audit log",
         }
     }
 
     /// Parses the machine name back into a permission.
     pub fn parse(s: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|p| p.as_str() == s)
-    }
-}
-
-/// Where a request comes from. Decided by the server (never by the browser):
-/// see `auth::effective_scope`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AccessScope {
-    /// Intranet: every permission of the user is honoured.
-    Full,
-    /// Internet (Cloudflare Tunnel): VIEWING ONLY, whatever the user's permissions.
-    Remote,
-}
-
-impl AccessScope {
-    /// May a request of this scope use the given permission at all?
-    pub fn allows(self, permission: Permission) -> bool {
-        match self {
-            AccessScope::Full => true,
-            // The one place that defines what the internet-facing interface can do.
-            AccessScope::Remote => matches!(permission, Permission::Read | Permission::Visualize),
-        }
     }
 }
 
@@ -126,11 +102,6 @@ impl PermissionSet {
         Self(perms.iter().copied().collect())
     }
 
-    /// Keeps only what the access scope allows (intersection).
-    pub fn restricted_to(&self, scope: AccessScope) -> Self {
-        Self(self.0.iter().copied().filter(|p| scope.allows(*p)).collect())
-    }
-
     /// Parses names coming from the admin API; rejects unknown names and
     /// enforces the consistency rules in [`PermissionSet::validate`].
     pub fn parse_list(names: &[String]) -> Result<Self, AppError> {
@@ -145,15 +116,16 @@ impl PermissionSet {
         Ok(set)
     }
 
-    /// Consistency rule: viewing, downloading or sending is pointless without
+    /// Consistency rule: viewing, downloading, sending or sharing is pointless without
     /// being able to find studies, so those permissions require `read`.
     pub fn validate(&self) -> Result<(), AppError> {
         let needs_read = self.contains(Permission::Visualize)
             || self.contains(Permission::Download)
-            || self.contains(Permission::Send);
+            || self.contains(Permission::Send)
+            || self.contains(Permission::Share);
         if needs_read && !self.contains(Permission::Read) {
             return Err(AppError::BadRequest(
-                "The 'visualize', 'download' and 'send' permissions require the 'read' permission".into(),
+                "The 'visualize', 'download', 'send' and 'share' permissions require the 'read' permission".into(),
             ));
         }
         Ok(())

@@ -7,7 +7,6 @@ use crate::auth::{LoginThrottle, TokenStore};
 use crate::branding::BrandingStore;
 use crate::db::Db;
 use crate::orthanc::OrthancClient;
-use crate::permissions::AccessScope;
 use crate::server::ListenerManager;
 use crate::settings::SettingsStore;
 use crate::thumbnails::ThumbnailCache;
@@ -26,12 +25,11 @@ pub struct AppState {
     pub sessions: TokenStore,
     /// Short-lived tokens embedded in `weasis://` links: bearer token -> user id.
     pub weasis_tokens: TokenStore,
+    /// Sessions of outside GUESTS who entered the password of a share link:
+    /// cookie token -> share id (see `routes/guest.rs`).
+    pub share_sessions: TokenStore,
     /// Brute-force protection for the login form.
     pub throttle: LoginThrottle,
-    /// Which listener this copy of the state serves: `Full` (intranet port) or
-    /// `Remote` (the view-only port for the Cloudflare Tunnel). `main.rs` creates
-    /// one copy of the state per listener.
-    pub listener_scope: AccessScope,
     /// Starts, stops and moves the HTTP listeners (used by the Settings screen).
     pub listeners: ListenerManager,
     /// Memory cache of the generated preview thumbnails.
