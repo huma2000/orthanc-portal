@@ -292,7 +292,8 @@ Ready-made roles in the *Users* screen (they only pre-tick the checkboxes; you c
 | Administrator | everything |
 
 Changes take effect immediately (permissions are read from the database on every request). Disabling a user
-or resetting their password also ends their sessions and Weasis tokens.
+or resetting their password also ends their sessions and Weasis tokens. An administrator who changes their
+**own** password keeps the session they are using; every other session of that account is signed out.
 
 > **Limit of `download`.** The permission controls the portal's ZIP download. Anyone on the intranet who may
 > *visualize* can still save images from inside Weasis (that is how viewers work). To prevent any export on the
@@ -622,7 +623,7 @@ The code compiles without warnings on Rust 1.91, passes `cargo clippy --all-targ
 formatted with `rustfmt` (see `rustfmt.toml`), and its dependencies were checked against the RustSec advisory
 database (no known vulnerable version in `Cargo.lock`). The automated tests live in the **`tests/`** folder:
 
-* `tests/server_tests.sh`: **332 checks** of the server against a fake Orthanc (`tests/mock_orthanc.py`):
+* `tests/server_tests.sh`: **336 checks** of the server against a fake Orthanc (`tests/mock_orthanc.py`):
   the two doors (staff portal vs invitation links only, Cloudflare headers refused on the intranet port), creating
   links with the default and the limited validity/downloads, the password gate and its throttling, what a guest
   sees, **the confinement to the shared study** (other studies, unfiltered searches, whole DICOM files, WADO
@@ -630,12 +631,13 @@ database (no known vulnerable version in `Cargo.lock`). The automated tests live
   running out of downloads while viewing continues, expiry, revocation, search and modality filters,
   thumbnails, sending and job tracking, upload/download, branding including malicious files, live settings,
   login hardening, caps, ETag/headers, concurrent administrators, and **talking to Orthanc with an account, without
-  one, and when it refuses the portal** (what is sent, what is not, the message for each case);
+  one, and when it refuses the portal** (what is sent, what is not, the message for each case), and an
+  administrator changing their own password (every other session of that account is signed out);
 * `tests/ui_tests.js`: **74 checks** of both web pages in a simulated browser (jsdom): the Share dialog and the
   Shares tab, the guest page (password, study, series, countdown, downloads left, expiry, revoked, 0-download
   links, no OHIF), what each kind of staff account sees, search, the with/without-account choice in Settings;
-* `cargo test`: **13 unit tests** (image validation; password and link generation; the rules that confine a guest
-  to one study; account / no account and the wording of Orthanc refusals).
+* `cargo test`: **17 unit tests** (image validation; password and link generation; the rules that confine a guest
+  to one study; account / no account and the wording of Orthanc refusals; the thumbnail cache; tokens and sessions).
 
 Run them all with `tests/run_all.sh` (needs `python3`, `curl`, and `npm install` once inside `tests/`; build
 first with `cargo build`; set `PORTAL_BIN=target/release/orthanc-portal` to test the release binary). The

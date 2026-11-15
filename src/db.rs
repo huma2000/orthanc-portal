@@ -284,6 +284,9 @@ impl Db {
             }
         }
 
+        // Room for every statement of this file in the prepared-statement cache (see `lock`).
+        conn.set_prepared_statement_cache_capacity(64);
+
         // The file holds password hashes and the Orthanc password: only its owner may read it.
         // (The -wal / -shm files SQLite creates next to it copy these permissions.)
         restrict_file_permissions(path);
@@ -292,6 +295,11 @@ impl Db {
 
     /// Locks the connection. A poisoned mutex (a panic while locked) is recovered
     /// because SQLite itself stays consistent.
+    ///
+    /// Every query below goes through `prepare_cached`: the SQL is compiled once and the
+    /// compiled statement is reused. That matters for the lookups done on EVERY request
+    /// (the user behind a session, the invitation behind a guest cookie), which the viewers
+    /// repeat hundreds of times while a study loads.
     fn lock(&self) -> MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -300,7 +308,8 @@ impl Db {
 
     pub fn count_users(&self) -> Result<i64, AppError> {
         let conn = self.lock();
-        Ok(conn.query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))?)
+        let value = conn.prepare_cached("SELECT COUNT(*) FROM users")?.query_row([], |r| r.get(0))?;
+        Ok(value)
     }
 
     /// Inserts a new active user. Returns `Conflict` if the name is already taken.
@@ -312,11 +321,12 @@ impl Db {
     ) -> Result<User, AppError> {
         let id = {
             let conn = self.lock();
-            let result = conn.execute(
-                "INSERT INTO users (username, password_hash, permissions, active, created_at)
+            let result = conn
+                .prepare_cached(
+                    "INSERT INTO users (username, password_hash, permissions, active, created_at)
                  VALUES (?1, ?2, ?3, 1, ?4)",
-                params![username, password_hash, permissions.to_db_string(), now_unix()],
-            );
+                )?
+                .execute(params![username, password_hash, permissions.to_db_string(), now_unix()]);
             match result {
                 Ok(_) => conn.last_insert_rowid(),
                 Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == rusqlite::ErrorCode::ConstraintViolation => {
@@ -331,19 +341,21 @@ impl Db {
     pub fn get_user(&self, id: i64) -> Result<Option<User>, AppError> {
         let conn = self.lock();
         let sql = format!("SELECT {USER_COLUMNS} FROM users WHERE id = ?1");
-        Ok(conn.query_row(&sql, params![id], row_to_user).optional()?)
+        let value = conn.prepare_cached(&sql)?.query_row(params![id], row_to_user).optional()?;
+        Ok(value)
     }
 
     pub fn get_user_by_name(&self, username: &str) -> Result<Option<User>, AppError> {
         let conn = self.lock();
         let sql = format!("SELECT {USER_COLUMNS} FROM users WHERE username = ?1");
-        Ok(conn.query_row(&sql, params![username], row_to_user).optional()?)
+        let value = conn.prepare_cached(&sql)?.query_row(params![username], row_to_user).optional()?;
+        Ok(value)
     }
 
     pub fn list_users(&self) -> Result<Vec<User>, AppError> {
         let conn = self.lock();
         let sql = format!("SELECT {USER_COLUMNS} FROM users ORDER BY username");
-        let mut stmt = conn.prepare(&sql)?;
+        let mut stmt = conn.prepare_cached(&sql)?;
         let rows = stmt.query_map([], row_to_user)?;
         let users = rows.collect::<Result<Vec<_>, _>>()?;
         Ok(users)
@@ -374,14 +386,14 @@ impl Db {
 
     pub fn delete_user(&self, id: i64) -> Result<(), AppError> {
         let conn = self.lock();
-        conn.execute("DELETE FROM users WHERE id = ?1", params![id])?;
+        conn.prepare_cached("DELETE FROM users WHERE id = ?1")?.execute(params![id])?;
         Ok(())
     }
 
     /// Remembers the time of the last successful login.
     pub fn touch_login(&self, id: i64) -> Result<(), AppError> {
         let conn = self.lock();
-        conn.execute("UPDATE users SET last_login = ?1 WHERE id = ?2", params![now_unix(), id])?;
+        conn.prepare_cached("UPDATE users SET last_login = ?1 WHERE id = ?2")?.execute(params![now_unix(), id])?;
         Ok(())
     }
 
@@ -399,10 +411,10 @@ impl Db {
         let (username, action, detail) =
             (clean_for_audit(username, 64), clean_for_audit(action, 40), clean_for_audit(detail, 500));
         let conn = self.lock();
-        if let Err(e) = conn.execute(
-            "INSERT INTO audit_log (ts, username, action, detail) VALUES (?1, ?2, ?3, ?4)",
-            params![now_unix(), username, action, detail],
-        ) {
+        let written = conn
+            .prepare_cached("INSERT INTO audit_log (ts, username, action, detail) VALUES (?1, ?2, ?3, ?4)")
+            .and_then(|mut insert| insert.execute(params![now_unix(), username, action, detail]));
+        if let Err(e) = written {
             tracing::warn!("could not write audit log entry: {e}");
         }
     }
@@ -411,7 +423,7 @@ impl Db {
     pub fn recent_audit(&self, limit: i64) -> Result<Vec<AuditEntry>, AppError> {
         let conn = self.lock();
         let mut stmt =
-            conn.prepare("SELECT id, ts, username, action, detail FROM audit_log ORDER BY id DESC LIMIT ?1")?;
+            conn.prepare_cached("SELECT id, ts, username, action, detail FROM audit_log ORDER BY id DESC LIMIT ?1")?;
         let rows = stmt.query_map(params![limit], |r| {
             Ok(AuditEntry { id: r.get(0)?, ts: r.get(1)?, username: r.get(2)?, action: r.get(3)?, detail: r.get(4)? })
         })?;
@@ -431,11 +443,11 @@ impl Db {
         job_id: &str,
     ) -> Result<i64, AppError> {
         let conn = self.lock();
-        conn.execute(
+        conn.prepare_cached(
             "INSERT INTO transfers (ts, username, study_id, label, target, job_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![now_unix(), username, study_id, label, target, job_id],
-        )?;
+        )?
+        .execute(params![now_unix(), username, study_id, label, target, job_id])?;
         Ok(conn.last_insert_rowid())
     }
 
@@ -443,7 +455,7 @@ impl Db {
     /// to that user's own transfers (administrators pass `None` to see them all).
     pub fn recent_transfers(&self, only_user: Option<&str>, limit: i64) -> Result<Vec<Transfer>, AppError> {
         let conn = self.lock();
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT id, ts, username, study_id, label, target, job_id, final_state, final_error FROM transfers
              WHERE (?1 IS NULL OR username = ?1 COLLATE NOCASE)
              ORDER BY id DESC LIMIT ?2",
@@ -470,24 +482,28 @@ impl Db {
     /// The settings document saved from the web interface, if any (JSON text).
     pub fn load_settings(&self) -> Result<Option<String>, AppError> {
         let conn = self.lock();
-        Ok(conn.query_row("SELECT value FROM settings WHERE key = 'main'", [], |r| r.get(0)).optional()?)
+        let value = conn
+            .prepare_cached("SELECT value FROM settings WHERE key = 'main'")?
+            .query_row([], |r| r.get(0))
+            .optional()?;
+        Ok(value)
     }
 
     /// Stores (replaces) the settings document.
     pub fn save_settings(&self, json: &str) -> Result<(), AppError> {
         let conn = self.lock();
-        conn.execute(
+        conn.prepare_cached(
             "INSERT INTO settings (key, value) VALUES ('main', ?1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![json],
-        )?;
+        )?
+        .execute(params![json])?;
         Ok(())
     }
 
     /// Forgets the saved settings (emergency recovery with `RESET_SETTINGS=true`).
     pub fn delete_settings(&self) -> Result<(), AppError> {
         let conn = self.lock();
-        conn.execute("DELETE FROM settings WHERE key = 'main'", [])?;
+        conn.prepare_cached("DELETE FROM settings WHERE key = 'main'")?.execute([])?;
         Ok(())
     }
 
@@ -496,7 +512,7 @@ impl Db {
     /// Every uploaded branding image: `(kind, content type, bytes, updated_at)`.
     pub fn load_branding(&self) -> Result<Vec<BrandingRow>, AppError> {
         let conn = self.lock();
-        let mut stmt = conn.prepare("SELECT kind, content_type, data, updated_at FROM branding")?;
+        let mut stmt = conn.prepare_cached("SELECT kind, content_type, data, updated_at FROM branding")?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
         let all = rows.collect::<Result<Vec<_>, _>>()?;
         Ok(all)
@@ -505,29 +521,27 @@ impl Db {
     /// Stores (replaces) the image of one kind.
     pub fn save_branding(&self, kind: &str, content_type: &str, data: &[u8], updated_at: i64) -> Result<(), AppError> {
         let conn = self.lock();
-        conn.execute(
+        conn.prepare_cached(
             "INSERT INTO branding (kind, content_type, data, updated_at) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(kind) DO UPDATE SET content_type = excluded.content_type,
                                              data = excluded.data, updated_at = excluded.updated_at",
-            params![kind, content_type, data, updated_at],
-        )?;
+        )?
+        .execute(params![kind, content_type, data, updated_at])?;
         Ok(())
     }
 
     /// Removes the image of one kind (the default is used again).
     pub fn delete_branding(&self, kind: &str) -> Result<(), AppError> {
         let conn = self.lock();
-        conn.execute("DELETE FROM branding WHERE kind = ?1", params![kind])?;
+        conn.prepare_cached("DELETE FROM branding WHERE kind = ?1")?.execute(params![kind])?;
         Ok(())
     }
 
     /// Remembers how a transfer ended, so Orthanc is not asked about it again.
     pub fn set_transfer_final(&self, id: i64, state: &str, error: Option<&str>) -> Result<(), AppError> {
         let conn = self.lock();
-        conn.execute(
-            "UPDATE transfers SET final_state = ?1, final_error = ?2 WHERE id = ?3",
-            params![state, error, id],
-        )?;
+        conn.prepare_cached("UPDATE transfers SET final_state = ?1, final_error = ?2 WHERE id = ?3")?
+            .execute(params![state, error, id])?;
         Ok(())
     }
 
@@ -535,10 +549,10 @@ impl Db {
     /// seconds). Returns how many rows were removed.
     pub fn purge_older_than(&self, cutoff: i64) -> Result<usize, AppError> {
         let conn = self.lock();
-        let audit = conn.execute("DELETE FROM audit_log WHERE ts < ?1", params![cutoff])?;
-        let transfers = conn.execute("DELETE FROM transfers WHERE ts < ?1", params![cutoff])?;
+        let audit = conn.prepare_cached("DELETE FROM audit_log WHERE ts < ?1")?.execute(params![cutoff])?;
+        let transfers = conn.prepare_cached("DELETE FROM transfers WHERE ts < ?1")?.execute(params![cutoff])?;
         // Links that expired before the cut-off are no use any more either.
-        let shares = conn.execute("DELETE FROM shares WHERE expires_at < ?1", params![cutoff])?;
+        let shares = conn.prepare_cached("DELETE FROM shares WHERE expires_at < ?1")?.execute(params![cutoff])?;
         Ok(audit + transfers + shares)
     }
 
@@ -548,23 +562,23 @@ impl Db {
     pub fn create_share(&self, new: &NewShare) -> Result<Share, AppError> {
         let id = {
             let conn = self.lock();
-            conn.execute(
+            conn.prepare_cached(
                 "INSERT INTO shares (token, password_hash, created_at, expires_at, created_by, study_id, study_uid,
                                      label, note, max_downloads)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                params![
-                    new.token,
-                    new.password_hash,
-                    now_unix(),
-                    new.expires_at,
-                    new.created_by,
-                    new.study_id,
-                    new.study_uid,
-                    new.label,
-                    new.note,
-                    new.max_downloads
-                ],
-            )?;
+            )?
+            .execute(params![
+                new.token,
+                new.password_hash,
+                now_unix(),
+                new.expires_at,
+                new.created_by,
+                new.study_id,
+                new.study_uid,
+                new.label,
+                new.note,
+                new.max_downloads
+            ])?;
             conn.last_insert_rowid()
         };
         self.get_share(id)?.ok_or(AppError::NotFound)
@@ -573,13 +587,15 @@ impl Db {
     pub fn get_share(&self, id: i64) -> Result<Option<Share>, AppError> {
         let conn = self.lock();
         let sql = format!("SELECT {SHARE_COLUMNS} FROM shares WHERE id = ?1");
-        Ok(conn.query_row(&sql, params![id], row_to_share).optional()?)
+        let value = conn.prepare_cached(&sql)?.query_row(params![id], row_to_share).optional()?;
+        Ok(value)
     }
 
     pub fn get_share_by_token(&self, token: &str) -> Result<Option<Share>, AppError> {
         let conn = self.lock();
         let sql = format!("SELECT {SHARE_COLUMNS} FROM shares WHERE token = ?1");
-        Ok(conn.query_row(&sql, params![token], row_to_share).optional()?)
+        let value = conn.prepare_cached(&sql)?.query_row(params![token], row_to_share).optional()?;
+        Ok(value)
     }
 
     /// Newest first. `only_user = Some(name)` lists just the invitations that user created.
@@ -589,7 +605,7 @@ impl Db {
             "SELECT {SHARE_COLUMNS} FROM shares WHERE (?1 IS NULL OR created_by = ?1 COLLATE NOCASE)
              ORDER BY id DESC LIMIT ?2"
         );
-        let mut stmt = conn.prepare(&sql)?;
+        let mut stmt = conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(params![only_user, limit], row_to_share)?;
         let shares = rows.collect::<Result<Vec<_>, _>>()?;
         Ok(shares)
@@ -600,36 +616,37 @@ impl Db {
     /// one. Returns `false` when nothing was taken (none left, expired or revoked).
     pub fn reserve_download(&self, id: i64, now: i64) -> Result<bool, AppError> {
         let conn = self.lock();
-        let changed = conn.execute(
-            "UPDATE shares SET downloads_used = downloads_used + 1
+        let changed = conn
+            .prepare_cached(
+                "UPDATE shares SET downloads_used = downloads_used + 1
              WHERE id = ?1 AND revoked_at IS NULL AND expires_at > ?2 AND downloads_used < max_downloads",
-            params![id, now],
-        )?;
+            )?
+            .execute(params![id, now])?;
         Ok(changed == 1)
     }
 
     /// Gives a reserved download back (the archive could not even be started).
     pub fn refund_download(&self, id: i64) -> Result<(), AppError> {
         let conn = self.lock();
-        conn.execute("UPDATE shares SET downloads_used = MAX(downloads_used - 1, 0) WHERE id = ?1", params![id])?;
+        conn.prepare_cached("UPDATE shares SET downloads_used = MAX(downloads_used - 1, 0) WHERE id = ?1")?
+            .execute(params![id])?;
         Ok(())
     }
 
     /// Switches an invitation off. Returns `false` if it was already revoked or does not exist.
     pub fn revoke_share(&self, id: i64, now: i64) -> Result<bool, AppError> {
         let conn = self.lock();
-        let changed =
-            conn.execute("UPDATE shares SET revoked_at = ?2 WHERE id = ?1 AND revoked_at IS NULL", params![id, now])?;
+        let changed = conn
+            .prepare_cached("UPDATE shares SET revoked_at = ?2 WHERE id = ?1 AND revoked_at IS NULL")?
+            .execute(params![id, now])?;
         Ok(changed == 1)
     }
 
     /// Counts a successful password entry.
     pub fn record_share_access(&self, id: i64, now: i64) -> Result<(), AppError> {
         let conn = self.lock();
-        conn.execute(
-            "UPDATE shares SET access_count = access_count + 1, last_access_at = ?2 WHERE id = ?1",
-            params![id, now],
-        )?;
+        conn.prepare_cached("UPDATE shares SET access_count = access_count + 1, last_access_at = ?2 WHERE id = ?1")?
+            .execute(params![id, now])?;
         Ok(())
     }
 }

@@ -358,9 +358,20 @@ function rememberThumb(url, objectUrl) {
   }
 }
 
+/**
+ * A remembered picture, moved to the "most recently used" end of the list, so the ones
+ * dropped beyond THUMB_CACHE_MAX are those nobody looked at for the longest time.
+ */
+function cachedThumb(url) {
+  const objectUrl = thumbImages.get(url);
+  thumbImages.delete(url);
+  thumbImages.set(url, objectUrl);
+  return objectUrl;
+}
+
 /** Downloads one thumbnail. Resolves to an object URL, or "" when there is no preview. */
 async function loadThumb(url) {
-  if (thumbImages.has(url)) return thumbImages.get(url);
+  if (thumbImages.has(url)) return cachedThumb(url);
   try {
     const response = await fetch(url, { credentials: "same-origin" });
     if (response.ok) {
@@ -376,7 +387,7 @@ async function loadThumb(url) {
 }
 
 function queueThumb(box) {
-  if (thumbImages.has(box.thumbUrl)) { paintThumb(box, thumbImages.get(box.thumbUrl)); return; }
+  if (thumbImages.has(box.thumbUrl)) { paintThumb(box, cachedThumb(box.thumbUrl)); return; }
   thumbQueue.push(box);
   setTimeout(pumpThumbs, 0); // after the table has been attached to the page
 }
@@ -1460,7 +1471,7 @@ const SETTINGS_FIELDS = {
   viewers: [
     { key: "ohif", label: "Browser viewer (OHIF)", type: "select", options: [["auto", "Automatic (when Orthanc has the plugin)"], ["on", "Always offer it"], ["off", "Never offer it"]] },
     { key: "max_upload_mb", label: "Largest uploaded file (MB)", type: "number", min: 1, max: 102400, hint: "Applies to each file; a study is uploaded as many files." },
-    { key: "thumbnails_enabled", label: "Show preview thumbnails next to studies and series", type: "checkbox", wide: true, hint: "Only users with the visualize permission see them, on the intranet and remotely. Each one makes Orthanc decode one image." },
+    { key: "thumbnails_enabled", label: "Show preview thumbnails next to studies and series", type: "checkbox", wide: true, hint: "Only staff with the visualize permission see them (guests with an invitation never do). Each one makes Orthanc decode one image." },
     { key: "thumbnail_cache_mb", label: "Thumbnail cache (MB)", type: "number", min: 0, max: 1024, hint: "Memory used to remember generated thumbnails. 0 = no cache." },
   ],
 };

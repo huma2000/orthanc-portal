@@ -134,16 +134,24 @@ impl ThumbnailCache {
         }
     }
 
+    /// Drops the least recently used entries once the cache is over `capacity`.
+    ///
+    /// It frees a little more than strictly needed (down to 90 % of the capacity) in ONE
+    /// sorted pass. Evicting a single entry at a time would scan the whole cache on almost
+    /// every new thumbnail once it is full (thousands of entries for a big cache).
     fn evict(inner: &mut Inner, capacity: usize) {
-        while inner.bytes > capacity {
-            let oldest = inner.entries.iter().min_by_key(|(_, e)| e.last_used).map(|(k, _)| k.clone());
-            match oldest {
-                Some(key) => {
-                    if let Some(removed) = inner.entries.remove(&key) {
-                        inner.bytes -= removed.cost;
-                    }
-                }
-                None => break,
+        if inner.bytes <= capacity {
+            return;
+        }
+        let target = capacity - capacity / 10;
+        let mut by_age: Vec<(u64, String)> = inner.entries.iter().map(|(k, e)| (e.last_used, k.clone())).collect();
+        by_age.sort_unstable_by_key(|(last_used, _)| *last_used);
+        for (_, key) in by_age {
+            if inner.bytes <= target {
+                break;
+            }
+            if let Some(removed) = inner.entries.remove(&key) {
+                inner.bytes -= removed.cost;
             }
         }
     }
@@ -223,4 +231,41 @@ pub async fn study_thumbnail(orthanc: &OrthancClient, study_id: &str, width: u32
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn thumb(size: usize) -> Option<Arc<Thumb>> {
+        Some(Arc::new(Thumb { bytes: Bytes::from(vec![0u8; size]), content_type: "image/jpeg".into() }))
+    }
+
+    /// When full, the cache forgets the pictures nobody looked at recently, and stays under its size.
+    #[test]
+    fn the_least_recently_used_thumbnails_go_first() {
+        let cache = ThumbnailCache::new();
+        let capacity = 10_000;
+        for i in 0..8 {
+            cache.put(format!("series:{i}:128"), thumb(1_000), capacity);
+        }
+        assert!(cache.get("series:0:128").is_some()); // series 0 is looked at again
+        for i in 8..12 {
+            cache.put(format!("series:{i}:128"), thumb(1_000), capacity);
+        }
+        let inner = cache.lock();
+        assert!(inner.bytes <= capacity);
+        assert_eq!(inner.bytes, inner.entries.values().map(|e| e.cost).sum::<usize>());
+        assert!(inner.entries.contains_key("series:0:128"), "recently used must stay");
+        assert!(inner.entries.contains_key("series:11:128"), "the newest must stay");
+        assert!(!inner.entries.contains_key("series:1:128"), "the oldest unused must go");
+    }
+
+    /// A capacity of 0 switches the cache off.
+    #[test]
+    fn zero_capacity_keeps_nothing() {
+        let cache = ThumbnailCache::new();
+        cache.put("study:a:64".into(), thumb(10), 0);
+        assert!(cache.get("study:a:64").is_none());
+    }
 }

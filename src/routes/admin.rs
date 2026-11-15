@@ -18,6 +18,7 @@ use crate::error::{AppError, AppResult};
 use crate::permissions::{Permission, PermissionSet};
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
+use axum::http::HeaderMap;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -84,6 +85,7 @@ pub struct UpdateUser {
 pub async fn update_user(
     State(state): State<AppState>,
     AuthUser(admin): AuthUser,
+    headers: HeaderMap,
     Path(id): Path<i64>,
     Json(req): Json<UpdateUser>,
 ) -> AppResult<Json<User>> {
@@ -120,10 +122,16 @@ pub async fn update_user(
     };
     state.db.update_user(id, new_permissions.as_ref(), req.active, hash.as_deref())?;
 
-    // Kick the user out when the account is disabled or the password changed
-    // (but do not log the administrator out of their own session).
-    if target.id != admin.id && (hash.is_some() || req.active == Some(false)) {
-        state.sessions.revoke_user(id);
+    // A new password (or a disabled account) ends every session and Weasis link of that user.
+    // An administrator changing their OWN password keeps only the session they are using now:
+    // if the old password had leaked, whoever used it is signed out too.
+    if hash.is_some() || req.active == Some(false) {
+        if target.id == admin.id {
+            let current = auth::read_cookie(&headers, auth::SESSION_COOKIE).unwrap_or_default();
+            state.sessions.revoke_user_except(id, &current);
+        } else {
+            state.sessions.revoke_user(id);
+        }
         state.weasis_tokens.revoke_user(id);
     }
 

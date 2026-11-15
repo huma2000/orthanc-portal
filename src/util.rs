@@ -20,7 +20,13 @@ pub fn now_unix() -> i64 {
 pub fn random_token() -> String {
     let mut bytes = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut text = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        text.push(HEX[usize::from(b >> 4)] as char);
+        text.push(HEX[usize::from(b & 0x0f)] as char);
+    }
+    text
 }
 
 /// Orthanc resource identifiers look like `8a5f3e0b-1c2d3e4f-...` (hex + dashes).
@@ -105,4 +111,18 @@ pub fn public_base_url(headers: &HeaderMap, settings: &Settings) -> Result<Strin
     }
     let scheme = if is_https(headers) { "https" } else { "http" };
     Ok(format!("{scheme}://{host}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Tokens are 64 lowercase hex characters and never repeat.
+    #[test]
+    fn random_tokens_are_hex_and_unique() {
+        let (a, b) = (random_token(), random_token());
+        assert_eq!(a.len(), 64);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert_ne!(a, b);
+    }
 }

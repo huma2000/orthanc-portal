@@ -53,15 +53,16 @@ pub async fn send_study(
     }
 
     // The destination must be one Orthanc really offers: the user's text is only
-    // used to PICK an entry, never to build a URL.
-    let nodes = state.orthanc.list_modalities().await?;
+    // used to PICK an entry, never to build a URL. Reading the study checks it exists
+    // (404 otherwise) and gives a readable label. Both questions are asked at once.
+    let study_path = format!("/studies/{id}");
+    let (nodes, study) = tokio::try_join!(state.orthanc.list_modalities(), state.orthanc.get_json(&study_path))?;
     let node = nodes
         .iter()
         .find(|n| n.id == req.target)
         .ok_or_else(|| AppError::BadRequest("Unknown DICOM destination".into()))?;
 
-    // Reading the study checks it exists (404 otherwise) and gives a readable label.
-    let study = StudySummary::from_orthanc(&state.orthanc.get_json(&format!("/studies/{id}")).await?);
+    let study = StudySummary::from_orthanc(&study);
     let label: String =
         format!("{} | {} | {}", study.patient_name.replace('^', " "), study.study_date, study.study_description)
             .chars()

@@ -196,6 +196,12 @@ impl TokenStore {
         self.map().retain(|_, e| e.user_id != user_id);
     }
 
+    /// Invalidates every token of a user except `keep` (the session in use when a user
+    /// changes their own password).
+    pub fn revoke_user_except(&self, user_id: i64, keep: &str) {
+        self.map().retain(|token, e| e.user_id != user_id || token == keep);
+    }
+
     /// Drops expired tokens; called periodically from `main.rs`.
     pub fn purge_expired(&self) {
         let now = now_unix();
@@ -462,4 +468,21 @@ pub async fn ensure_initial_admin(db: &Db, boot: &Bootstrap) -> AppResult<()> {
         tracing::info!("Administrator '{}' created from ADMIN_PASSWORD", boot.admin_username);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Changing one's own password keeps the session in use and ends all the others.
+    #[test]
+    fn revoke_user_except_keeps_only_the_current_session() {
+        let store = TokenStore::default();
+        let (current, other, someone_else) =
+            (store.issue(1, 600, 20), store.issue(1, 600, 20), store.issue(2, 600, 20));
+        store.revoke_user_except(1, &current);
+        assert_eq!(store.lookup(&current), Some(1));
+        assert_eq!(store.lookup(&other), None);
+        assert_eq!(store.lookup(&someone_else), Some(2));
+    }
 }

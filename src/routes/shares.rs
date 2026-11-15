@@ -57,7 +57,7 @@ pub async fn create_share(
     if settings.share_public_url.is_empty() {
         return Err(AppError::BadRequest(
             "Sharing is not set up yet: an administrator must enter the public address for share links \
-             in Settings > Network."
+             in Settings > Share links."
                 .into(),
         ));
     }

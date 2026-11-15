@@ -14,10 +14,11 @@
 //!
 //! ## Intranet vs internet
 //! The program listens on **two ports** (both changeable in Settings):
-//! * default 0.0.0.0:8080 - the full interface, for the intranet;
-//! * default 0.0.0.0:8081 - VIEW-ONLY. Point the Cloudflare Tunnel at this one:
-//!   whatever a user's permissions are, they can only search and view studies
-//!   when they come in through it. Settings are never reachable from there.
+//! * default 0.0.0.0:8080 - the full interface, for staff on the intranet;
+//! * default 0.0.0.0:8081 - INVITATION LINKS ONLY. Point the Cloudflare Tunnel at this
+//!   one. There are no accounts, no search and no settings there: a guest opens a share
+//!   link, types its password and can view (and download a limited number of times) that
+//!   one study. See `routes/guest.rs`.
 //!
 //! ## Start-up in one paragraph
 //! Only three things come from the environment because they are needed before
@@ -35,9 +36,9 @@
 //! | `settings.rs`        | all settings editable from the web (stored in SQLite)  |
 //! | `server.rs`          | runs / re-opens the two HTTP listeners at runtime      |
 //! | `error.rs`           | `AppError` -> HTTP status + JSON                       |
-//! | `permissions.rs`     | permissions, intranet/internet access scope            |
+//! | `permissions.rs`     | the seven permissions of staff accounts                |
 //! | `db.rs`              | SQLite: users, audit log, transfers, settings          |
-//! | `auth.rs`            | passwords, sessions, tokens, scope detection, guards   |
+//! | `auth.rs`            | passwords, sessions, tokens, throttling, guards        |
 //! | `orthanc.rs`         | client for Orthanc's REST API (reconfigurable live)    |
 //! | `branding.rs`        | uploaded logo / website icon: validation + memory copy |
 //! | `sharing.rs`         | invitation links: password/token generation, guest rules |

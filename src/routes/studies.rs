@@ -1,7 +1,7 @@
 //! # routes/studies.rs
 //!
 //! Read-only "consult" endpoints. All of them require the `read` permission and
-//! are available both on the intranet and remotely.
+//! exist only on the intranet listener (guests with an invitation never search).
 //!
 //! * `GET /api/studies?patient_name=&patient_id=&accession_number=&description=&modality=&date_from=&date_to=&limit=&offset=`
 //! * `GET /api/studies/{id}/series`   series of one study

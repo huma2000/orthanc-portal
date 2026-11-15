@@ -484,6 +484,15 @@ ok "...without changing the saved settings" "$(sview "repr(d['settings']['orthan
 put $A '{"orthanc_username":"orthanc","orthanc_password":"s3cr3tpw"}' > /dev/null
 ok "the account can be set again" "$(code $F $V GET /api/studies)" "200"
 
+echo "== changing one's own password"
+A_OTHER=$(login $F admin SuperSecret123)
+ADMIN_ID=$(body $F $A /api/admin/users | py "[u['id'] for u in d['users'] if u['username']=='admin'][0]")
+ok "an administrator changes their own password" "$(code $F $A PUT /api/admin/users/$ADMIN_ID -H "$J" -d '{"password":"NewSuperSecret456"}')" "200"
+ok "...the session in use keeps working" "$(code $F $A GET /api/me)" "200"
+ok "...every other session of that account is signed out" "$(code $F $A_OTHER GET /api/me)" "401"
+ok "...and the new password works" "$(login $F admin NewSuperSecret456 | tr -d '\n' | wc -c | tr -d ' ')" "64"
+code $F $A PUT /api/admin/users/$ADMIN_ID -H "$J" -d '{"password":"SuperSecret123"}' > /dev/null
+
 echo "== administrators"
 mkuser admin2 AdminTwoPass123 '"read","visualize","upload","download","send","admin"'
 ID1=$(body $F $A /api/admin/users | py "[u['id'] for u in d['users'] if u['username']=='admin'][0]")

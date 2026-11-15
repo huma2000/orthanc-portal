@@ -60,13 +60,19 @@ pub async fn download_study(
         return Err(AppError::BadRequest("Invalid study id".into()));
     }
 
-    // Read the study first: this both checks it exists and gives us a nice file name.
-    let study = StudySummary::from_orthanc(&state.orthanc.get_json(&format!("/studies/{id}")).await?);
+    // Read the study (for a nice file name) while Orthanc already starts building the ZIP:
+    // the two requests run at the same time. A study that does not exist fails both (404).
+    let dicomdir = params.dicomdir.unwrap_or(false);
+    let study_path = format!("/studies/{id}");
+    let (study, upstream) = tokio::try_join!(
+        state.orthanc.get_json(&study_path),
+        state.orthanc.archive(ArchiveKind::Study, &id, dicomdir)
+    )?;
+    let study = StudySummary::from_orthanc(&study);
     let who = if study.patient_id.is_empty() { &study.patient_name } else { &study.patient_id };
     let file_name =
         format!("{}_{}_{}.zip", sanitize_filename(who), sanitize_filename(&study.study_date), short_id(&id));
 
-    let upstream = state.orthanc.archive(ArchiveKind::Study, &id, params.dicomdir.unwrap_or(false)).await?;
     state.db.audit(&user.username, "download_study", &format!("{id} ({file_name})"));
     zip_response(upstream, &file_name)
 }
@@ -82,7 +88,14 @@ pub async fn download_series(
         return Err(AppError::BadRequest("Invalid series id".into()));
     }
 
-    let series = SeriesSummary::from_orthanc(&state.orthanc.get_json(&format!("/series/{id}")).await?);
+    // As for a study: the details (file name) and the ZIP are requested at the same time.
+    let dicomdir = params.dicomdir.unwrap_or(false);
+    let series_path = format!("/series/{id}");
+    let (series, upstream) = tokio::try_join!(
+        state.orthanc.get_json(&series_path),
+        state.orthanc.archive(ArchiveKind::Series, &id, dicomdir)
+    )?;
+    let series = SeriesSummary::from_orthanc(&series);
     let file_name = format!(
         "series_{}_{}_{}.zip",
         sanitize_filename(&series.modality),
@@ -90,7 +103,6 @@ pub async fn download_series(
         short_id(&id)
     );
 
-    let upstream = state.orthanc.archive(ArchiveKind::Series, &id, params.dicomdir.unwrap_or(false)).await?;
     state.db.audit(&user.username, "download_series", &format!("{id} ({file_name})"));
     zip_response(upstream, &file_name)
 }

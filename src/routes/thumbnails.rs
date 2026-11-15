@@ -10,8 +10,8 @@
 //! placeholder with the modality instead.
 //!
 //! A thumbnail is a picture of the patient's image, so it needs the **`visualize`**
-//! permission (not just `read`). Like viewing, it is available on the internet-facing
-//! listener too. The feature can be switched off in Settings > Viewers and uploads.
+//! permission (not just `read`). Staff only: these routes are not registered on the
+//! internet-facing listener. The feature can be switched off in Settings > Viewers and uploads.
 //!
 //! The selection of the image and the memory cache live in `thumbnails.rs`.
 

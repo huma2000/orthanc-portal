@@ -154,8 +154,15 @@ pub async fn study(
     let share = guest_of(&state, &headers, &token)?;
     let orthanc = &state.orthanc;
 
-    let study = StudySummary::from_orthanc(&orthanc.get_json(&format!("/studies/{}", share.study_id)).await?);
-    let series_json = orthanc.get_json(&format!("/studies/{}/series", share.study_id)).await?;
+    // The three questions to Orthanc are independent: ask them at the same time, so the page
+    // waits for the slowest one instead of the sum of all three.
+    let study_path = format!("/studies/{}", share.study_id);
+    let series_path = format!("{study_path}/series");
+    let ohif_mode = state.settings.get().ohif;
+    let (study_json, series_json, viewer_available) =
+        tokio::join!(orthanc.get_json(&study_path), orthanc.get_json(&series_path), orthanc.ohif_available(ohif_mode));
+    let study = StudySummary::from_orthanc(&study_json?);
+    let series_json = series_json?;
     let mut series: Vec<SeriesSummary> =
         series_json.as_array().map(|items| items.iter().map(SeriesSummary::from_orthanc).collect()).unwrap_or_default();
     series.sort_by_key(|s| s.series_number.parse::<i64>().unwrap_or(i64::MAX));
@@ -164,7 +171,6 @@ pub async fn study(
     modalities.sort();
     modalities.dedup();
 
-    let viewer_available = orthanc.ohif_available(state.settings.get().ohif).await;
     Ok(Json(json!({
         "patient": {
             "name": study.patient_name,
