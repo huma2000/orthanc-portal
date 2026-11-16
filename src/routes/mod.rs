@@ -323,7 +323,9 @@ async fn security_headers(request: Request, next: Next) -> Response {
          img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' data: blob:; \
          media-src 'self' data: blob:; frame-ancestors 'none'; base-uri 'self'"
     } else {
-        "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; \
+        // blob: = the preview thumbnails, which app.js downloads with fetch() (to send the
+        // session and tell "no preview" apart from errors) and shows through object URLs.
+        "default-src 'self'; img-src 'self' data: blob:; style-src 'self'; script-src 'self'; \
          frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
     };
 

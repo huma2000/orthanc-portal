@@ -408,6 +408,7 @@ ok "Weasis links reuse the user's token" "$(tok $V)" "$(tok $V)"
 curl -s -D js.h -o /dev/null $F/static/app.js; E=$(grep -i '^etag' js.h | sed 's/[^"]*\("[^"]*"\).*/\1/')
 ok "static files: matching ETag -> 304" "$(curl -s -o /dev/null -w '%{http_code}' -H "If-None-Match: $E" $F/static/app.js)" "304"
 has "Permissions-Policy header" "$(curl -sI $F/)" "permissions-policy"
+has "the page may show the thumbnails it loads (CSP img-src allows blob:)" "$(curl -sI $F/ | grep -i content-security-policy)" "img-src 'self' data: blob:"
 has "API answers are no-store" "$(curl -sI -H "Cookie: portal_session=$A" $F/api/me)" "cache-control: no-store"
 has "HSTS only over HTTPS" "$(curl -sI -H 'X-Forwarded-Proto: https' $F/)" "strict-transport-security"
 ok "database file is private (600)" "$(stat -c %a $WORK/portal.db)" "600"
