@@ -100,16 +100,19 @@ docker compose logs portal      # prints the first administrator's password if A
 
 Things to know:
 
-* The staff portal is published on `8080` (change `INTRANET_BIND` / `INTRANET_PORT` in `.env`). The
-  invitation-links port `8081` is **not published**: only the tunnel container reaches it over the Docker
-  network. Port `8080` must never be forwarded to the internet.
+* The staff portal is published on `8080` and the invitation links use `8081`. If another program already
+  uses one of them, change `INTRANET_PORT` / `INTERNET_PORT` (and `INTRANET_BIND`) in `.env` and run
+  `docker compose up -d` (see [Changing the ports](#changing-the-ports)). The invitation-links port is **not
+  published**: only the tunnel container reaches it over the Docker network. The intranet port must never be
+  forwarded to the internet.
 * The portal container is hardened (read-only file system, no Linux capabilities, no privilege escalation); the
   only thing it writes is its database, in the `portal-data` volume (**back it up**: users, audit log, settings).
-* The values in `.env` are only the **initial** ones. After the first start, change them in the browser
-  (*Settings*). Editing `.env` later does not change a portal that already started; start once with
-  `RESET_SETTINGS=true` if you want to go back to the values of the file.
+* Apart from the ports, the values in `.env` are only the **initial** ones. After the first start, change them
+  in the browser (*Settings*). Editing `.env` later does not change a portal that already started; start once
+  with `RESET_SETTINGS=true` if you want to go back to the values of the file. The ports are the exception:
+  they are applied on every start and are read-only in *Settings > Network*.
 * The image rebuilds quickly after code changes (third-party crates are cached in their own Docker layer) and
-  reports `healthy` / `unhealthy` through a built-in health check of port 8080.
+  reports `healthy` / `unhealthy` through a built-in health check of the intranet port.
 * Updating: `git pull`, then `docker compose up -d --build` again. Users and settings are kept.
 
 ### Option B: Docker Compose, everything (Orthanc + portal + Cloudflare)
@@ -131,7 +134,7 @@ docker compose up -d --build
 What the Orthanc is already set up with (`deploy/orthanc.json`, official `jodogne/orthanc-plugins` image):
 the account the portal uses, the **DICOMweb** plugin and the **OHIF** plugin with the `dicom-web` data source,
 DICOM nodes kept in its database (so the ones you add in the portal survive a restart), DICOM port `4242`
-published for your scanners (remove that line if nothing sends images by DICOM) and its web port `8042`
+published for your scanners (`DICOM_PORT` in `.env`; remove that line if nothing sends images by DICOM) and its web port `8042`
 **not published**: only the portal can reach it. Images and index live in the `orthanc-db` volume (**back it
 up**). Pin a version tag in the compose file instead of `latest` for production.
 
@@ -150,6 +153,8 @@ If `ADMIN_PASSWORD` is empty, a random password is generated and printed **once*
 start (the administrator is only created automatically when the user table is empty). Sign in on
 `http://localhost:8080`, open **Settings > Orthanc connection**, enter your Orthanc address and, if it has
 users, the account, then press **Test connection**. Optionally copy `.env.example` to `.env` to pre-fill values.
+If `8080` or `8081` is already used on this computer, set `BIND_ADDR` / `REMOTE_BIND_ADDR` in `.env` before the
+first start (see [Changing the ports](#changing-the-ports)).
 
 For the internet, install `cloudflared` on the same server and point the tunnel's public hostname to
 `http://localhost:8081` (section 10; `deploy/cloudflared-config.yml` is a ready-made example for a
@@ -248,14 +253,34 @@ old one. In Docker leave the addresses alone: the published ports are fixed.
 | `DATABASE_PATH` (default `portal.db`) | SQLite file: users, audit log, transfers **and the saved settings** |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | First administrator, created only when there are no users |
 | `RESET_SETTINGS=true` | **Recovery switch.** For one start, forget the settings saved from the web and go back to the defaults / `.env` values. Users, audit log and transfers are untouched |
+| `LISTENERS_FROM_ENV=true` | The listening addresses always come from `BIND_ADDR` / `REMOTE_BIND_ADDR` and are read-only in *Settings > Network* (always on in the Docker image). See [Changing the ports](#changing-the-ports) |
 
 Everything else in `.env.example` (`ORTHANC_URL`, `BIND_ADDR`, `SESSION_HOURS`...) is only the **initial value**
 of a setting, used until an administrator saves the Settings form; afterwards the saved value wins. This keeps
 existing deployments working and means you can run with no `.env` at all.
 
 **If you lock yourself out** (wrong port, wrong address): if the saved intranet address cannot be opened at
-start-up, the portal falls back to `0.0.0.0:8080` so you can still sign in and fix it. If you cannot reach it
-at all, start once with `RESET_SETTINGS=true`.
+start-up, the portal falls back to `BIND_ADDR` (default `0.0.0.0:8080`) so you can still sign in and fix it.
+If you cannot reach it at all, start once with `RESET_SETTINGS=true`.
+
+### Changing the ports
+
+The defaults are `8080` (intranet, staff portal) and `8081` (internet, invitation links only). If another
+program already uses one of them:
+
+| Install | Where to change them | When it applies |
+|---|---|---|
+| Docker Compose (all three files in `deploy/`) | `INTRANET_PORT` / `INTERNET_PORT` in the `.env` next to `docker-compose.yml` (`DICOM_PORT` too in the full stack) | `docker compose up -d`. Applied on **every** start; the address fields in *Settings > Network* are read-only |
+| Bare metal, first start | `BIND_ADDR` / `REMOTE_BIND_ADDR` in `.env` (e.g. `0.0.0.0:9080` / `0.0.0.0:9081`) | First start; afterwards the saved value wins |
+| Bare metal, running portal | *Settings > Network* | At once, no restart (if the new port cannot be opened, nothing changes) |
+| Bare metal, ports managed in `.env` only | `LISTENERS_FROM_ENV=true` plus `BIND_ADDR` / `REMOTE_BIND_ADDR` | Every start, like Docker |
+
+In Docker the container listens on the **same** port numbers as the server, so the addresses shown in
+*Settings* are the real ones, and `network_mode: host` (option D in the compose files) works unchanged. The
+image sets `LISTENERS_FROM_ENV=true`, so a port typed in *Settings* can never break the port mapping.
+
+When you change the **internet** port, update the Cloudflare tunnel to match: `portal:<INTERNET_PORT>` for the
+tunnel container, `localhost:<port>` for a `cloudflared` running on the server.
 
 > **The Orthanc password is stored in the SQLite file** (it must be usable to log in to Orthanc), exactly like
 > it would sit in a `.env`. Protect `portal.db` and its backups accordingly, and use a dedicated, low-privilege
@@ -664,6 +689,7 @@ plugin, a real Weasis or a real DICOM destination here, and the compose files we
 | Symptom | Likely cause |
 |---|---|
 | Red "Orthanc:" strip under the top bar, or "Orthanc ... is not supported" in the log | Orthanc unreachable, wrong credentials, or older than 1.12.5 / no `HasExtendedFind`. Fix it in **Settings > Orthanc connection**; the portal keeps running meanwhile |
+| The portal does not start: "cannot start the intranet listener ... address already in use" (or `docker compose up` says "port is already allocated") | Another program uses that port: pick a free one, see [Changing the ports](#changing-the-ports) |
 | I changed the port and lost the page | Settings shows a link to the new address; if the new address is unusable the old one is kept. Last resort: start once with `RESET_SETTINGS=true` |
 | A DICOM node I added disappears after restarting Orthanc | Orthanc is not running with `"DicomModalitiesInDatabase": true` |
 | Saving settings says "Cannot listen on ..." | That address is already used by another program or is not an address of this machine |

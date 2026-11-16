@@ -101,7 +101,17 @@ async fn main() -> anyhow::Result<()> {
         db.delete_settings()?;
         tracing::warn!("RESET_SETTINGS is on: the settings saved from the web interface were discarded");
     }
-    let settings = Settings::merged_with_stored(Settings::from_env()?, db.load_settings()?);
+    let seed = Settings::from_env()?; // defaults + environment, also the port fallback below
+    let mut settings = Settings::merged_with_stored(seed.clone(), db.load_settings()?);
+    if boot.listeners_from_env {
+        // Docker (and anyone who wants it): the ports are set where the container is
+        // configured (.env / docker-compose), never by a value saved in the database.
+        settings.take_listen_addresses_from(&seed);
+        tracing::info!(
+            "LISTENERS_FROM_ENV is on: listening addresses come from BIND_ADDR / REMOTE_BIND_ADDR \
+             and cannot be changed in Settings"
+        );
+    }
 
     // 4. Shared state, used by both listeners (which differ only in the routes they serve).
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
@@ -121,6 +131,7 @@ async fn main() -> anyhow::Result<()> {
         thumbs: ThumbnailCache::new(),
         branding,
         admin_lock: Arc::new(tokio::sync::Mutex::new(())),
+        listeners_from_env: boot.listeners_from_env,
     };
 
     // Compute the throw-away password hash used for unknown user names now, so the very first
@@ -167,20 +178,32 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // 8. Start the listeners. The intranet one is essential; if its saved address
-    //    cannot be opened (port taken after a reboot...) fall back to 0.0.0.0:8080
-    //    so an administrator can still reach the Settings screen and fix it.
+    //    cannot be opened (port taken after a reboot...) fall back to the address of
+    //    the environment (BIND_ADDR, default 0.0.0.0:8080) so an administrator can
+    //    still reach the Settings screen and fix it.
     let mut effective = settings.clone();
     effective.remote_enabled = false;
     if let Err(e) = listeners.apply(&state, &effective).await {
-        tracing::error!("{e}. Falling back to 0.0.0.0:8080 so you can correct it in Settings");
-        effective.bind_addr = "0.0.0.0:8080".into();
-        listeners.apply(&state, &effective).await.map_err(|e| anyhow!("cannot start the intranet listener: {e}"))?;
+        if effective.bind_addr == seed.bind_addr {
+            return Err(anyhow!(
+                "cannot start the intranet listener: {e}. Another program probably uses this port: \
+                 choose a free one with BIND_ADDR (e.g. BIND_ADDR=0.0.0.0:9080) in .env or the environment"
+            ));
+        }
+        tracing::error!("{e}. Falling back to {} (BIND_ADDR) so you can correct it in Settings", seed.bind_addr);
+        effective.bind_addr = seed.bind_addr.clone();
+        listeners.apply(&state, &effective).await.map_err(|e| {
+            anyhow!("cannot start the intranet listener: {e}. Choose a free port with BIND_ADDR in .env")
+        })?;
     }
     if settings.remote_enabled {
         effective.remote_enabled = true;
         effective.remote_bind_addr = settings.remote_bind_addr.clone();
         if let Err(e) = listeners.apply(&state, &effective).await {
-            tracing::error!("The internet (share links only) listener could not start: {e}");
+            tracing::error!(
+                "The internet (share links only) listener could not start: {e}. If another program uses \
+                 this port, choose a free one in Settings > Network or with REMOTE_BIND_ADDR"
+            );
         }
     } else {
         tracing::warn!("The internet listener is disabled: share links cannot be opened from outside");

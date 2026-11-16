@@ -1650,6 +1650,16 @@ function buildSettingsView() {
 
     const rolesEditor = buildRolesEditor(s.roles, doc.defaults.roles, doc.permissions);
 
+    // Docker (LISTENERS_FROM_ENV): the addresses must match the published ports, so they are
+    // set in the .env file of docker-compose and only shown here.
+    const networkFields = SETTINGS_FIELDS.network.map(field);
+    if (doc.listeners_from_env) {
+      for (const key of ["bind_addr", "remote_bind_addr"]) inputs[key].disabled = true;
+    }
+    const networkIntro = doc.listeners_from_env
+      ? "Two listeners: the intranet one (the whole portal, for staff) and the internet one (ONLY invitation links, for the Cloudflare Tunnel). Their addresses are fixed by the server's environment (Docker): to change a port, edit INTRANET_PORT / INTERNET_PORT in the .env file next to docker-compose.yml and run \"docker compose up -d\"."
+      : "Two listeners: the intranet one (the whole portal, for staff) and the internet one (ONLY invitation links, for the Cloudflare Tunnel). Changing an address re-opens the listener right away; if the new address cannot be opened (for example because another program uses that port), nothing is changed.";
+
     const listenerInfo = h("ul", { class: "listener-status wide" }, doc.listeners.map((l) =>
       h("li", null, h("b", null, l.name), ": ", l.running ? `listening on ${l.addr}` : "not running")));
 
@@ -1719,8 +1729,7 @@ function buildSettingsView() {
       section("Orthanc connection", "The PACS this portal works with. Changes apply immediately, without restarting.",
         urlField, modeField, userField, passwordField,
         h("div", { class: "setting wide" }, testButton, testBox)),
-      section("Network", "Two listeners: the intranet one (the whole portal, for staff) and the internet one (ONLY invitation links, for the Cloudflare Tunnel). Changing an address re-opens the listener right away; if the new address cannot be opened, nothing is changed. Running in Docker? Leave the two addresses as they are: Docker publishes fixed ports.",
-        SETTINGS_FIELDS.network.map(field), listenerInfo),
+      section("Network", networkIntro, networkFields, listenerInfo),
       section("Share links (invitations for people outside)", "A staff member with the share permission can invite somebody outside: a link plus a generated password that opens ONE study, to look at online and to download a limited number of times, until the link expires. These are the defaults offered when creating a link, and the limits nobody can exceed.", SETTINGS_FIELDS.sharing.map(field)),
       section("Sessions and sign-in security", null, SETTINGS_FIELDS.security.map(field)),
       section("Viewers and uploads", null, SETTINGS_FIELDS.viewers.map(field)),

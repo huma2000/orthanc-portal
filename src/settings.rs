@@ -299,6 +299,20 @@ impl Settings {
         }
     }
 
+    /// Uses the listening addresses of `seed` (the environment), keeping everything else.
+    /// Only the addresses: switching the internet listener on or off stays a setting.
+    pub fn take_listen_addresses_from(&mut self, seed: &Settings) {
+        self.bind_addr = seed.bind_addr.clone();
+        self.remote_bind_addr = seed.remote_bind_addr.clone();
+        if self.remote_enabled
+            && self.remote_bind_addr.parse::<SocketAddr>().map(|a| a.port()).ok()
+                == self.bind_addr.parse::<SocketAddr>().map(|a| a.port()).ok()
+        {
+            tracing::error!("BIND_ADDR and REMOTE_BIND_ADDR use the same port: the internet listener is switched off");
+            self.remote_enabled = false;
+        }
+    }
+
     /// Trims text fields and removes trailing slashes from URLs.
     pub fn normalise(&mut self) {
         self.portal_name = self.portal_name.trim().to_string();

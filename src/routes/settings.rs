@@ -55,6 +55,8 @@ async fn settings_document(state: &AppState) -> Value {
     json!({
         "settings": state.settings.get().to_view(),
         "listeners": state.listeners.status().await,
+        // true = the listening addresses are set by the environment (Docker): read-only here.
+        "listeners_from_env": state.listeners_from_env,
         "defaults": { "roles": default_roles() },
         "branding": state.branding.describe(),
         // Every permission, for the roles editor.
@@ -85,6 +87,14 @@ pub async fn update_settings(
     // 1. Validate. Nothing has changed yet if this fails.
     let old = state.settings.get();
     let new = old.with_patch(&patch)?;
+    if state.listeners_from_env && (new.bind_addr != old.bind_addr || new.remote_bind_addr != old.remote_bind_addr) {
+        return Err(AppError::BadRequest(
+            "The listening addresses are set by the server's environment (LISTENERS_FROM_ENV, used by Docker). \
+             Change INTRANET_PORT / INTERNET_PORT in the .env file next to docker-compose.yml and restart \
+             the portal (docker compose up -d)."
+                .into(),
+        ));
+    }
     let changed = old.changed_keys(&new);
     if changed.is_empty() {
         let mut document = settings_document(&state).await;

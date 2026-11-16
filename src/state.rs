@@ -40,4 +40,7 @@ pub struct AppState {
     /// working at the same moment cannot overwrite each other's changes (or both
     /// demote the last administrators at once).
     pub admin_lock: Arc<tokio::sync::Mutex<()>>,
+    /// `LISTENERS_FROM_ENV`: the listening addresses are fixed by the environment
+    /// (Docker) and the Settings screen must not change them.
+    pub listeners_from_env: bool,
 }

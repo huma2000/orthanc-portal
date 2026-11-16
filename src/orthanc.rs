@@ -141,6 +141,17 @@ fn leading_number(s: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
+/// Does `GET /system` report this capability? Orthanc has used two shapes for it:
+/// a list of names (`["HasExtendedFind", ...]`) and, in recent builds, an object of
+/// flags (`{"HasExtendedFind": true, ...}`).
+fn has_capability(capabilities: &Value, name: &str) -> bool {
+    match capabilities {
+        Value::Array(list) => list.iter().any(|c| c.as_str() == Some(name)),
+        Value::Object(flags) => flags.get(name).and_then(Value::as_bool).unwrap_or(false),
+        _ => false,
+    }
+}
+
 impl OrthancClient {
     fn build(endpoint: Endpoint) -> Result<Self, AppError> {
         let http = Client::builder()
@@ -255,10 +266,7 @@ impl OrthancClient {
         let system = self.get_json("/system").await?;
         let version = system["Version"].as_str().unwrap_or("unknown").to_string();
 
-        let has_extended_find = system["Capabilities"]
-            .as_array()
-            .map(|caps| caps.iter().any(|c| c.as_str() == Some("HasExtendedFind")))
-            .unwrap_or(false);
+        let has_extended_find = has_capability(&system["Capabilities"], "HasExtendedFind");
 
         // "1.12.10" -> (1, 12, 10). Development builds ("mainline") count as new enough.
         let mut parts = version.split('.').map(leading_number);
@@ -582,6 +590,16 @@ impl OrthancClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both shapes of `Capabilities` (list of names, object of flags) are understood.
+    #[test]
+    fn capabilities_as_a_list_or_as_flags() {
+        assert!(has_capability(&serde_json::json!(["HasExtendedChanges", "HasExtendedFind"]), "HasExtendedFind"));
+        assert!(has_capability(&serde_json::json!({"HasExtendedFind": true}), "HasExtendedFind"));
+        assert!(!has_capability(&serde_json::json!({"HasExtendedFind": false}), "HasExtendedFind"));
+        assert!(!has_capability(&serde_json::json!(["HasExtendedChanges"]), "HasExtendedFind"));
+        assert!(!has_capability(&Value::Null, "HasExtendedFind"));
+    }
 
     /// The portal sends an account only when a user name is configured.
     #[test]

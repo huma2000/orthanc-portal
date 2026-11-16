@@ -8,7 +8,7 @@
 #  Usage (from this "portal-only" folder):
 #     1. cp .env.example .env     and edit .env   (at least ORTHANC_URL)
 #     2. docker compose up -d --build
-#     3. Intranet:  http://<this-server>:8080
+#     3. Intranet:  http://<this-server>:8080   (INTRANET_PORT in .env)
 #        Sign in as "admin". If you left ADMIN_PASSWORD empty, the generated
 #        password is printed once:   docker compose logs portal
 #     4. Settings > Orthanc connection > "Test connection" tells you at once
@@ -38,7 +38,8 @@
 #     D. You need Orthanc to see the real address of this server (or 127.0.0.1)
 #        Run the portal on the host's own network: delete the "ports:" block, add
 #        "network_mode: host" to the portal service and use ORTHANC_URL=http://127.0.0.1:8042
-#        (Linux only. The portal then listens directly on the ports of Settings > Network.)
+#        (Linux only. The portal then listens directly on INTRANET_PORT / INTERNET_PORT
+#        of this server: pick free ones in .env.)
 #
 #  Network design
 #    * The portal listens on TWO ports:
@@ -48,7 +49,9 @@
 #                                             Cloudflare Tunnel at http://localhost:8081
 #      Whatever comes from the internet can only open the study an invitation link +
 #      password was created for (no accounts, no search, nothing else).
-#    * Never forward port 8080 to the internet.
+#    * Port taken by another program? Set INTRANET_PORT / INTERNET_PORT in .env (and
+#      point your tunnel at http://localhost:<INTERNET_PORT>).
+#    * Never forward the intranet port (8080) to the internet.
 # =====================================================================
 
 services:
@@ -68,14 +71,18 @@ services:
       ORTHANC_PASSWORD: ${ORTHANC_PASSWORD:-}
       ADMIN_USERNAME: admin
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}       # empty = a random one is printed in the log
-      # Inside the container the listeners keep their defaults (8080 intranet, 8081 share
-      # links only). Do not move them in Settings while running in Docker: the published
-      # ports below are fixed. Change INTRANET_PORT / INTERNET_PORT in .env instead.
+      # Listening ports: ALWAYS these (they are read-only in Settings > Network). The same
+      # numbers are used inside the container and on this server, so option D works too.
+      # Change INTRANET_PORT / INTERNET_PORT in .env, then: docker compose up -d
+      BIND_ADDR: 0.0.0.0:${INTRANET_PORT:-8080}
+      REMOTE_BIND_ADDR: 0.0.0.0:${INTERNET_PORT:-8081}
     volumes:
       - portal-data:/data                       # users, audit log and settings (BACK THIS UP)
     ports:
-      - "${INTRANET_BIND:-0.0.0.0}:${INTRANET_PORT:-8080}:8080"     # staff portal (intranet)
-      - "${INTERNET_BIND:-127.0.0.1}:${INTERNET_PORT:-8081}:8081"   # invitation links (for your tunnel)
+      # staff portal (intranet)
+      - "${INTRANET_BIND:-0.0.0.0}:${INTRANET_PORT:-8080}:${INTRANET_PORT:-8080}"
+      # invitation links (for your tunnel)
+      - "${INTERNET_BIND:-127.0.0.1}:${INTERNET_PORT:-8081}:${INTERNET_PORT:-8081}"
     # Lets "host.docker.internal" mean this computer on Linux too (option B above).
     extra_hosts:
       - "host.docker.internal:host-gateway"

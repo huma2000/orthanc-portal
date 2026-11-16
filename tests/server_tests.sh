@@ -515,6 +515,35 @@ ok "empty ORTHANC_USERNAME / ORTHANC_PASSWORD start the portal without an accoun
 ok "...and it works against an Orthanc that has no users" "$(code $F $A GET /api/studies)" "200"
 has "...Test connection says it is connected without an account" "$(otest | py "d['message']")" "Connected to Orthanc 1.12.10 without an account"
 
+echo "== ports: busy ports, fallback and LISTENERS_FROM_ENV"
+# hold_port PORT -> keeps 127.0.0.1:PORT busy (as "another program" would) until killed
+hold_port() { python3 -c "import socket,time;s=socket.socket();s.bind(('127.0.0.1',$1));s.listen();time.sleep(60)" & sleep 0.5; }
+portal_stop() { pkill -x "$(basename "$PORTAL_BIN")" 2>/dev/null; sleep 0.8; }
+A=$(login $F admin SuperSecret123)
+put $A '{"bind_addr":"127.0.0.1:18090"}' > /dev/null      # saved in the database
+portal_stop
+hold_port 18090; HOLDER=$!
+portal_start
+ok "saved port busy at start-up -> falls back to BIND_ADDR" "$(curl -s -o /dev/null -w '%{http_code}' $F/healthz)" "200"
+has "...and says so in the log" "$(cat "$WORK/portal.log")" "Falling back to 127.0.0.1:18080 (BIND_ADDR)"
+kill $HOLDER 2>/dev/null; portal_stop
+hold_port 18080; HOLDER=$!
+portal_start BIND_ADDR=127.0.0.1:18080 LISTENERS_FROM_ENV=true
+has "BIND_ADDR busy -> clear error telling how to choose another port" "$(cat "$WORK/portal.log")" "choose a free one with BIND_ADDR"
+kill $HOLDER 2>/dev/null; portal_stop
+# The database still holds 18090; with LISTENERS_FROM_ENV the environment wins on every start.
+portal_start LISTENERS_FROM_ENV=true BIND_ADDR=127.0.0.1:18095 REMOTE_BIND_ADDR=127.0.0.1:18096
+F=http://127.0.0.1:18095; G=http://127.0.0.1:18096
+A=$(login $F admin SuperSecret123)
+ok "LISTENERS_FROM_ENV: the environment wins over the saved port" "$(curl -s -o /dev/null -w '%{http_code}' $F/healthz)/$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 http://127.0.0.1:18090/healthz)" "200/000"
+ok "...the internet listener too" "$(curl -s -o /dev/null -w '%{http_code}' $G/healthz)" "200"
+ok "...Settings knows the addresses are locked" "$(sview "str(d['listeners_from_env'])+' '+d['settings']['bind_addr']")" "True 127.0.0.1:18095"
+OUT=$(put $A '{"bind_addr":"127.0.0.1:18097"}')
+ok "...changing an address from Settings is refused (400)" "$(echo "$OUT" | tail -1)" "400"
+has "...with a message pointing to INTRANET_PORT" "$OUT" "INTRANET_PORT"
+ok "...other settings can still be saved" "$(put $A '{"session_hours":11,"bind_addr":"127.0.0.1:18095"}' | tail -1)" "200"
+F=http://127.0.0.1:18080; G=http://127.0.0.1:18081
+
 echo; echo "RESULT: $PASS passed, $FAIL failed"
 stack_stop
 [ "$FAIL" -eq 0 ]
