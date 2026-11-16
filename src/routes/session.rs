@@ -10,6 +10,7 @@
 use crate::auth::{self, AuthUser, SESSION_COOKIE};
 use crate::db::User;
 use crate::error::{AppError, AppResult};
+use crate::settings::ModalityButton;
 use crate::state::AppState;
 use axum::{
     extract::{ConnectInfo, State},
@@ -35,10 +36,14 @@ pub struct ShareFeature {
 /// Optional capabilities of the installation, shown or hidden by the UI.
 #[derive(Serialize)]
 pub struct Features {
+    /// Offer the Weasis desktop viewer (Settings > General > Viewers and uploads).
+    weasis: bool,
     /// Orthanc's OHIF plugin is available: offer the browser viewer.
     ohif: bool,
     /// Preview thumbnails are switched on (Settings > Viewers and uploads).
     thumbnails: bool,
+    /// The quick modality filters of the search pages, in order (Settings > General).
+    modality_buttons: Vec<ModalityButton>,
     /// Sharing with people outside (invitation links).
     share: ShareFeature,
 }
@@ -62,7 +67,16 @@ async fn me_response(state: &AppState, user: User) -> Me {
         default_downloads: settings.share_default_downloads,
         max_downloads: settings.share_max_downloads,
     };
-    Me { user, features: Features { ohif, thumbnails: settings.thumbnails_enabled, share } }
+    Me {
+        user,
+        features: Features {
+            weasis: settings.weasis_enabled,
+            ohif,
+            thumbnails: settings.thumbnails_enabled,
+            modality_buttons: settings.visible_modality_buttons(),
+            share,
+        },
+    }
 }
 
 #[derive(Deserialize)]

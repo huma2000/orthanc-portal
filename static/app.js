@@ -35,21 +35,12 @@ const PAGE_SIZE = 25;                 // rows per page in the search tables
 const UPLOAD_CONCURRENCY = 3;         // files sent to the server at the same time
 
 /**
- * Quick modality filters shown as toggle buttons. `codes` are the DICOM modality
- * codes sent to the server; several can be selected at once (CT *or* US...).
- * "RX" is X-ray, which DICOM splits into CR (computed) and DX (digital).
+ * Quick modality filters shown as toggle buttons: `{ label, codes, title }`. `codes` are
+ * the DICOM modality codes sent to the server (RX = CR + DX). Administrators choose
+ * which ones are shown and in what order (Settings > General > Modality buttons); the
+ * server sends the visible ones, in order, with the user's features.
  */
-const MODALITY_CHIPS = [
-  { label: "CT", codes: ["CT"], title: "Computed tomography" },
-  { label: "MR", codes: ["MR"], title: "Magnetic resonance" },
-  { label: "US", codes: ["US"], title: "Ultrasound" },
-  { label: "RX", codes: ["CR", "DX"], title: "X-ray (CR + DX)" },
-  { label: "MG", codes: ["MG"], title: "Mammography" },
-  { label: "XA", codes: ["XA"], title: "X-ray angiography" },
-  { label: "RF", codes: ["RF"], title: "Fluoroscopy" },
-  { label: "NM", codes: ["NM"], title: "Nuclear medicine" },
-  { label: "PT", codes: ["PT"], title: "PET" },
-];
+const modalityButtons = () => (state.user && state.user.features && state.user.features.modality_buttons) || [];
 
 /** Global UI state. `user` is null while signed out. */
 const state = {
@@ -69,8 +60,11 @@ const root = document.getElementById("app");
 /** Does the signed-in user own this permission? (UI convenience only: the server enforces it.) */
 const can = (permission) => !!state.user && state.user.permissions.includes(permission);
 
-/** Is the OHIF browser viewer available? (decided by the server from Orthanc's plugins) */
+/** Is the OHIF browser viewer available? (Settings, and Orthanc's plugins when "automatic") */
 const hasOhif = () => !!(state.user && state.user.features && state.user.features.ohif);
+
+/** Is the Weasis desktop viewer offered? (Settings > General > Viewers and uploads) */
+const hasWeasis = () => !!(state.user && state.user.features && state.user.features.weasis);
 
 /* ====================================================================
    2. DOM HELPER
@@ -195,11 +189,13 @@ const dash = () => h("span", { class: "muted" }, "-");
  * its own tabs (SETTINGS_TABS).
  */
 const VIEWS = [
-  { id: "studies", label: "Studies", needs: "read", build: () => buildSearchView(STUDY_SEARCH) },
-  { id: "series", label: "Series", needs: "read", build: () => buildSearchView(SERIES_SEARCH) },
+  // `wide`: table pages use the whole width of the window; the others (forms, long
+  // explanations) keep a readable maximum width.
+  { id: "studies", label: "Studies", needs: "read", wide: true, build: () => buildSearchView(STUDY_SEARCH) },
+  { id: "series", label: "Series", needs: "read", wide: true, build: () => buildSearchView(SERIES_SEARCH) },
   { id: "upload", label: "Upload", needs: "upload", build: buildUploadView },
-  { id: "transfers", label: "Transfers", needs: "send", build: buildTransfersView },
-  { id: "shares", label: "Shares", needs: "share", build: buildSharesView },
+  { id: "transfers", label: "Transfers", needs: "send", wide: true, build: buildTransfersView },
+  { id: "shares", label: "Shares", needs: "share", wide: true, build: buildSharesView },
   { id: "settings", label: "Settings", needs: "admin", build: buildSettingsView },
 ];
 
@@ -237,7 +233,7 @@ function renderApp() {
       h("span", null, state.user.username),
       h("button", { class: "btn small", type: "button", onclick: signOut }, "Sign out")));
 
-  const page = h("main", { class: "page" },
+  const page = h("main", { class: current && current.wide ? "page wide" : "page" },
     current ? current.build() : h("div", { class: "panel empty" }, "Your account has no permissions yet. Ask an administrator to grant you access."));
   // Red notice (administrators only) when Orthanc is unreachable or too old.
   const banner = h("div", { id: "orthanc-banner", class: "banner", role: "alert", hidden: true });
@@ -447,7 +443,6 @@ const STUDY_SEARCH = {
   fields: [
     { name: "patient_name", label: "Patient name", placeholder: "DOE or DOE*" },
     { name: "patient_id", label: "Patient ID" },
-    { name: "accession_number", label: "Accession number" },
     { name: "description", label: "Study description" },
     { name: "modality", label: "Modality", type: "modalities" },
     { name: "date_from", label: "Study date from", type: "date" },
@@ -474,16 +469,18 @@ const SERIES_SEARCH = {
 };
 
 /**
- * Modality filter: a row of toggle buttons (CT, MR, US, RX...) plus a small box for
- * any other DICOM code. Several can be active at once ("CT or US"). It exposes
+ * Modality filter: a row of toggle buttons (CT, MR, US, RX... as set up by an
+ * administrator) plus a box for any other DICOM code, which is ALWAYS there (even when
+ * every button is hidden). Several can be active at once ("CT or US"). It exposes
  * `.value` (comma-separated codes) like an <input>, so the generic search code can
  * read, store and clear it. `onChange` is called when a button is toggled.
+ * `chips` defaults to the buttons of this installation (the Settings preview passes its own).
  */
-function buildModalityPicker(initial, onChange) {
-  const known = new Set(MODALITY_CHIPS.flatMap((chip) => chip.codes));
+function buildModalityPicker(initial, onChange, chips = modalityButtons()) {
+  const known = new Set(chips.flatMap((chip) => chip.codes));
   const selected = new Set();          // active codes that have a button
   const other = h("input", { class: "mod-other", placeholder: "Other codes: SR, ES...", "aria-label": "Other modality codes" });
-  const buttons = MODALITY_CHIPS.map((chip) => ({
+  const buttons = chips.map((chip) => ({
     chip,
     button: h("button", {
       type: "button", class: "chip-toggle", title: chip.title, "aria-pressed": "false",
@@ -599,21 +596,16 @@ function buildSearchView(cfg) {
         onclick: () => { for (const input of Object.values(inputs)) input.value = ""; run(0); },
       }, "Clear filters")));
 
-  const hint = can("visualize")
-    ? h("p", { class: "muted" }, "Weasis needs to be ",
-        h("a", { href: "https://weasis.org", target: "_blank", rel: "noopener" }, "installed"),
-        " on this computer",
-        hasOhif() ? "; the browser viewer (OHIF) works without installing anything." : ".")
-    : null;
-
   run(0); // show the most recent studies right away
   return h("div", { class: "view" },
-    h("div", { class: "page-head" }, h("h1", null, cfg.title), hint), form, results);
+    h("div", { class: "page-head" }, h("h1", null, cfg.title)), form, results);
 }
 
 /** Results table of the "Studies" tab. Each study row can expand to show its series. */
+const studyColumns = () => ["", ...(showThumbs() ? ["Preview"] : []), "Patient", "Patient ID", "Study date", "Description", "Modality", "Series / images", "Actions"];
+
 function renderStudiesTable(studies) {
-  const headers = ["", ...(showThumbs() ? ["Preview"] : []), "Patient", "Patient ID", "Study date", "Description", "Modality", "Series / images", "Accession", "Actions"];
+  const headers = studyColumns();
   return h("div", { class: "table-wrap" },
     h("table", { class: "data" },
       h("thead", null, h("tr", null, headers.map((t) => h("th", { class: t === "Actions" ? "num" : null }, t)))),
@@ -622,7 +614,7 @@ function renderStudiesTable(studies) {
 
 /** Two table rows per study: the study itself and a hidden row that will hold its series. */
 function studyRows(study) {
-  const seriesCell = h("td", { colspan: showThumbs() ? 10 : 9 });
+  const seriesCell = h("td", { colspan: studyColumns().length }); // the whole width of the table
   const seriesRow = h("tr", { class: "series-row", hidden: true }, seriesCell);
   let loaded = false;
 
@@ -653,11 +645,10 @@ function studyRows(study) {
     showThumbs() ? h("td", { class: "thumb-cell" }, thumb("studies", study.id, study.modalities[0])) : null,
     h("td", null, h("div", { class: "patient" }, formatName(study.patient_name)), demographics ? h("div", { class: "sub" }, demographics) : null),
     h("td", { class: "mono" }, study.patient_id || dash()),
-    h("td", null, formatDicomDate(study.study_date) || dash()),
+    h("td", { class: "nowrap" }, formatDicomDate(study.study_date) || dash()),
     h("td", null, study.study_description || dash()),
     h("td", null, study.modalities.length ? study.modalities.map(chip) : dash()),
     h("td", null, `${study.series_count ?? "?"} series`, imageInfo ? h("div", { class: "sub" }, imageInfo) : null),
-    h("td", { class: "mono" }, study.accession_number || dash()),
     h("td", null, h("div", { class: "actions" }, studyActions(study))));
 
   return [mainRow, seriesRow];
@@ -666,7 +657,7 @@ function studyRows(study) {
 /** Buttons shown for a study, according to the user's permissions. */
 function studyActions(study) {
   return [
-    can("visualize") ? viewMenu(study) : null,
+    can("visualize") ? viewButtons(study) : null,
     can("send") ? h("button", { class: "btn small", type: "button", onclick: () => openSendDialog(study) }, "Send to...") : null,
     can("share") ? h("button", { class: "btn small", type: "button", onclick: () => openShareDialog(study) }, "Share...") : null,
     can("download") ? downloadMenu("studies", study.id) : null,
@@ -700,7 +691,7 @@ function renderSeriesTable(seriesList) {
         return h("tr", { class: "study" },
           showThumbs() ? h("td", { class: "thumb-cell" }, thumb("series", s.id, s.modality)) : null,
           h("td", null, h("div", { class: "patient" }, study ? formatName(study.patient_name) : dash()), study ? h("div", { class: "sub mono" }, study.patient_id) : null),
-          h("td", null, study ? formatDicomDate(study.study_date) : dash()),
+          h("td", { class: "nowrap" }, study ? formatDicomDate(study.study_date) : dash()),
           h("td", null, (study && study.study_description) || dash()),
           h("td", null, s.series_number || dash()),
           h("td", null, chip(s.modality)),
@@ -708,7 +699,7 @@ function renderSeriesTable(seriesList) {
           h("td", null, s.body_part || dash()),
           h("td", { class: "num" }, s.instances_count),
           h("td", null, h("div", { class: "actions" }, [
-            can("visualize") && study ? viewMenu(study) : null,
+            can("visualize") && study ? viewButtons(study) : null,
             can("download") ? downloadMenu("series", s.id) : null,
           ])));
       }))));
@@ -743,35 +734,28 @@ async function openInWeasis(studyUid, button) {
   }
 }
 
-/** Plain "Open in Weasis" button (used when OHIF is not available). */
-function weasisButton(studyUid, label) {
-  const button = h("button", { class: "btn small", type: "button" }, label);
-  button.addEventListener("click", () => openInWeasis(studyUid, button));
-  return button;
-}
-
 /** Address of the OHIF web viewer for a study (served by Orthanc's OHIF plugin through the portal). */
 const ohifUrl = (studyUid) => `/ohif/viewer?StudyInstanceUIDs=${encodeURIComponent(studyUid)}`;
 
 /**
- * "View" control of a study. With OHIF available it is a small menu offering both
- * viewers; otherwise it is just the Weasis button.
+ * The two viewer buttons of a study, each shown only when it is switched on in
+ * Settings > General > Viewers and uploads (OHIF also needs Orthanc's plugin when
+ * the setting is "automatic").
  */
-function viewMenu(study) {
-  if (!hasOhif()) return weasisButton(study.study_instance_uid, "Open in Weasis");
-
-  const weasisItem = h("button", { class: "menu-item", type: "button" },
-    "Weasis", h("small", null, "Desktop viewer, must be installed"));
-  weasisItem.addEventListener("click", (event) => {
-    closeMenu(event);
-    openInWeasis(study.study_instance_uid, weasisItem);
-  });
-  const ohifItem = h("a", { class: "menu-item", href: ohifUrl(study.study_instance_uid), target: "_blank", rel: "noopener", onclick: closeMenu },
-    "Browser viewer (OHIF)", h("small", null, "Opens in a new tab, nothing to install"));
-
-  return h("details", { class: "menu" },
-    h("summary", { class: "btn small" }, "View"),
-    h("div", { class: "menu-list" }, weasisItem, ohifItem));
+function viewButtons(study) {
+  const buttons = [];
+  if (hasWeasis()) {
+    const weasis = h("button", { class: "btn small", type: "button", title: "Open in Weasis (desktop viewer, must be installed on this computer)" }, "Weasis");
+    weasis.addEventListener("click", () => openInWeasis(study.study_instance_uid, weasis));
+    buttons.push(weasis);
+  }
+  if (hasOhif()) {
+    buttons.push(h("a", {
+      class: "btn small", href: ohifUrl(study.study_instance_uid), target: "_blank", rel: "noopener",
+      title: "Open in the browser viewer (OHIF): new tab, nothing to install",
+    }, "OHIF"));
+  }
+  return buttons;
 }
 
 /**
@@ -1478,7 +1462,10 @@ const SETTINGS_FIELDS = {
     { key: "cookie_secure", label: "Secure cookie", type: "select", options: [["auto", "Automatic (only over HTTPS)"], ["always", "Always"], ["never", "Never"]], hint: "Automatic suits the intranet over HTTP plus Cloudflare over HTTPS." },
   ],
   viewers: [
-    { key: "ohif", label: "Browser viewer (OHIF)", type: "select", options: [["auto", "Automatic (when Orthanc has the plugin)"], ["on", "Always offer it"], ["off", "Never offer it"]] },
+    { key: "weasis_enabled", label: "Show the Weasis button (desktop viewer)", type: "checkbox", wide: true,
+      hint: ["Weasis needs to be ", h("a", { href: "https://weasis.org", target: "_blank", rel: "noopener" }, "installed"),
+        " on each computer that uses it; the browser viewer (OHIF) works without installing anything."] },
+    { key: "ohif", label: "Show the OHIF button (browser viewer)", type: "select", options: [["auto", "Automatic (when Orthanc has the OHIF plugin)"], ["on", "Always"], ["off", "Never"]], hint: "Opens the study in a new browser tab. Orthanc needs its OHIF plugin." },
     { key: "max_upload_mb", label: "Largest uploaded file (MB)", type: "number", min: 1, max: 102400, hint: "Applies to each file; a study is uploaded as many files." },
     { key: "thumbnails_enabled", label: "Show preview thumbnails next to studies and series", type: "checkbox", wide: true, hint: "Only staff with the visualize permission see them (guests with an invitation never do). Each one makes Orthanc decode one image." },
     { key: "thumbnail_cache_mb", label: "Thumbnail cache (MB)", type: "number", min: 0, max: 1024, hint: "Memory used to remember generated thumbnails. 0 = no cache." },
@@ -1566,12 +1553,74 @@ function buildRolesEditor(roles, defaults, permissions) {
 }
 
 /**
+ * Editor of the modality buttons of the search pages (Settings > General): order (move
+ * up / down), shown or hidden, label, DICOM codes and description, plus add / remove /
+ * restore defaults. A live preview shows the row exactly as users will see it, with the
+ * "Other codes" box that is always there. Saved with the rest of the form.
+ */
+function buildModalityButtonsEditor(buttons, defaults) {
+  const clone = (list) => list.map((b) => ({ label: b.label, codes: b.codes.join(", "), title: b.title || "", visible: b.visible !== false }));
+  let rows = clone(buttons);
+  const parseCodes = (text) => text.split(/[\s,;]+/).map((c) => c.toUpperCase()).filter(Boolean);
+  const list = h("div", { class: "modbtn-list" });
+  const preview = h("div", { class: "modbtn-preview" });
+
+  function drawPreview() {
+    const shown = rows.filter((r) => r.visible && r.label.trim()).map((r) => ({ label: r.label.trim(), codes: parseCodes(r.codes), title: r.title }));
+    const picker = buildModalityPicker("", () => {}, shown);
+    preview.replaceChildren(h("span", { class: "field-label" }, "Preview (what users see)"), picker.node);
+  }
+
+  /** Redraws the rows; `focus` = [row index, control name] to keep the keyboard where it was. */
+  function draw(focus) {
+    list.replaceChildren(...rows.map((row, index) => {
+      const move = (step, name, symbol, label) => h("button", {
+        class: "btn small", type: "button", "data-control": name, "aria-label": `${label} ${row.label || "this button"}`, title: label,
+        disabled: index + step < 0 || index + step >= rows.length,
+        onclick: () => {
+          [rows[index], rows[index + step]] = [rows[index + step], rows[index]];
+          const target = index + step;
+          // At the top or bottom the arrow just pressed is disabled: keep focus on the other one.
+          const name2 = (target === 0 && step < 0) || (target === rows.length - 1 && step > 0) ? (step < 0 ? "down" : "up") : name;
+          draw([target, name2]);
+        },
+      }, symbol);
+      return h("div", { class: `modbtn-row${row.visible ? "" : " is-hidden"}` },
+        h("div", { class: "modbtn-move" }, move(-1, "up", "↑", "Move up"), move(1, "down", "↓", "Move down")),
+        h("label", { class: "check" },
+          h("input", { type: "checkbox", checked: row.visible, onchange: (e) => { row.visible = e.target.checked; draw([index, "shown"]); }, "data-control": "shown" }),
+          "Shown"),
+        h("input", { class: "modbtn-label", value: row.label, maxlength: 16, placeholder: "Label", "aria-label": "Button label", oninput: (e) => { row.label = e.target.value; drawPreview(); } }),
+        h("input", { class: "modbtn-codes mono", value: row.codes, placeholder: "DICOM codes, e.g. CR, DX", "aria-label": "DICOM modality codes", oninput: (e) => { row.codes = e.target.value; drawPreview(); } }),
+        h("input", { class: "modbtn-title", value: row.title, maxlength: 80, placeholder: "Description (shown on hover)", "aria-label": "Description", oninput: (e) => { row.title = e.target.value; drawPreview(); } }),
+        h("button", { class: "btn small danger", type: "button", onclick: () => { rows.splice(index, 1); draw(); } }, "Remove"));
+    }));
+    drawPreview();
+    if (focus) {
+      const control = list.children[focus[0]] && list.children[focus[0]].querySelector(`[data-control="${focus[1]}"]`);
+      if (control) control.focus();
+    }
+  }
+  draw();
+
+  const node = h("div", { class: "wide modbtn-editor" }, preview, list,
+    h("div", { class: "filter-actions" },
+      h("button", { class: "btn small", type: "button", onclick: () => { rows.push({ label: "", codes: "", title: "", visible: true }); draw([rows.length - 1, "shown"]); } }, "Add button"),
+      h("button", { class: "btn small", type: "button", onclick: () => { rows = clone(defaults); draw(); } }, "Restore default buttons")));
+
+  return {
+    node,
+    get: () => rows.map((r) => ({ label: r.label.trim(), codes: parseCodes(r.codes), title: r.title.trim(), visible: r.visible })),
+  };
+}
+
+/**
  * The tabs inside Settings. The first four show parts of ONE form (the settings saved
  * together with the "Save settings" button: `sections` are the ids given to `section()`
  * in buildSettingsView). The others are separate screens whose changes apply at once.
  */
 const SETTINGS_TABS = [
-  { id: "general", label: "General", sections: ["branding", "viewers"] },
+  { id: "general", label: "General", sections: ["branding", "search", "viewers"] },
   { id: "orthanc", label: "Orthanc", sections: ["orthanc"] },
   { id: "network", label: "Network & sharing", sections: ["network", "sharing"] },
   { id: "security", label: "Security & roles", sections: ["security", "roles"] },
@@ -1733,6 +1782,7 @@ function buildSettingsView() {
     });
 
     const rolesEditor = buildRolesEditor(s.roles, doc.defaults.roles, doc.permissions);
+    const modalityEditor = buildModalityButtonsEditor(s.modality_buttons, doc.defaults.modality_buttons);
 
     // Docker (LISTENERS_FROM_ENV): the addresses must match the published ports, so they are
     // set in the .env file of docker-compose and only shown here.
@@ -1774,6 +1824,7 @@ function buildSettingsView() {
           body[key] = input.type === "checkbox" ? input.checked : input.type === "number" ? Number(input.value) : input.value;
         }
         body.roles = rolesEditor.get();
+        body.modality_buttons = modalityEditor.get();
         if (withoutAccount()) {
           // No account: no user name and no stored password (the server enforces this too).
           body.orthanc_username = "";
@@ -1785,18 +1836,10 @@ function buildSettingsView() {
         try {
           doc = await api("PUT", "/api/admin/settings", body);
           await refreshBrand();
-          if (state.user.features) {
-            state.user.features.thumbnails = doc.settings.thumbnails_enabled;
-            // The "Share..." dialog reads these: keep them in step with what was just saved, so
-            // an administrator who enters the public address can share right away.
-            state.user.features.share = {
-              configured: Boolean(doc.settings.share_public_url),
-              default_hours: doc.settings.share_default_hours,
-              max_hours: doc.settings.share_max_hours,
-              default_downloads: doc.settings.share_default_downloads,
-              max_downloads: doc.settings.share_max_downloads,
-            };
-          }
+          // Viewer buttons, thumbnails and the "Share..." dialog follow the features: take the
+          // server's fresh view of them (it also knows whether Orthanc has the OHIF plugin), so
+          // what was just saved applies right away, without signing in again.
+          try { state.user.features = (await api("GET", "/api/me")).features; } catch { /* keep the old ones */ }
           refreshOrthancStatus(true);
           toast("Settings saved.");
           draw(doc.messages || []);
@@ -1810,6 +1853,8 @@ function buildSettingsView() {
         SETTINGS_FIELDS.portal.map(field),
         buildBrandImagePicker("logo", "Logo", "PNG, JPEG, WebP, GIF or SVG, up to 1 MB. Shown in the top bar (about 32 px high, on a light plate so any logo is readable) and on the login page.", "image/png,image/jpeg,image/webp,image/gif,image/svg+xml"),
         buildBrandImagePicker("favicon", "Website icon", "PNG, ICO, SVG, JPEG, WebP or GIF, up to 256 KB. Square, at least 64 x 64 pixels. Shown in the browser tab and in bookmarks.", "image/png,image/x-icon,image/vnd.microsoft.icon,image/svg+xml,image/jpeg,image/webp,image/gif")),
+      section("search", "Modality buttons", "The quick filters above the Studies and Series lists. Put them in the order your staff use them and hide the ones nobody needs. Each button searches for one or more DICOM modality codes (RX = CR + DX). The \"Other codes\" box is always shown, so any code can still be searched.",
+        modalityEditor.node),
       section("viewers", "Viewers and uploads", null, SETTINGS_FIELDS.viewers.map(field)),
       section("orthanc", "Orthanc connection", "The PACS this portal works with. Saved changes apply immediately, without restarting.",
         urlField, modeField, userField, passwordField,

@@ -69,6 +69,17 @@ echo "== the intranet keeps Weasis and the unrestricted viewer proxy (staff, wit
 ok "features: the browser viewer is offered" "$(body $F $V /api/me | py "d['features']['ohif']")" "True"
 ok "Weasis link works for a user with visualize" "$(code $F $V GET '/api/weasis/link?study_uid=1.2.3')" "200"
 ok "Weasis link needs visualize (read-only user: 403)" "$(code $F $RD GET '/api/weasis/link?study_uid=1.2.3')" "403"
+ok "Weasis is offered by default (features.weasis)" "$(body $F $V /api/me | py "d['features']['weasis']")" "True"
+put $A '{"weasis_enabled":false}' > /dev/null
+ok "Weasis switched off: no link is made (403)" "$(code $F $V GET '/api/weasis/link?study_uid=1.2.3')" "403"
+ok "...and the UI is told (features.weasis)" "$(body $F $V /api/me | py "d['features']['weasis']")" "False"
+put $A '{"weasis_enabled":true}' > /dev/null
+ok "every user gets the visible modality buttons, in order" "$(body $F $V /api/me | py "','.join(b['label'] for b in d['features']['modality_buttons'])")" "CT,MR,US,RX,MG,XA,RF,NM,PT"
+ok "a modality button with a wildcard code is refused (400)" "$(put $A '{"modality_buttons":[{"label":"CT","codes":["C*"]}]}' | tail -1)" "400"
+put $A '{"modality_buttons":[{"label":"US","codes":["us"],"title":"Ultrasound"},{"label":"CT","codes":["CT"],"visible":false}]}' > /dev/null
+ok "order and hiding reach every user (codes upper-cased)" "$(body $F $V /api/me | py "','.join(b['label']+':'+'+'.join(b['codes']) for b in d['features']['modality_buttons'])")" "US:US"
+put $A "{\"modality_buttons\":$(body $F $A /api/admin/settings | py "json.dumps(d['defaults']['modality_buttons'])")}" > /dev/null
+ok "...and the defaults can be restored" "$(body $F $V /api/me | py "len(d['features']['modality_buttons'])")" "9"
 T=$(tok $V)
 ok "a Weasis token works on the intranet" "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $T" $F/dicom-web/studies)" "200"
 ok "...and is useless on the internet listener (401)" "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $T" $G/dicom-web/studies)" "401"

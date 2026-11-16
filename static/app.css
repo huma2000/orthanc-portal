@@ -117,6 +117,10 @@ a { color: var(--accent); }
 .userbox .btn:hover { background: #1b2735; }
 
 .page { max-width: 1320px; margin: 0 auto; padding: 1.25rem; display: grid; gap: 1rem; }
+/* Table pages (Studies, Series, Transfers, Shares) use the whole window: more room for the
+   columns and the action buttons. `minmax(0, 1fr)` lets wide tables scroll inside their box
+   instead of stretching the page. */
+.page.wide { max-width: none; padding: 1.25rem 1.5rem; grid-template-columns: minmax(0, 1fr); }
 .page-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
 
 /* ---------- 5. Buttons and form controls ---------- */
@@ -287,7 +291,7 @@ dialog form, dialog .dialog-form { display: grid; gap: 0.9rem; padding: 1.3rem; 
   .topbar { flex-wrap: wrap; gap: 0.5rem; padding: 0 0.75rem; }
   .nav { order: 3; flex-basis: 100%; }
   .nav button { padding-top: 0.5rem; }
-  .page { padding: 0.75rem; }
+  .page, .page.wide { padding: 0.75rem; }
 }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
@@ -390,6 +394,27 @@ label.check { display: flex; align-items: center; gap: 0.5rem; color: var(--ink)
 .role-row { display: grid; grid-template-columns: 9rem minmax(10rem, 1fr) auto auto; gap: 0.6rem; align-items: center; padding: 0.5rem; border: 1px solid var(--line); border-radius: 8px; }
 .role-perms { display: flex; flex-wrap: wrap; gap: 0.2rem 0.9rem; }
 @media (max-width: 900px) { .role-row { grid-template-columns: 1fr; } }
+
+/* Modality buttons editor (Settings > General): preview on top, one row per button. */
+.modbtn-editor { display: grid; gap: 0.8rem; }
+.modbtn-preview { display: grid; gap: 0.4rem; padding: 0.7rem 0.8rem; border: 1px dashed var(--line-strong); border-radius: 8px; background: var(--panel-alt); }
+.modbtn-list { display: grid; gap: 0.5rem; }
+.modbtn-row {
+  display: grid;
+  grid-template-columns: auto auto 6rem minmax(7rem, 10rem) minmax(10rem, 1fr) auto;
+  gap: 0.6rem;
+  align-items: center;
+  padding: 0.45rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.modbtn-row.is-hidden { background: var(--panel-alt); }
+.modbtn-row.is-hidden .modbtn-label,
+.modbtn-row.is-hidden .modbtn-codes,
+.modbtn-row.is-hidden .modbtn-title { color: var(--ink-soft); }
+.modbtn-move { display: flex; gap: 0.25rem; }
+.modbtn-move .btn { min-width: 2rem; justify-content: center; }
+@media (max-width: 900px) { .modbtn-row { grid-template-columns: auto auto 1fr; } .modbtn-codes, .modbtn-title { grid-column: 1 / -1; } }
 
 /* Notices: orange strip about Orthanc, blue box after saving settings */
 .banner { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; padding: 0.6rem 1.25rem; background: var(--danger-soft); color: var(--danger); font-weight: 600; }

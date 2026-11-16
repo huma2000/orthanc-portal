@@ -106,7 +106,7 @@ async function newLink(admin, body) {
     admin.$$(".subtabs [role=tab]").map((b) => b.textContent).join());
   check("no stray 'null' text on the page (it used to appear under the title)",
     !admin.$$("main *").some((el) => Array.from(el.childNodes).some((n) => n.nodeType === 3 && n.textContent.trim() === "null")));
-  check("General shows Branding and Viewers only", visibleSections().join() === "Branding,Viewers and uploads", visibleSections().join());
+  check("General shows Branding, Modality buttons and Viewers", visibleSections().join() === "Branding,Modality buttons,Viewers and uploads", visibleSections().join());
   admin.click(subtab("Orthanc"));
   check("Orthanc shows the connection only, with the Save button", visibleSections().join() === "Orthanc connection" && !admin.$("form.settings-form").closest("[hidden]"), visibleSections().join());
   admin.labelInput(admin.section("Orthanc connection"), "Orthanc address").value = "http://typed-not-saved:8042";
@@ -124,10 +124,18 @@ async function newLink(admin, body) {
   await admin.tab("Studies"); await until(() => admin.$("tr.study"), 6000);
   const row = admin.$("tr.study");
   check("study row: preview, modalities, patient", !!row.querySelector(".thumb") && /DOE, JOHN/.test(row.textContent) && /CT/.test(row.textContent));
-  check("View menu offers Weasis (a desktop viewer) for staff", admin.$$("details.menu button.menu-item").some((b) => /Weasis/.test(b.textContent)));
-  const ohifItem = admin.$$("details.menu a.menu-item").find((a) => /\/ohif\/viewer\?StudyInstanceUIDs=/.test(a.getAttribute("href")));
-  check("...and the browser viewer (opens a new tab)", !!ohifItem && ohifItem.getAttribute("target") === "_blank" && ohifItem.getAttribute("rel") === "noopener");
-  check("Send, Share, Download and View controls on every study", /Send to/.test(row.textContent) && /Share\.\.\./.test(row.textContent) && /Download/.test(row.textContent) && /View/.test(row.textContent));
+  check("a Weasis button on the study (desktop viewer)", !!admin.button(row, "Weasis"));
+  const ohifButton = Array.from(row.querySelectorAll("a.btn")).find((a) => a.textContent === "OHIF");
+  check("...and a separate OHIF button (browser viewer, new tab)", !!ohifButton && /\/ohif\/viewer\?StudyInstanceUIDs=/.test(ohifButton.getAttribute("href"))
+    && ohifButton.getAttribute("target") === "_blank" && ohifButton.getAttribute("rel") === "noopener");
+  check("the Studies page uses the whole width (wide layout)", admin.$("main").classList.contains("wide"));
+  check("no accession number: neither a search box nor a column",
+    !admin.$("input[name=accession_number]") && !admin.$$("main th").some((th) => /Accession/.test(th.textContent)) && !/ACC1/.test(row.textContent));
+  check("the default modality buttons, in the default order", admin.$$(".chip-toggle").map((b) => b.textContent).join() === "CT,MR,US,RX,MG,XA,RF,NM,PT", admin.$$(".chip-toggle").map((b) => b.textContent).join());
+  check("the study date never wraps", row.querySelectorAll("td.nowrap").length > 0);
+  check("the old View drop-down is gone", !Array.from(row.querySelectorAll("summary")).some((s) => s.textContent === "View"));
+  check("the Weasis notice is no longer on the Studies page", !/Weasis needs to be/.test(admin.$("main").textContent));
+  check("Send, Share, Download, Weasis and OHIF controls on every study", /Send to/.test(row.textContent) && /Share\.\.\./.test(row.textContent) && /Download/.test(row.textContent) && /Weasis/.test(row.textContent) && /OHIF/.test(row.textContent));
   check("the old internet-viewing switch is gone from the Network settings", !/Internet viewers cannot download/.test((await (await admin.call("GET", "/api/admin/settings")).text())));
 
   console.log("--- sharing: not set up yet");
@@ -306,7 +314,57 @@ async function newLink(admin, body) {
   await adminNoOhif.login("admin", "SuperSecret123");
   await sleep(1000);
   check("on the intranet Weasis is still there when OHIF is off", [...adminNoOhif.$$("tr.study button")].some((b) => /Weasis/.test(b.textContent)));
+  check("...and the OHIF button is gone", !adminNoOhif.$$("tr.study a.btn").some((a) => a.textContent === "OHIF"));
   await admin.call("PUT", "/api/admin/settings", { ohif: "auto" });
+
+  console.log("--- the Weasis button can be switched off in Settings");
+  const viewers = await makeDom(STAFF);
+  await viewers.login("admin", "SuperSecret123");
+  await viewers.tab("Settings");
+  await until(() => viewers.$("form.settings-form"), 6000);
+  viewers.click(viewers.$$(".subtabs [role=tab]").find((b) => b.textContent === "General"));
+  const viewerSection = viewers.section("Viewers and uploads");
+  const weasisToggle = viewers.labelInput(viewerSection, "Show the Weasis button");
+  check("Settings > General > Viewers has the Weasis switch, on by default", !!weasisToggle && weasisToggle.checked && !viewerSection.hidden);
+  check("...with the notice that Weasis must be installed and OHIF needs nothing", /Weasis needs to be installed on each computer that uses it; the browser viewer \(OHIF\) works without installing anything/.test(weasisToggle.closest(".setting").textContent));
+  check("...and the OHIF switch next to it", !!viewers.labelInput(viewerSection, "Show the OHIF button"));
+  weasisToggle.checked = false;
+  viewers.submit(viewers.$("form.settings-form")); await sleep(1800);
+  check("switching Weasis off is saved", (await (await admin.call("GET", "/api/admin/settings")).json()).settings.weasis_enabled === false);
+  await viewers.tab("Studies"); await until(() => viewers.$("tr.study"), 6000);
+  check("...and the Weasis button disappears at once (no new sign-in), OHIF stays",
+    !viewers.button(viewers.$("tr.study"), "Weasis") && viewers.$$("tr.study a.btn").some((a) => a.textContent === "OHIF"));
+  await admin.call("PUT", "/api/admin/settings", { weasis_enabled: true });
+
+  console.log("--- modality buttons: order and visibility chosen in Settings");
+  await viewers.tab("Settings");
+  await until(() => viewers.section("Modality buttons"), 6000);
+  const modSection = viewers.section("Modality buttons");
+  const modRows = () => Array.from(viewers.section("Modality buttons").querySelectorAll(".modbtn-row"));
+  const rowOf = (label) => modRows().find((r) => r.querySelector(".modbtn-label").value === label);
+  const previewChips = () => Array.from(viewers.section("Modality buttons").querySelectorAll(".modbtn-preview .chip-toggle")).map((b) => b.textContent).join();
+  check("Settings > General has the modality buttons editor, with the 9 defaults", !modSection.hidden && modRows().length === 9 && previewChips() === "CT,MR,US,RX,MG,XA,RF,NM,PT", previewChips());
+  check("...and its preview always shows the Other codes box", !!modSection.querySelector(".modbtn-preview .mod-other"));
+  for (let i = 0; i < 3; i++) viewers.click(viewers.button(rowOf("RX"), "↑")); // RX to the top
+  const shownBox = (label) => rowOf(label).querySelector("input[type=checkbox]");
+  const toggle = (label, on) => { const box = shownBox(label); box.checked = on; box.dispatchEvent(new viewers.window.Event("change", { bubbles: true })); };
+  toggle("CT", false);
+  check("moving up and hiding update the preview at once", previewChips() === "RX,MR,US,MG,XA,RF,NM,PT", previewChips());
+  viewers.submit(viewers.$("form.settings-form")); await sleep(1800);
+  let savedButtons = (await (await admin.call("GET", "/api/admin/settings")).json()).settings.modality_buttons;
+  check("the order and the hidden button are saved (the hidden one is kept, to show it again later)",
+    savedButtons.map((b) => b.label + (b.visible ? "" : "-")).join() === "RX,CT-,MR,US,MG,XA,RF,NM,PT", savedButtons.map((b) => b.label + (b.visible ? "" : "-")).join());
+  await viewers.tab("Studies"); await until(() => viewers.$("tr.study"), 6000);
+  check("the Studies page follows at once: RX first, no CT", viewers.$$(".chip-toggle").map((b) => b.textContent).join() === "RX,MR,US,MG,XA,RF,NM,PT", viewers.$$(".chip-toggle").map((b) => b.textContent).join());
+  await viewers.tab("Series"); await until(() => viewers.$(".mod-picker"), 6000);
+  check("...and so does the Series page", viewers.$$(".chip-toggle").map((b) => b.textContent).join() === "RX,MR,US,MG,XA,RF,NM,PT");
+  await admin.call("PUT", "/api/admin/settings", { modality_buttons: savedButtons.map((b) => ({ ...b, visible: false })) });
+  const noButtons = await makeDom(STAFF);
+  await noButtons.login("admin", "SuperSecret123");
+  await until(() => noButtons.$(".mod-picker"), 6000);
+  check("with every button hidden, the Other codes box is still there", noButtons.$$(".chip-toggle").length === 0 && !!noButtons.$(".mod-picker .mod-other"));
+  const defaultButtons = (await (await admin.call("GET", "/api/admin/settings")).json()).defaults.modality_buttons;
+  await admin.call("PUT", "/api/admin/settings", { modality_buttons: defaultButtons });
 
   console.log("--- staff accounts: who sees what");
   await admin.call("POST", "/api/admin/users", { username: "sharer", password: "SharerPass123", permissions: ["read", "visualize", "share"] });
@@ -315,7 +373,7 @@ async function newLink(admin, body) {
   await sleep(1200);
   check("sharer: Studies, Series and Shares only", sharer.tabs().join() === "Studies,Series,Shares", sharer.tabs().join());
   const srow = sharer.$("tr.study");
-  check("sharer: Share... and View, but no Send or Download", /Share\.\.\./.test(srow.textContent) && /View/.test(srow.textContent) && !/Send to/.test(srow.textContent) && !/Download/.test(srow.textContent), srow.textContent);
+  check("sharer: Share... and the viewers, but no Send or Download", /Share\.\.\./.test(srow.textContent) && /Weasis/.test(srow.textContent) && /OHIF/.test(srow.textContent) && !/Send to/.test(srow.textContent) && !/Download/.test(srow.textContent), srow.textContent);
   await sharer.tab("Shares");
   check("sharer: sees none of the administrators' links", /No invitation yet/.test(sharer.text()), sharer.text().slice(-200));
   await admin.call("POST", "/api/admin/users", { username: "viewer1", password: "ViewerPass123", permissions: ["read", "visualize"] });
@@ -335,7 +393,7 @@ async function newLink(admin, body) {
   const lastFind = fs.readFileSync(path.join(LOGS, "find.log"), "utf8").trim().split("\n").pop();
   check("RX chip searches CR + DX", /"ModalitiesInStudy": "CR\\\\DX"/.test(lastFind), lastFind);
 
-  const all = [admin, guest, revokedPage, viewOnlyPage, shortPage, expiredPage, nothing, garbage, unknown, noViewerPage, adminNoOhif, sharer, viewer, reader];
+  const all = [admin, guest, revokedPage, viewOnlyPage, shortPage, expiredPage, nothing, garbage, unknown, noViewerPage, adminNoOhif, viewers, noButtons, sharer, viewer, reader];
   check("no JavaScript errors anywhere", all.every((d) => d.errors.length === 0), all.flatMap((d) => d.errors).join("|"));
   console.log(`\nRESULT: ${results.filter(Boolean).length} passed, ${results.filter((r) => !r).length} failed`);
   process.exit(results.every(Boolean) ? 0 : 1);

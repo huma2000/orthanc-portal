@@ -64,6 +64,9 @@ pub async fn weasis_link(
     Query(params): Query<WeasisParams>,
 ) -> AppResult<Json<Value>> {
     user.require(Permission::Visualize)?;
+    if !state.settings.get().weasis_enabled {
+        return Err(AppError::Denied("Weasis is switched off (Settings > General > Viewers and uploads)".into()));
+    }
 
     // The UID goes inside a quoted command line: only digits and dots are allowed.
     if !is_valid_dicom_uid(&params.study_uid) {

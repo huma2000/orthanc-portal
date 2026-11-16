@@ -207,7 +207,8 @@ screens whose changes apply at once.
 | Tab > section | What you can change |
 |---|---|
 | **General > Branding** | **Browser window title**, **website icon**, **logo**, portal name, whether the name is shown next to the logo, notice shown on the login page (see below) |
-| **General > Viewers and uploads** | OHIF browser viewer (automatic / always / never), largest uploaded file, preview thumbnails on/off and their cache size |
+| **General > Modality buttons** | The quick modality filters of the Studies and Series pages: order, shown / hidden, label, DICOM codes, description; add, remove, restore defaults (the *Other codes* box is always shown) |
+| **General > Viewers and uploads** | Show the **Weasis** button (on / off), show the **OHIF** button (automatic / always / never), largest uploaded file, preview thumbnails on/off and their cache size |
 | **Orthanc > Orthanc connection** | Address; **with an account** (user name + password, write-only: never sent back to the browser) **or without an account** (for an Orthanc that only accepts a list of allowed computers); **Test connection** (mode used, version, DICOMweb/OHIF plugins, number of DICOM nodes; works on values you have typed but not yet saved) |
 | **Network & sharing > Network** | Intranet address, enable/disable the internet listener (invitation links only) and its address, optional fixed public address for Weasis |
 | **Network & sharing > Share links** | **The public address of the share links** (your Cloudflare hostname; sharing stays off until it is set), the default and maximum validity (hours) and the default and maximum number of ZIP downloads |
@@ -342,9 +343,17 @@ or resetting their password also ends their sessions and Weasis tokens. An admin
 
 * **Studies** and **Series** tabs; text fields accept DICOM wildcards (`DOE*`, `?`), a plain word means
   "contains". Study dates are a range. Newest studies come first (sorted by Orthanc, so paging is exact).
-* **Modality** is a row of toggle buttons: **CT, MR, US, RX, MG, XA, RF, NM, PT**. Several can be active
-  at once (CT *or* US) and the list refreshes immediately. **RX** means X-ray, which DICOM splits into
-  `CR` and `DX`, so it selects both. A small box accepts any other code (`SR`, `ES`...).
+* **Modality** is a row of toggle buttons, by default **CT, MR, US, RX, MG, XA, RF, NM, PT**. Several can be
+  active at once (CT *or* US) and the list refreshes immediately. **RX** means X-ray, which DICOM splits into
+  `CR` and `DX`, so it selects both. The **Other codes** box next to them accepts any other code (`SR`,
+  `ES`...) and is always shown.
+* An administrator arranges the buttons in *Settings > General > Modality buttons*: move them up or down,
+  hide the ones nobody uses (they stay in the list, ready to be shown again), change a label, its DICOM codes
+  or its description, add new ones or restore the defaults. A preview shows the row as users will see it;
+  the change reaches everybody as soon as it is saved.
+* The search fields are patient name, patient ID, study (or series) description, modality, body part (Series)
+  and study dates. The accession number is neither searched nor shown in the list (guests still see it on
+  their invitation page, and the API still accepts `accession_number=`).
 * Under the hood the codes become a DICOM "any of" list: `ModalitiesInStudy = "CT\CR\DX"`. The API accepts
   `?modality=ct,rx` (case-insensitive, `RX` expands to `CR,DX`).
 * The studies table shows a **preview thumbnail**, modality badges, the number of series/images, and expands
@@ -370,8 +379,10 @@ or resetting their password also ends their sessions and Weasis tokens. An admin
 
 ## 7. Viewing: Weasis and OHIF
 
-Click **View** on a study (it needs the `visualize` permission). On the intranet both viewers are offered;
-guests only get OHIF, for their one study (section 8).
+Each study has a **Weasis** and an **OHIF** button (they need the `visualize` permission). An administrator
+can hide either one in *Settings > General > Viewers and uploads*: *Show the Weasis button* (when it is off
+the server also refuses to create Weasis links) and *Show the OHIF button* (automatic = when Orthanc has the
+OHIF plugin, always, never). Guests only get OHIF, for their one study (section 8).
 
 **OHIF (browser, nothing to install).** Opens `/ohif/viewer?StudyInstanceUIDs=<uid>` in a new tab. The
 portal relays Orthanc's OHIF plugin and the DICOMweb data it reads. OHIF runs inside the portal's own
@@ -706,7 +717,8 @@ plugin, a real Weasis or a real DICOM destination here, and the compose files we
 | "Orthanc refuses this machine (HTTP 403)" | Orthanc (or the proxy in front of it) only accepts a list of allowed computers and the portal's address is not in it. See the table *Which address does Orthanc see?* in section 3; in Docker it is not `127.0.0.1` |
 | "Orthanc does not allow the account '...' to do this (HTTP 403)" | The account exists but lacks permissions in Orthanc, or the portal's address is not accepted |
 | Search error mentioning `Limit`/`Since` or a tag | Orthanc refused that filter for your index; the message comes from Orthanc |
-| No "Browser viewer" entry | OHIF plugin not loaded (see `GET /plugins` on Orthanc) or `OHIF_ENABLED=false` |
+| No "OHIF" button | OHIF plugin not loaded (see `GET /plugins` on Orthanc), or switched off in *Settings > General > Viewers and uploads* |
+| No "Weasis" button | Switched off in *Settings > General > Viewers and uploads* |
 | OHIF opens but shows no images / 404 on `/studies/...` | The plugin uses its default `dicom-json` data source: set `"OHIF": {"DataSource": "dicom-web"}` |
 | OHIF page stays blank | Check the browser console for blocked resources; OHIF pages use the relaxed policy in `security_headers` (`src/routes/mod.rs`) |
 | Weasis starts but shows no images | DICOMweb plugin disabled; or the workstation cannot reach the portal address in the link; or the token expired (click View again) |

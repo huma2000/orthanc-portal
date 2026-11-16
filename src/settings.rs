@@ -79,6 +79,48 @@ pub struct Role {
     pub permissions: Vec<Permission>,
 }
 
+/// Value of a switch missing from an older stored copy of the settings.
+fn default_true() -> bool {
+    true
+}
+
+/// One quick modality filter of the search pages (the CT, MR, US... buttons).
+/// Administrators choose which ones are shown and in what order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModalityButton {
+    /// Text of the button, e.g. `RX`.
+    pub label: String,
+    /// DICOM modality codes it searches for, e.g. `["CR", "DX"]` ("any of").
+    pub codes: Vec<String>,
+    /// Shown when the mouse rests on the button, e.g. "X-ray (CR + DX)".
+    #[serde(default)]
+    pub title: String,
+    /// Hidden buttons stay in the list (so they can be shown again) but are not offered.
+    #[serde(default = "default_true")]
+    pub visible: bool,
+}
+
+/// The modality buttons every new installation starts with.
+pub fn default_modality_buttons() -> Vec<ModalityButton> {
+    let button = |label: &str, codes: &[&str], title: &str| ModalityButton {
+        label: label.into(),
+        codes: codes.iter().map(|c| c.to_string()).collect(),
+        title: title.into(),
+        visible: true,
+    };
+    vec![
+        button("CT", &["CT"], "Computed tomography"),
+        button("MR", &["MR"], "Magnetic resonance"),
+        button("US", &["US"], "Ultrasound"),
+        button("RX", &["CR", "DX"], "X-ray (CR + DX)"),
+        button("MG", &["MG"], "Mammography"),
+        button("XA", &["XA"], "X-ray angiography"),
+        button("RF", &["RF"], "Fluoroscopy"),
+        button("NM", &["NM"], "Nuclear medicine"),
+        button("PT", &["PT"], "PET"),
+    ]
+}
+
 /// The roles every new installation starts with.
 pub fn default_roles() -> Vec<Role> {
     let role = |key: &str, label: &str, permissions: &[Permission]| Role {
@@ -162,7 +204,15 @@ pub struct Settings {
     /// Days to keep the audit log and finished transfers. 0 = keep everything.
     pub audit_retention_days: u64,
 
+    // ---- Search ------------------------------------------------------------------
+    /// Quick modality filters of the Studies / Series pages, in display order.
+    #[serde(default = "default_modality_buttons")]
+    pub modality_buttons: Vec<ModalityButton>,
+
     // ---- Viewers and uploads --------------------------------------------------
+    /// Offer the "Weasis" button (desktop viewer, must be installed on each computer)?
+    #[serde(default = "default_true")]
+    pub weasis_enabled: bool,
     pub ohif: OhifMode,
     /// Largest single uploaded file, in megabytes.
     pub max_upload_mb: u64,
@@ -214,6 +264,8 @@ impl Settings {
             login_max_failures: 5,
             login_lockout_minutes: 5,
             audit_retention_days: 0,
+            modality_buttons: default_modality_buttons(),
+            weasis_enabled: true,
             ohif: OhifMode::Auto,
             max_upload_mb: 2048,
             thumbnails_enabled: true,
@@ -257,6 +309,13 @@ impl Settings {
                 "true" | "1" | "yes" => CookieSecure::Always,
                 "false" | "0" | "no" => CookieSecure::Never,
                 other => bail!("COOKIE_SECURE must be auto, true or false (got '{other}')"),
+            };
+        }
+        if let Some(v) = env_opt("WEASIS_ENABLED") {
+            s.weasis_enabled = match v.to_lowercase().as_str() {
+                "true" | "1" | "yes" => true,
+                "false" | "0" | "no" => false,
+                other => bail!("WEASIS_ENABLED must be true or false (got '{other}')"),
             };
         }
         if let Some(v) = env_opt("OHIF_ENABLED") {
@@ -328,6 +387,17 @@ impl Settings {
         self.remote_bind_addr = self.remote_bind_addr.trim().to_string();
         self.public_base_url = self.public_base_url.trim().trim_end_matches('/').to_string();
         self.share_public_url = self.share_public_url.trim().trim_end_matches('/').to_string();
+        for button in &mut self.modality_buttons {
+            button.label = button.label.trim().to_string();
+            button.title = button.title.trim().to_string();
+            let mut codes: Vec<String> = Vec::new();
+            for code in button.codes.iter().map(|c| c.trim().to_uppercase()).filter(|c| !c.is_empty()) {
+                if !codes.contains(&code) {
+                    codes.push(code);
+                }
+            }
+            button.codes = codes;
+        }
         for role in &mut self.roles {
             role.key = role.key.trim().to_string();
             role.label = role.label.trim().to_string();
@@ -433,6 +503,35 @@ impl Settings {
         range("Share link validity, maximum (hours)", self.share_max_hours, 1, 8760)?;
         range("Share downloads, default", self.share_default_downloads, 0, 1000)?;
         range("Share downloads, maximum", self.share_max_downloads, 0, 1000)?;
+
+        // --- modality buttons
+        if self.modality_buttons.len() > 40 {
+            return bad("At most 40 modality buttons are allowed".into());
+        }
+        let mut labels: Vec<String> = Vec::new();
+        for button in &self.modality_buttons {
+            if !(1..=16).contains(&button.label.chars().count()) || has_control(&button.label) {
+                return bad("Each modality button needs a label of 1 to 16 characters".into());
+            }
+            let label_key = button.label.to_lowercase();
+            if labels.contains(&label_key) {
+                return bad(format!("The modality button '{}' appears twice", button.label));
+            }
+            labels.push(label_key);
+            // Same rule as the search itself (routes/studies.rs): letters and digits only.
+            if button.codes.is_empty()
+                || button.codes.len() > 8
+                || button.codes.iter().any(|c| c.len() > 16 || !c.chars().all(|ch| ch.is_ascii_alphanumeric()))
+            {
+                return bad(format!(
+                    "The modality button '{}' needs 1 to 8 DICOM codes made of letters and digits, e.g. CT or CR, DX",
+                    button.label
+                ));
+            }
+            if button.title.chars().count() > 80 || has_control(&button.title) {
+                return bad(format!("The description of the modality button '{}' can have at most 80 characters", button.label));
+            }
+        }
 
         // --- roles
         if self.roles.len() > 30 {
@@ -540,6 +639,10 @@ impl Settings {
     pub fn thumbnail_cache_bytes(&self) -> usize {
         (self.thumbnail_cache_mb as usize).saturating_mul(1024 * 1024)
     }
+    /// The modality buttons offered on the search pages, in order (hidden ones left out).
+    pub fn visible_modality_buttons(&self) -> Vec<ModalityButton> {
+        self.modality_buttons.iter().filter(|b| b.visible).cloned().collect()
+    }
 }
 
 /// Shared, replaceable holder of the current [`Settings`].
@@ -560,5 +663,40 @@ impl SettingsStore {
 
     pub fn set(&self, settings: Settings) {
         *self.inner.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(settings);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shipped defaults pass their own validation.
+    #[test]
+    fn the_defaults_are_valid() {
+        assert!(Settings::defaults().validate().is_ok());
+        assert_eq!(Settings::defaults().visible_modality_buttons().len(), 9);
+    }
+
+    /// Modality buttons: codes are tidied up, hidden ones are not offered, bad ones are refused.
+    #[test]
+    fn modality_buttons_are_tidied_and_checked() {
+        let base = Settings::defaults();
+        let mut buttons = default_modality_buttons();
+        buttons.swap(0, 1); // MR first
+        buttons[2].visible = false; // hide US
+        buttons[3].codes = vec![" cr ".into(), "dx".into(), "CR".into()];
+        let edited = base.with_patch(&json!({ "modality_buttons": buttons })).unwrap();
+        let labels: Vec<String> = edited.visible_modality_buttons().into_iter().map(|b| b.label).collect();
+        assert_eq!(labels, ["MR", "CT", "RX", "MG", "XA", "RF", "NM", "PT"]);
+        assert_eq!(edited.modality_buttons[3].codes, ["CR", "DX"]);
+        assert_eq!(edited.modality_buttons.len(), 9, "a hidden button is kept, so it can be shown again");
+
+        let refused = |list: Value| base.with_patch(&json!({ "modality_buttons": list })).is_err();
+        assert!(refused(json!([{ "label": "CT", "codes": ["CT"] }, { "label": "ct", "codes": ["CT"] }])), "same label twice");
+        assert!(refused(json!([{ "label": "CT", "codes": [] }])), "no code");
+        assert!(refused(json!([{ "label": "CT", "codes": ["C*"] }])), "wildcard in a code");
+        assert!(refused(json!([{ "label": "", "codes": ["CT"] }])), "no label");
+        // Every button may be hidden: the "Other codes" box is always there.
+        assert!(!refused(json!([{ "label": "CT", "codes": ["CT"], "visible": false }])));
     }
 }
