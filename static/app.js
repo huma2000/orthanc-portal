@@ -174,7 +174,41 @@ function formatDicomDate(value) {
 const formatTimestamp = (unixSeconds) => (unixSeconds ? new Date(unixSeconds * 1000).toLocaleString() : "never");
 
 /** Coloured modality badge (colours defined in app.css through data-m). */
-const chip = (modality) => h("span", { class: "chip", "data-m": modality }, modality || "?");
+const chip = (modality) => h("span", { class: "chip", "data-m": modality, title: modalityName(modality) }, modality || "?");
+
+/**
+ * Full names of the DICOM modality codes (DICOM PS3.3, "Modality" attribute), used as
+ * the tooltip of the modality tags in the Studies and Series lists.
+ */
+const MODALITY_NAMES = {
+  AR: "Autorefraction", AU: "Audio", BDUS: "Bone densitometry (ultrasound)", BI: "Biomagnetic imaging",
+  BMD: "Bone densitometry (X-ray)", CR: "Computed radiography", CT: "Computed tomography",
+  DG: "Diaphanography", DOC: "Document", DX: "Digital radiography", ECG: "Electrocardiography",
+  EPS: "Cardiac electrophysiology", ES: "Endoscopy", GM: "General microscopy", HD: "Hemodynamic waveform",
+  IO: "Intra-oral radiography", IVOCT: "Intravascular optical coherence tomography", IVUS: "Intravascular ultrasound",
+  KER: "Keratometry", KO: "Key object selection", LS: "Laser surface scan", MG: "Mammography",
+  MR: "Magnetic resonance", NM: "Nuclear medicine", OAM: "Ophthalmic axial measurements",
+  OCT: "Optical coherence tomography", OP: "Ophthalmic photography", OPT: "Ophthalmic tomography",
+  OPV: "Ophthalmic visual field", OT: "Other", PLAN: "Plan", PR: "Presentation state",
+  PT: "Positron emission tomography (PET)", PX: "Panoramic X-ray", REG: "Registration",
+  RESP: "Respiratory waveform", RF: "Radio fluoroscopy", RG: "Radiographic imaging (conventional film)",
+  RTDOSE: "Radiotherapy dose", RTIMAGE: "Radiotherapy image", RTPLAN: "Radiotherapy plan",
+  RTRECORD: "Radiotherapy treatment record", RTSTRUCT: "Radiotherapy structure set", SEG: "Segmentation",
+  SM: "Slide microscopy", SMR: "Stereometric relationship", SR: "Structured report",
+  SRF: "Subjective refraction", STAIN: "Automated slide stainer", TG: "Thermography", US: "Ultrasound",
+  VA: "Visual acuity", XA: "X-ray angiography", XC: "External-camera photography",
+};
+
+/**
+ * Tooltip of a modality tag. The description an administrator gave to a modality button
+ * for exactly this code wins (their wording, their language); otherwise the DICOM name.
+ */
+function modalityName(code) {
+  if (!code) return "Modality not recorded";
+  const button = modalityButtons().find((b) => b.codes.length === 1 && b.codes[0] === code && b.title);
+  const name = button ? button.title : MODALITY_NAMES[code];
+  return name ? `${code}: ${name}` : `${code}: modality code`;
+}
 
 /** Grey placeholder for empty values. */
 const dash = () => h("span", { class: "muted" }, "-");

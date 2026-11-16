@@ -131,6 +131,9 @@ async function newLink(admin, body) {
   check("the Studies page uses the whole width (wide layout)", admin.$("main").classList.contains("wide"));
   check("no accession number: neither a search box nor a column",
     !admin.$("input[name=accession_number]") && !admin.$$("main th").some((th) => /Accession/.test(th.textContent)) && !/ACC1/.test(row.textContent));
+  const tagTitle = (code) => { const tag = Array.from(row.querySelectorAll(".chip")).find((c) => c.textContent === code); return tag && tag.getAttribute("title"); };
+  check("modality tags explain themselves on hover: CT (button description), SR (DICOM name)",
+    tagTitle("CT") === "CT: Computed tomography" && tagTitle("SR") === "SR: Structured report", `${tagTitle("CT")} | ${tagTitle("SR")}`);
   check("the default modality buttons, in the default order", admin.$$(".chip-toggle").map((b) => b.textContent).join() === "CT,MR,US,RX,MG,XA,RF,NM,PT", admin.$$(".chip-toggle").map((b) => b.textContent).join());
   check("the study date never wraps", row.querySelectorAll("td.nowrap").length > 0);
   check("the old View drop-down is gone", !Array.from(row.querySelectorAll("summary")).some((s) => s.textContent === "View"));
