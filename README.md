@@ -200,18 +200,25 @@ Sign in as an **administrator on the intranet** and open **Settings**. Everythin
 without restarting. These screens do not exist on the internet-facing port, and every route behind them
 requires the `admin` permission.
 
-| Where | What you can change |
+Settings is organised in **tabs**. The first four are one form, saved together with **Save settings** (values
+typed in one tab are kept while you visit another, until you leave Settings). The last three are separate
+screens whose changes apply at once.
+
+| Tab > section | What you can change |
 |---|---|
-| **Settings > Branding** | **Browser window title**, **website icon**, **logo**, portal name, whether the name is shown next to the logo, notice shown on the login page (see below) |
-| **Settings > Orthanc connection** | Address; **with an account** (user name + password, write-only: never sent back to the browser) **or without an account** (for an Orthanc that only accepts a list of allowed computers); **Test connection** (mode used, version, DICOMweb/OHIF plugins, number of DICOM nodes; works on values you have typed but not yet saved) |
-| **Settings > Network** | Intranet address, enable/disable the internet listener (invitation links only) and its address, optional fixed public address for Weasis |
-| **Settings > Share links** | **The public address of the share links** (your Cloudflare hostname; sharing stays off until it is set), the default and maximum validity (hours) and the default and maximum number of ZIP downloads |
-| **Settings > Sessions and sign-in security** | Session length, Weasis link validity, failed sign-ins before lockout, lockout length, secure-cookie mode, how long to keep the audit log (0 = forever) |
-| **Settings > Viewers and uploads** | OHIF browser viewer (automatic / always / never), largest uploaded file, preview thumbnails on/off and their cache size |
-| **Settings > Roles** | The role shortcuts offered in the user form (add, rename, change permissions, restore defaults) |
+| **General > Branding** | **Browser window title**, **website icon**, **logo**, portal name, whether the name is shown next to the logo, notice shown on the login page (see below) |
+| **General > Viewers and uploads** | OHIF browser viewer (automatic / always / never), largest uploaded file, preview thumbnails on/off and their cache size |
+| **Orthanc > Orthanc connection** | Address; **with an account** (user name + password, write-only: never sent back to the browser) **or without an account** (for an Orthanc that only accepts a list of allowed computers); **Test connection** (mode used, version, DICOMweb/OHIF plugins, number of DICOM nodes; works on values you have typed but not yet saved) |
+| **Network & sharing > Network** | Intranet address, enable/disable the internet listener (invitation links only) and its address, optional fixed public address for Weasis |
+| **Network & sharing > Share links** | **The public address of the share links** (your Cloudflare hostname; sharing stays off until it is set), the default and maximum validity (hours) and the default and maximum number of ZIP downloads |
+| **Security & roles > Sessions and sign-in security** | Session length, Weasis link validity, failed sign-ins before lockout, lockout length, secure-cookie mode, how long to keep the audit log (0 = forever) |
+| **Security & roles > Roles** | The role shortcuts offered in the user form (add, rename, change permissions, restore defaults) |
 | **Users** | Accounts, permissions, enable/disable, password reset |
 | **DICOM nodes** | Remote DICOM systems Orthanc sends studies to: add, edit, delete, **Test** (DICOM ping) |
 | **Audit log** | Every change above is recorded (setting names only, never values or passwords) |
+
+In the rest of this document *Settings > Share links* means the **Share links** section (here in the
+*Network & sharing* tab), and so on. The red "Orthanc" notice and the *Share...* dialog open the right tab.
 
 ### Branding: make it yours
 
@@ -306,7 +313,7 @@ with an invitation have no account and no permissions, only their link (section 
 Rules: `visualize`, `download`, `send` and `share` require `read`. The last active administrator cannot be
 removed or disabled, and nobody can delete or demote their own account.
 
-Ready-made roles in the *Users* screen (they only pre-tick the checkboxes; you can adjust them, and edit the list itself in **Settings > Roles**):
+Ready-made roles in the *Settings > Users* screen (they only pre-tick the checkboxes; you can adjust them, and edit the list itself in **Settings > Roles**):
 
 | Role | Permissions |
 |---|---|
@@ -453,7 +460,7 @@ links stay in the list (and in the database) until the audit retention setting r
 ## 9. Sending a study to a remote DICOM node
 
 Orthanc calls the remote systems it can talk to **DICOM modalities**. Administrators manage them in the
-portal's **DICOM nodes** tab: *Add node* (name, AE title, host, port), *Edit*, *Delete*, and **Test** (a DICOM
+portal's **Settings > DICOM nodes** tab: *Add node* (name, AE title, host, port), *Edit*, *Delete*, and **Test** (a DICOM
 ping, C-ECHO). The portal stores them in Orthanc itself through its REST API; they survive an Orthanc restart
 only if Orthanc runs with `"DicomModalitiesInDatabase": true` (set in `deploy/orthanc.json`). You can also keep
 declaring them in Orthanc's `DicomModalities`. Do not forget to declare Orthanc's AE title and address on the
@@ -703,7 +710,7 @@ plugin, a real Weasis or a real DICOM destination here, and the compose files we
 | OHIF opens but shows no images / 404 on `/studies/...` | The plugin uses its default `dicom-json` data source: set `"OHIF": {"DataSource": "dicom-web"}` |
 | OHIF page stays blank | Check the browser console for blocked resources; OHIF pages use the relaxed policy in `security_headers` (`src/routes/mod.rs`) |
 | Weasis starts but shows no images | DICOMweb plugin disabled; or the workstation cannot reach the portal address in the link; or the token expired (click View again) |
-| "Send to..." says no destination | No DICOM node yet (add one in the **DICOM nodes** tab), or all have *Send* blocked |
+| "Send to..." says no destination | No DICOM node yet (add one in **Settings > DICOM nodes**), or all have *Send* blocked |
 | A transfer ends in Failure | Orthanc's explanation is shown under the state; usually the remote node does not know Orthanc's AET or is unreachable (try a DICOM echo from Orthanc) |
 | A visitor from the internet gets "This address is for the intranet only" | The tunnel points to 8080: change it to 8081 |
 | *Share...* says "Sharing is not set up yet" | An administrator must enter the public address in *Settings > Share links* |

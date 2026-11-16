@@ -54,7 +54,8 @@ const MODALITY_CHIPS = [
 /** Global UI state. `user` is null while signed out. */
 const state = {
   user: null,     // { id, username, permissions: ["read", ...], features: { ohif, thumbnails, share: {...} } }
-  view: null,     // id of the visible tab ("studies", "series", "upload", "users", "audit")
+  view: null,     // id of the visible tab ("studies", "series", "upload", "settings"...)
+  settingsTab: "general", // id of the visible tab inside Settings (see SETTINGS_TABS)
   notice: "",     // message shown on the login form (e.g. "Your session expired")
   // Identity of this installation (Settings > Branding). Filled from /api/public.
   brand: { name: "Orthanc Portal", title: "Orthanc Portal", show_name: true, login_notice: "", logo: null,
@@ -188,18 +189,26 @@ const dash = () => h("span", { class: "muted" }, "-");
    5. SHELL: LOGIN, NAVIGATION, SIGN OUT
    ==================================================================== */
 
-/** The tabs. `needs` is the permission required to see the tab. */
+/**
+ * The tabs. `needs` is the permission required to see the tab. Everything for
+ * administrators (users, DICOM nodes, audit log...) lives in Settings, which has
+ * its own tabs (SETTINGS_TABS).
+ */
 const VIEWS = [
   { id: "studies", label: "Studies", needs: "read", build: () => buildSearchView(STUDY_SEARCH) },
   { id: "series", label: "Series", needs: "read", build: () => buildSearchView(SERIES_SEARCH) },
   { id: "upload", label: "Upload", needs: "upload", build: buildUploadView },
   { id: "transfers", label: "Transfers", needs: "send", build: buildTransfersView },
   { id: "shares", label: "Shares", needs: "share", build: buildSharesView },
-  { id: "users", label: "Users", needs: "admin", build: buildUsersView },
-  { id: "nodes", label: "DICOM nodes", needs: "admin", build: buildNodesView },
   { id: "settings", label: "Settings", needs: "admin", build: buildSettingsView },
-  { id: "audit", label: "Audit log", needs: "admin", build: buildAuditView },
 ];
+
+/** Opens Settings on one of its tabs (e.g. "orthanc" from the Orthanc notice). */
+function openSettings(tab) {
+  state.view = "settings";
+  state.settingsTab = tab;
+  renderApp();
+}
 
 /** Draws the whole page: login form when signed out, otherwise top bar + current tab. */
 function renderApp() {
@@ -1133,7 +1142,7 @@ function buildUsersView() {
   load();
   return h("div", { class: "view" },
     h("div", { class: "page-head" },
-      h("h1", null, "Users"),
+      h("h2", null, "Users"),
       h("button", { class: "btn primary", type: "button", onclick: () => meta && openUserDialog(null, meta, load) }, "New user")),
     container);
 }
@@ -1237,7 +1246,7 @@ function buildAuditView() {
 
   load();
   return h("div", { class: "view" },
-    h("div", { class: "page-head" }, h("h1", null, "Audit log"), h("button", { class: "btn", type: "button", onclick: load }, "Refresh")),
+    h("div", { class: "page-head" }, h("h2", null, "Audit log"), h("button", { class: "btn", type: "button", onclick: load }, "Refresh")),
     container);
 }
 
@@ -1301,7 +1310,7 @@ function openShareDialog(study) {
         h("h2", null, "Sharing is not set up yet"),
         h("p", null, "An administrator must first enter the public address of the share links in Settings, section Share links."),
         h("div", { class: "dialog-actions" },
-          can("admin") ? h("button", { class: "btn primary", type: "button", onclick: () => { dialog.close(); state.view = "settings"; renderApp(); } }, "Open settings") : null,
+          can("admin") ? h("button", { class: "btn primary", type: "button", onclick: () => { dialog.close(); openSettings("network"); } }, "Open settings") : null,
           close)));
       return;
     }
@@ -1416,7 +1425,7 @@ function paintOrthancBanner() {
   if (state.orthancProblem) {
     slot.append(
       h("span", null, `Orthanc: ${state.orthancProblem} `),
-      h("button", { class: "btn small", type: "button", onclick: () => { state.view = "settings"; renderApp(); } }, "Open settings"));
+      h("button", { class: "btn small", type: "button", onclick: () => openSettings("orthanc") }, "Open settings"));
   }
 }
 
@@ -1556,18 +1565,93 @@ function buildRolesEditor(roles, defaults, permissions) {
   return { node, get: () => rows.map((r) => ({ key: r.key.trim(), label: r.label.trim(), permissions: r.permissions })) };
 }
 
-/** The "Settings" tab: the complete configuration of the portal. */
+/**
+ * The tabs inside Settings. The first four show parts of ONE form (the settings saved
+ * together with the "Save settings" button: `sections` are the ids given to `section()`
+ * in buildSettingsView). The others are separate screens whose changes apply at once.
+ */
+const SETTINGS_TABS = [
+  { id: "general", label: "General", sections: ["branding", "viewers"] },
+  { id: "orthanc", label: "Orthanc", sections: ["orthanc"] },
+  { id: "network", label: "Network & sharing", sections: ["network", "sharing"] },
+  { id: "security", label: "Security & roles", sections: ["security", "roles"] },
+  { id: "users", label: "Users", build: buildUsersView },
+  { id: "nodes", label: "DICOM nodes", build: buildNodesView },
+  { id: "audit", label: "Audit log", build: buildAuditView },
+];
+
+/** The "Settings" tab: the complete configuration of the portal, organised in tabs. */
 function buildSettingsView() {
-  const view = h("div", { class: "view" });
   let doc = null; // { settings, listeners, defaults, permissions } from the server
+  const noticeSlot = h("div", { class: "notice", role: "status", hidden: true });
+  const tabBar = h("div", { class: "subtabs", role: "tablist", "aria-label": "Settings" });
+  const formHost = h("div", { class: "view" }, h("div", { class: "panel loading" }, "Loading settings..."));
+  const screenHost = h("div", { class: "view" });
+  const view = h("div", { class: "view" },
+    h("div", { class: "page-head" }, h("h1", null, "Settings")), noticeSlot, tabBar, formHost, screenHost);
+
+  if (!SETTINGS_TABS.some((t) => t.id === state.settingsTab)) state.settingsTab = SETTINGS_TABS[0].id;
+
+  /**
+   * Shows the current tab. Form tabs only hide the other sections, so values typed in one
+   * tab are kept (and saved) when switching to another. The other screens are rebuilt each
+   * time they are opened, so they always show fresh data.
+   */
+  const currentTab = () => SETTINGS_TABS.find((t) => t.id === state.settingsTab);
+
+  /** Shows only the form sections of the current tab (the whole form is hidden on the other screens). */
+  function showSections() {
+    const tab = currentTab();
+    formHost.hidden = !tab.sections;
+    formHost.querySelectorAll("[data-section]").forEach((s) => { s.hidden = !tab.sections || !tab.sections.includes(s.dataset.section); });
+  }
+
+  function showTab() {
+    const tab = currentTab();
+    for (const button of tabBar.querySelectorAll("[data-tab]")) {
+      const selected = button.dataset.tab === tab.id;
+      button.setAttribute("aria-selected", String(selected));
+      button.tabIndex = selected ? 0 : -1;
+    }
+    showSections();
+    screenHost.replaceChildren(...(tab.build ? [tab.build()] : []));
+    screenHost.hidden = !tab.build;
+  }
+
+  /** Tab bar keyboard support: Left / Right / Home / End move between tabs. */
+  tabBar.addEventListener("keydown", (event) => {
+    const keys = { ArrowLeft: -1, ArrowRight: 1, Home: "first", End: "last" };
+    if (!(event.key in keys)) return;
+    event.preventDefault();
+    const index = SETTINGS_TABS.findIndex((t) => t.id === state.settingsTab);
+    const step = keys[event.key];
+    const next = step === "first" ? 0 : step === "last" ? SETTINGS_TABS.length - 1 : (index + step + SETTINGS_TABS.length) % SETTINGS_TABS.length;
+    state.settingsTab = SETTINGS_TABS[next].id;
+    showTab();
+    tabBar.querySelector(`[data-tab="${state.settingsTab}"]`).focus();
+  });
+
+  SETTINGS_TABS.forEach((t, i) => {
+    // A thin divider between the settings form and the separate screens.
+    if (i > 0 && t.build && !SETTINGS_TABS[i - 1].build) tabBar.append(h("span", { class: "subtabs-divider", "aria-hidden": "true" }));
+    tabBar.append(h("button", {
+      type: "button", role: "tab", "data-tab": t.id,
+      onclick: () => { state.settingsTab = t.id; showTab(); },
+    }, t.label));
+  });
+
+  /** What the last save did (and a reconnect link if this page's port changed). */
+  function showNotices(notices) {
+    noticeSlot.replaceChildren(...notices);
+    noticeSlot.hidden = notices.length === 0;
+  }
 
   async function load() {
-    view.replaceChildren(h("div", { class: "page-head" }, h("h1", null, "Settings")), h("div", { class: "panel loading" }, "Loading settings..."));
     try {
       doc = await api("GET", "/api/admin/settings");
       draw([]);
     } catch (e) {
-      view.replaceChildren(h("div", { class: "page-head" }, h("h1", null, "Settings")), h("div", { class: "panel empty" }, e.message));
+      formHost.replaceChildren(h("div", { class: "panel empty" }, e.message));
       toastError(e);
     }
   }
@@ -1595,8 +1679,8 @@ function buildSettingsView() {
       return h("div", { class: def.wide ? "setting wide" : "setting" }, control, def.hint ? h("p", { class: "hint" }, def.hint) : null);
     };
 
-    /** A titled card of the form. */
-    const section = (title, intro, ...children) => h("section", { class: "panel settings-section" },
+    /** A titled card of the form. `id` says which tab shows it (SETTINGS_TABS). */
+    const section = (id, title, intro, ...children) => h("section", { class: "panel settings-section", "data-section": id },
       h("h2", null, title), intro ? h("p", { class: "muted" }, intro) : null, h("div", { class: "settings-grid" }, children));
 
     // ---- Orthanc connection. Orthanc can be protected by an account (user name + password) OR
@@ -1722,26 +1806,28 @@ function buildSettingsView() {
         }
       },
     },
-      section("Branding", "Make the portal look like your practice. The window title, the portal name and the login notice are saved with the button below; the logo and the website icon are saved as soon as you choose a file.",
+      section("branding", "Branding", "Make the portal look like your practice. The window title, the portal name and the login notice are saved with the button below; the logo and the website icon are saved as soon as you choose a file.",
         SETTINGS_FIELDS.portal.map(field),
         buildBrandImagePicker("logo", "Logo", "PNG, JPEG, WebP, GIF or SVG, up to 1 MB. Shown in the top bar (about 32 px high, on a light plate so any logo is readable) and on the login page.", "image/png,image/jpeg,image/webp,image/gif,image/svg+xml"),
         buildBrandImagePicker("favicon", "Website icon", "PNG, ICO, SVG, JPEG, WebP or GIF, up to 256 KB. Square, at least 64 x 64 pixels. Shown in the browser tab and in bookmarks.", "image/png,image/x-icon,image/vnd.microsoft.icon,image/svg+xml,image/jpeg,image/webp,image/gif")),
-      section("Orthanc connection", "The PACS this portal works with. Changes apply immediately, without restarting.",
+      section("viewers", "Viewers and uploads", null, SETTINGS_FIELDS.viewers.map(field)),
+      section("orthanc", "Orthanc connection", "The PACS this portal works with. Saved changes apply immediately, without restarting.",
         urlField, modeField, userField, passwordField,
         h("div", { class: "setting wide" }, testButton, testBox)),
-      section("Network", networkIntro, networkFields, listenerInfo),
-      section("Share links (invitations for people outside)", "A staff member with the share permission can invite somebody outside: a link plus a generated password that opens ONE study, to look at online and to download a limited number of times, until the link expires. These are the defaults offered when creating a link, and the limits nobody can exceed.", SETTINGS_FIELDS.sharing.map(field)),
-      section("Sessions and sign-in security", null, SETTINGS_FIELDS.security.map(field)),
-      section("Viewers and uploads", null, SETTINGS_FIELDS.viewers.map(field)),
-      section("Roles", "Shortcuts that pre-tick permissions when you create or edit a user. Users keep their own permissions: changing a role does not change existing users.", rolesEditor.node),
-      h("div", { class: "settings-actions" }, save));
+      section("network", "Network", networkIntro, networkFields, listenerInfo),
+      section("sharing", "Share links (invitations for people outside)", "A staff member with the share permission can invite somebody outside: a link plus a generated password that opens ONE study, to look at online and to download a limited number of times, until the link expires. These are the defaults offered when creating a link, and the limits nobody can exceed.", SETTINGS_FIELDS.sharing.map(field)),
+      section("security", "Sessions and sign-in security", null, SETTINGS_FIELDS.security.map(field)),
+      section("roles", "Roles", "Shortcuts that pre-tick permissions when you create or edit a user (Users tab). Users keep their own permissions: changing a role does not change existing users.", rolesEditor.node),
+      h("div", { class: "settings-actions" },
+        save,
+        h("span", { class: "muted" }, "Saves the General, Orthanc, Network & sharing and Security & roles tabs together.")));
 
-    view.replaceChildren(
-      h("div", { class: "page-head" }, h("h1", null, "Settings")),
-      notices.length ? h("div", { class: "notice", role: "status" }, notices) : null,
-      form);
+    formHost.replaceChildren(form);
+    showNotices(notices);
+    showSections();
   }
 
+  showTab();
   load();
   return view;
 }
@@ -1792,7 +1878,7 @@ function buildNodesView() {
 
   load();
   return h("div", { class: "view" },
-    h("div", { class: "page-head" }, h("h1", null, "DICOM nodes"),
+    h("div", { class: "page-head" }, h("h2", null, "DICOM nodes"),
       h("button", { class: "btn primary", type: "button", onclick: () => openNodeDialog(null, load) }, "Add node")),
     h("p", { class: "muted" }, "Remote DICOM systems (a PACS, a workstation...) that users with the send permission can send studies to. They are stored in Orthanc itself; they survive an Orthanc restart only if Orthanc runs with DicomModalitiesInDatabase enabled."),
     container);

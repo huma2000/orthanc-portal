@@ -95,7 +95,33 @@ async function newLink(admin, body) {
   const admin = await makeDom(STAFF);
   await admin.login("admin", "SuperSecret123");
   await sleep(1200);
-  check("all tabs are there, including Shares", admin.tabs().join() === "Studies,Series,Upload,Transfers,Shares,Users,DICOM nodes,Settings,Audit log", admin.tabs().join());
+  check("all tabs are there, including Shares", admin.tabs().join() === "Studies,Series,Upload,Transfers,Shares,Settings", admin.tabs().join());
+
+  console.log("--- Settings is organised in tabs (users, DICOM nodes and the audit log live there)");
+  await admin.tab("Settings");
+  await until(() => admin.$("form.settings-form"), 6000);
+  const subtab = (name) => admin.$$(".subtabs [role=tab]").find((b) => b.textContent === name);
+  const visibleSections = () => admin.$$("section.settings-section").filter((s) => !s.hidden).map((s) => s.querySelector("h2").textContent);
+  check("Settings tabs", admin.$$(".subtabs [role=tab]").map((b) => b.textContent).join() === "General,Orthanc,Network & sharing,Security & roles,Users,DICOM nodes,Audit log",
+    admin.$$(".subtabs [role=tab]").map((b) => b.textContent).join());
+  check("no stray 'null' text on the page (it used to appear under the title)",
+    !admin.$$("main *").some((el) => Array.from(el.childNodes).some((n) => n.nodeType === 3 && n.textContent.trim() === "null")));
+  check("General shows Branding and Viewers only", visibleSections().join() === "Branding,Viewers and uploads", visibleSections().join());
+  admin.click(subtab("Orthanc"));
+  check("Orthanc shows the connection only, with the Save button", visibleSections().join() === "Orthanc connection" && !admin.$("form.settings-form").closest("[hidden]"), visibleSections().join());
+  admin.labelInput(admin.section("Orthanc connection"), "Orthanc address").value = "http://typed-not-saved:8042";
+  admin.click(subtab("Users")); await until(() => admin.$$("main h2").some((e) => e.textContent === "Users") && admin.$("main table.data"), 6000);
+  check("Users tab: the user list, and the settings form is hidden", /admin/.test(admin.$("main table.data").textContent) && !!admin.$("form.settings-form").closest("[hidden]"));
+  admin.click(subtab("DICOM nodes")); await until(() => admin.$$("main h2").some((e) => e.textContent === "DICOM nodes"), 6000);
+  check("DICOM nodes tab", !!admin.button(admin.$("main"), "Add node"));
+  admin.click(subtab("Audit log")); await until(() => admin.$("main table.data") && admin.$$("main h2").some((e) => e.textContent === "Audit log"), 6000);
+  check("Audit log tab lists entries", /login/.test(admin.$("main table.data").textContent));
+  admin.click(subtab("Orthanc"));
+  check("a value typed in a form tab survives switching tabs", admin.labelInput(admin.section("Orthanc connection"), "Orthanc address").value === "http://typed-not-saved:8042");
+  await admin.tab("Studies"); await admin.tab("Settings"); await until(() => admin.$("form.settings-form"), 6000);
+  check("...and is dropped (not saved) when leaving Settings", admin.labelInput(admin.section("Orthanc connection"), "Orthanc address").value === "http://127.0.0.1:18042");
+  check("Settings reopens on the last tab used", subtab("Orthanc").getAttribute("aria-selected") === "true");
+  await admin.tab("Studies"); await until(() => admin.$("tr.study"), 6000);
   const row = admin.$("tr.study");
   check("study row: preview, modalities, patient", !!row.querySelector(".thumb") && /DOE, JOHN/.test(row.textContent) && /CT/.test(row.textContent));
   check("View menu offers Weasis (a desktop viewer) for staff", admin.$$("details.menu button.menu-item").some((b) => /Weasis/.test(b.textContent)));
@@ -115,6 +141,8 @@ async function newLink(admin, body) {
   check("Settings has a Share links section with the defaults 48 hours and 1 download", !!shareSection
     && admin.labelInput(shareSection, "Link validity, default").value === "48" && admin.labelInput(shareSection, "Downloads allowed, default").value === "1");
   check("...and the dialog is gone", !admin.$("dialog.share-dialog"));
+  check("...opened on the Network & sharing tab, where the Share links section is visible",
+    admin.$(".subtabs [aria-selected=true]").textContent === "Network & sharing" && !shareSection.hidden);
   admin.labelInput(shareSection, "Public address of the share links").value = "https://pacs.example.com";
   admin.submit(admin.$("form.settings-form")); await sleep(1800);
   check("saving the public address works (the server keeps it)", (await (await admin.call("GET", "/api/admin/settings")).json()).settings.share_public_url === "https://pacs.example.com");

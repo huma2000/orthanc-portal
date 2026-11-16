@@ -358,7 +358,25 @@ textarea {
 .setting { display: grid; gap: 0.3rem; }
 .hint { color: var(--ink-soft); font-size: 0.88em; }
 label.check { display: flex; align-items: center; gap: 0.5rem; color: var(--ink); }
-.settings-actions { display: flex; justify-content: flex-end; position: sticky; bottom: 0; padding: 0.7rem 0; background: linear-gradient(transparent, var(--paper) 40%); }
+.settings-actions { display: flex; flex-direction: row-reverse; align-items: center; gap: 0.9rem; flex-wrap: wrap; position: sticky; bottom: 0; padding: 0.7rem 0; background: linear-gradient(transparent, var(--paper) 40%); }
+.settings-actions .muted { font-size: 0.85rem; }
+
+/* Tabs inside Settings: underlined like the top bar, but on the page surface. */
+.subtabs { display: flex; align-items: stretch; gap: 0.15rem; border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: thin; }
+.subtabs button {
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;               /* the selected underline sits on the hairline */
+  padding: 0.6rem 0.85rem;
+  color: var(--ink-soft);
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.subtabs button:hover { color: var(--ink); }
+.subtabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+.subtabs-divider { width: 1px; margin: 0.55rem 0.45rem; background: var(--line); flex: none; }
 .listener-status { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.2rem; color: var(--ink-soft); }
 .listener-status b { color: var(--ink); }
 
