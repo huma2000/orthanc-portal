@@ -8,6 +8,7 @@
 //! * `GET  /api/admin/settings`               current settings (the Orthanc password is never sent)
 //! * `PUT  /api/admin/settings`               save settings; they apply immediately
 //! * `POST /api/admin/orthanc/test`           "Test connection" (saved or just-typed values)
+//! * `POST /api/admin/email/test`             "Send a test email" (saved mail server settings)
 //! * `GET  /api/admin/nodes`                  DICOM nodes ("modalities") known to Orthanc
 //! * `PUT  /api/admin/nodes/{alias}`          create / update a node
 //! * `DELETE /api/admin/nodes/{alias}`        delete a node
@@ -133,6 +134,12 @@ pub async fn update_settings(
     // Orthanc changes (the cached images would belong to another server).
     let orthanc_changed = changed.iter().any(|k| k.starts_with("orthanc_") && k.as_str() != "orthanc_password");
     state.thumbs.trim(if new.thumbnails_enabled && !orthanc_changed { new.thumbnail_cache_bytes() } else { 0 });
+    // Showing passwords again switched off: the copies kept so far are erased at once.
+    if changed.iter().any(|k| k == "share_keep_passwords") && !new.share_keep_passwords {
+        if let Ok(erased) = state.db.forget_share_passwords(now_unix(), true) {
+            messages.push(format!("{erased} kept share link passwords were erased."));
+        }
+    }
     if changed.iter().any(|k| k == "session_hours") {
         messages.push("The new session duration applies to the next sign-ins.".into());
     }
@@ -189,6 +196,40 @@ pub async fn test_orthanc(
     };
 
     Ok(Json(OrthancClient::for_test(&url, &username, &password)?.diagnose().await))
+}
+
+// ---------------------------------------------------------------- test email
+
+#[derive(Deserialize)]
+pub struct TestEmail {
+    to: String,
+}
+
+/// Sends a test email with the SAVED mail server settings: `{ ok, message }`.
+pub async fn test_email(
+    State(state): State<AppState>,
+    AuthUser(admin): AuthUser,
+    Json(req): Json<TestEmail>,
+) -> AppResult<Json<Value>> {
+    admin.require(Permission::Admin)?;
+    let settings = state.settings.get();
+    let to = crate::mailer::parse_recipients(&req.to).map_err(AppError::BadRequest)?;
+    let to_text = crate::mailer::addresses(&to);
+    let body = format!(
+        "This is a test email from {}.\n\nIt was sent by {} from Settings > Email. If you received it, the portal can \
+         send share invitations by email.\n",
+        settings.portal_name, admin.username
+    );
+    let result = crate::mailer::send(&settings, to, &format!("{}: test email", settings.portal_name), &body).await;
+    state.db.audit(
+        &admin.username,
+        "email_test",
+        &format!("to {to_text}: {}", if result.is_ok() { "sent" } else { "failed" }),
+    );
+    Ok(Json(match result {
+        Ok(()) => json!({ "ok": true, "message": format!("Test email sent to {to_text}.") }),
+        Err(e) => json!({ "ok": false, "message": e }),
+    }))
 }
 
 // -------------------------------------------------------------- DICOM nodes

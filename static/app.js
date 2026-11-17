@@ -230,7 +230,7 @@ const VIEWS = [
   // explanations) keep a readable maximum width.
   { id: "studies", label: "Studies", needs: "read", wide: true, build: () => buildSearchView(STUDY_SEARCH) },
   { id: "series", label: "Series", needs: "read", wide: true, build: () => buildSearchView(SERIES_SEARCH) },
-  { id: "upload", label: "Upload", needs: "upload", build: buildUploadView },
+  { id: "upload", label: "Uploads", needs: "upload", build: buildUploadView },
   { id: "transfers", label: "Transfers", needs: "send", wide: true, build: buildTransfersView },
   { id: "shares", label: "Shares", needs: "share", wide: true, build: buildSharesView },
   { id: "settings", label: "Settings", needs: "admin", build: buildSettingsView },
@@ -259,8 +259,19 @@ function openStudies() {
 
 const interfaceKey = () => `portal.interface.${state.user ? state.user.username : ""}`;
 
+/**
+ * The user's own choice of view, read from the browser's storage once and then kept in memory:
+ * currentInterface() is asked by every study button while a table is drawn.
+ */
+const interfaceChoice = { key: null, value: "" };
 function readInterfaceChoice() {
-  try { return localStorage.getItem(interfaceKey()) || ""; } catch { return ""; }
+  const key = interfaceKey();
+  if (interfaceChoice.key !== key) {
+    let value = "";
+    try { value = localStorage.getItem(key) || ""; } catch { /* storage blocked: no remembered choice */ }
+    Object.assign(interfaceChoice, { key, value });
+  }
+  return interfaceChoice.value;
 }
 
 /** "normal" or "simplified": what this user sees now. */
@@ -277,6 +288,7 @@ function currentInterface() {
 /** The "switch view" button (only for users with the switch_view permission). */
 function switchInterface() {
   const next = currentInterface() === "simplified" ? "normal" : "simplified";
+  Object.assign(interfaceChoice, { key: interfaceKey(), value: next });
   try { localStorage.setItem(interfaceKey(), next); } catch { /* this browser cannot remember it: still switch now */ }
   if (next === "simplified" && state.view === "settings") state.simpleView = "settings";
   if (next === "normal" && state.simpleView === "settings") state.view = "settings";
@@ -307,7 +319,7 @@ function renderApp() {
       type: "button",
       "aria-current": v.id === state.view ? "page" : null,
       onclick: () => { state.view = v.id; renderApp(); },
-    }, v.label)));
+    }, v.label, v.id === "upload" ? uploadBadge() : null)));
 
   const topbar = h("header", { class: "topbar" },
     h("div", { class: "brand brand-slot", "data-size": "24" }, ...brandContent(24, false)),
@@ -519,6 +531,10 @@ const ICONS = {
   send: ["M21 3 10.5 13.5", "M21 3l-6.5 18-4-7.5L3 9.5z"],                          // a paper plane
   download: ["M12 3.5v11.5", "M7.5 10.5 12 15l4.5-4.5", "M4 17v3.5h16V17"],
   refresh: ["M19.5 12a7.5 7.5 0 1 1-2.2-5.3", "M19.5 4v4.5H15"],
+  link: ["M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1", "M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"],
+  revoke: [{ c: [12, 12, 8.5] }, "M6 6l12 12"],
+  key: [{ c: [7.5, 15.5, 4] }, "M10.5 12.5 20 3", "M16.5 6.5l2.5 2.5", "M14 9l2 2"],
+  edit: ["M4 20h4L19 9l-4-4L4 16z", "M13.5 6.5l4 4"],
 };
 
 /**
@@ -549,7 +565,11 @@ function actionButton(tag, iconName, text, tip, props) {
    clip it; inside a dialog it moves into the dialog, which is drawn above everything else. */
 const tipBox = h("div", { class: "tooltip", role: "tooltip", hidden: true });
 
+let tipFor = null; // the button the tooltip is showing for
 function showTip(target) {
+  // The mouse crossing the icon's lines fires mouseover again: nothing to redo then.
+  if (tipFor === target && !tipBox.hidden) return;
+  tipFor = target;
   const host = target.closest("dialog") || document.body;
   if (tipBox.parentNode !== host) host.append(tipBox);
   tipBox.textContent = target.dataset.tip;
@@ -562,7 +582,7 @@ function showTip(target) {
   tipBox.style.top = `${Math.round(top)}px`;
   tipBox.style.left = `${Math.round(left)}px`;
 }
-const hideTip = () => { tipBox.hidden = true; };
+const hideTip = () => { tipBox.hidden = true; tipFor = null; };
 const tipTarget = (event) => (event.target instanceof Element ? event.target.closest(".icon-btn[data-tip]") : null);
 document.addEventListener("mouseover", (event) => { const t = tipTarget(event); if (t) showTip(t); else hideTip(); });
 document.addEventListener("focusin", (event) => { const t = tipTarget(event); if (t && t.matches(":focus-visible")) showTip(t); else hideTip(); });
@@ -592,8 +612,8 @@ function icon(name) {
 const SIMPLE_PAGES = [
   { id: "home", label: "Home", icon: "home", needs: null, build: buildHomeView },
   { id: "search", label: "Search", icon: "search", needs: "read", build: () => buildSearchView(STUDY_SEARCH) },
-  { id: "shares", label: "Share", icon: "share", needs: "share", build: buildSharesView },
-  { id: "upload", label: "Upload", icon: "upload", needs: "upload", build: buildUploadView },
+  { id: "shares", label: "Shares", icon: "share", needs: "share", build: buildSharesView },
+  { id: "upload", label: "Uploads", icon: "upload", needs: "upload", build: buildUploadView },
   { id: "settings", label: "Configuration", icon: "settings", needs: "admin", bottom: true, build: buildSettingsView },
 ];
 
@@ -608,11 +628,12 @@ function renderSimplified() {
   const current = pages.find((p) => p.id === state.simpleView);
 
   /** One icon of the column. `data-tip` is the description that pops up on hover (app.css). */
-  const sideButton = (label, iconName, onclick, isCurrent = false) => h("button", {
+  const sideButton = (label, iconName, onclick, isCurrent = false, extra = null) => h("button", {
     type: "button", class: "side-btn", "data-tip": label, "aria-label": label,
     "aria-current": isCurrent ? "page" : null, onclick,
-  }, icon(iconName), h("span", { class: "side-label", "aria-hidden": "true" }, label));
-  const pageButton = (p) => sideButton(p.label, p.icon, () => { state.simpleView = p.id; renderApp(); }, p.id === current.id);
+  }, icon(iconName), h("span", { class: "side-label", "aria-hidden": "true" }, label), extra);
+  const pageButton = (p) => sideButton(p.label, p.icon, () => { state.simpleView = p.id; renderApp(); }, p.id === current.id,
+    p.id === "upload" ? uploadBadge() : null);
 
   const side = h("nav", { class: "simple-side", "aria-label": "Main" },
     h("div", { class: "side-group" }, pages.filter((p) => !p.bottom).map(pageButton)),
@@ -624,7 +645,7 @@ function renderSimplified() {
   const showTotal = options.show_total !== false && can("read");
   const head = h("header", { class: "simple-head" },
     h("div", { class: "brand brand-slot", "data-size": "40" }, ...brandContent(40, false)),
-    showTotal ? h("div", { class: "simple-total" }, "Total studies: ", h("b", { id: "total-studies" }, "...")) : null);
+    showTotal ? h("div", { class: "simple-total" }, "Total studies: ", h("b", { id: "total-studies" }, totalStudies.text)) : null);
 
   // Red notice (administrators only) when Orthanc is unreachable or too old.
   const banner = h("div", { id: "orthanc-banner", class: "banner", role: "alert", hidden: true });
@@ -636,16 +657,25 @@ function renderSimplified() {
   if (showTotal) refreshTotalStudies();
 }
 
-/** Fills in "Total studies: N" in the header of the simplified view. */
-async function refreshTotalStudies() {
-  const slot = document.getElementById("total-studies");
-  if (!slot) return;
+/**
+ * Fills in "Total studies: N" in the header of the simplified view. The header is redrawn at every
+ * click on an icon, so the number is asked from Orthanc at most once a minute, unless `force`
+ * (after an upload).
+ */
+const totalStudies = { text: "...", at: 0 };
+async function refreshTotalStudies(force = false) {
+  const show = () => { const slot = document.getElementById("total-studies"); if (slot) slot.textContent = totalStudies.text; };
+  show();
+  if (!document.getElementById("total-studies") || (!force && Date.now() - totalStudies.at < 60000)) return;
+  totalStudies.at = Date.now();
   try {
     const stats = await api("GET", "/api/stats");
-    slot.textContent = typeof stats.studies === "number" ? stats.studies.toLocaleString() : "?";
+    totalStudies.text = typeof stats.studies === "number" ? stats.studies.toLocaleString() : "?";
   } catch {
-    slot.textContent = "?"; // Orthanc unreachable: the administrators' red notice explains it
+    totalStudies.text = "?"; // Orthanc unreachable: the administrators' red notice explains it
+    totalStudies.at = 0;     // try again at the next page
   }
+  show();
 }
 
 /** Reloads the recent studies of the home page, if it is on screen (set by buildHomeView). */
@@ -1265,7 +1295,27 @@ const upload = {
   errors: [],             // [{ name, message }] (capped)
   finished: false,
   ui: null,               // references to the DOM nodes of the visible Upload tab
+  // Every upload (one drop or one pick of files / folder) of this page session, newest first,
+  // for the list on the Uploads page. Kept in memory only: a reload starts a new list.
+  batches: [],
+  batchSeq: 0,
+  historyDrawnAt: 0,      // when that list was last redrawn (see updateUploadUi)
 };
+
+/** "1.4 MB", "820 KB", "3.2 GB". */
+function formatBytes(bytes) {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes, unit = 0;
+  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++; }
+  return `${value >= 100 || unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
+}
+
+/** A name for an upload: the dropped folder or file, or "12 files". */
+function describeUpload(files) {
+  const folder = (files[0].webkitRelativePath || "").split("/")[0];
+  if (folder && files.every((f) => (f.webkitRelativePath || "").startsWith(`${folder}/`))) return `Folder ${folder}`;
+  return files.length === 1 ? files[0].name : `${files.length} files`;
+}
 
 /** Starts a fresh batch (counters to zero) when nothing is running. */
 function resetUploadStats() {
@@ -1273,15 +1323,24 @@ function resetUploadStats() {
   upload.studyIds = new Set();
 }
 
-/** Adds files to the queue and starts sending. */
-function enqueueFiles(fileList) {
+/**
+ * Adds files to the queue and starts sending. Each call is one "upload" in the list of the
+ * Uploads page; `label` names it (the dropped folder...), otherwise it is worked out from the files.
+ */
+function enqueueFiles(fileList, label = "") {
   // Skip hidden/system files and DICOMDIR (an index, not an image).
   const files = Array.from(fileList).filter((f) => !f.name.startsWith(".") && f.name.toUpperCase() !== "DICOMDIR");
   if (!files.length) { toast("No uploadable files found.", "error"); return; }
   if (upload.next >= upload.pending.length && !upload.inFlight.size) resetUploadStats();
+  const batch = {
+    id: ++upload.batchSeq, label: label || describeUpload(files), started: Date.now(), finishedAt: 0,
+    total: files.length, uploaded: 0, duplicates: 0, failed: 0, bytesTotal: 0, bytesDone: 0, studyIds: new Set(),
+  };
+  upload.batches.unshift(batch);
+  if (upload.batches.length > 50) upload.batches.length = 50;
   // A loop, not push(...files): spreading a very large array (a whole archive folder)
   // exceeds the call-stack limit.
-  for (const file of files) upload.pending.push(file);
+  for (const file of files) { upload.pending.push({ file, batch }); batch.bytesTotal += file.size; }
   upload.total += files.length;
   upload.finished = false;
   pump();
@@ -1290,11 +1349,11 @@ function enqueueFiles(fileList) {
 /** Keeps up to UPLOAD_CONCURRENCY requests running. */
 function pump() {
   while (upload.inFlight.size < UPLOAD_CONCURRENCY && upload.next < upload.pending.length) {
-    const file = upload.pending[upload.next++];
-    const item = { file, loaded: 0 };
-    upload.inFlight.set(file, item);
+    const { file, batch } = upload.pending[upload.next++];
+    const item = { file, batch, loaded: 0 };
+    upload.inFlight.set(item, item);
     sendFile(item).then(() => {
-      upload.inFlight.delete(file);
+      upload.inFlight.delete(item);
       pump();
     });
   }
@@ -1306,16 +1365,24 @@ function pump() {
     // Simplified view: the new studies appear on the home page and in the total at once.
     if (upload.uploaded > 0) {
       if (reloadRecentStudies) reloadRecentStudies();
-      refreshTotalStudies();
+      refreshTotalStudies(true);
     }
     toast(`Upload finished: ${upload.uploaded} new, ${upload.duplicates} already stored, ${upload.failed} failed.`,
       upload.failed ? "error" : "info", 8000);
   }
 }
 
-function failFile(file, message) {
+function failFile(item, message) {
   upload.failed++;
-  if (upload.errors.length < 200) upload.errors.push({ name: file.webkitRelativePath || file.name, message });
+  item.batch.failed++;
+  if (upload.errors.length < 200) upload.errors.push({ name: item.file.webkitRelativePath || item.file.name, message });
+}
+
+/** A file of `item.batch` is done (sent, already there, or failed). */
+function fileDone(item) {
+  const b = item.batch;
+  b.bytesDone += item.file.size;
+  if (b.uploaded + b.duplicates + b.failed >= b.total) b.finishedAt = Date.now();
 }
 
 /** Sends ONE file as the raw request body. Always resolves (errors are counted, not thrown). */
@@ -1330,16 +1397,18 @@ function sendFile(item) {
     xhr.onload = () => {
       let data = null;
       try { data = JSON.parse(xhr.responseText); } catch { /* not JSON */ }
+      const b = item.batch;
       if (xhr.status >= 200 && xhr.status < 300) {
-        if (data && data.Status === "AlreadyStored") upload.duplicates++; else upload.uploaded++;
-        if (data && data.ParentStudy) upload.studyIds.add(data.ParentStudy);
+        if (data && data.Status === "AlreadyStored") { upload.duplicates++; b.duplicates++; } else { upload.uploaded++; b.uploaded++; }
+        if (data && data.ParentStudy) { upload.studyIds.add(data.ParentStudy); b.studyIds.add(data.ParentStudy); }
       } else {
-        failFile(item.file, (data && data.error) || `HTTP ${xhr.status}`);
+        failFile(item, (data && data.error) || `HTTP ${xhr.status}`);
         if (xhr.status === 401) { upload.pending = []; upload.next = 0; sessionExpired(); } // stop: we are signed out
       }
+      fileDone(item);
       resolve();
     };
-    xhr.onerror = () => { failFile(item.file, "Network error"); resolve(); };
+    xhr.onerror = () => { failFile(item, "Network error"); fileDone(item); resolve(); };
     xhr.send(item.file);
   });
 }
@@ -1357,8 +1426,91 @@ function scheduleUploadUi() {
   if (typeof requestAnimationFrame === "function") requestAnimationFrame(redraw); else setTimeout(redraw, 100);
 }
 
+/** Is something being uploaded right now? */
+const uploading = () => upload.inFlight.size > 0 || upload.next < upload.pending.length;
+
+/** Overall progress of the current upload queue, 0..1 (files done plus parts of the files being sent). */
+function uploadFraction() {
+  const done = upload.uploaded + upload.duplicates + upload.failed;
+  let partial = 0;
+  for (const item of upload.inFlight.values()) partial += item.file.size ? item.loaded / item.file.size : 0;
+  return upload.total ? Math.min(1, (done + partial) / upload.total) : 0;
+}
+
+/**
+ * The small "42%" on the Uploads icon / tab while files are being sent, so the upload can be
+ * followed from any page. updateUploadUi() keeps it up to date.
+ */
+function uploadBadge() {
+  const badge = h("span", { class: "upload-badge", id: "upload-badge", "aria-hidden": "true", hidden: !uploading() });
+  badge.textContent = uploading() ? `${Math.floor(uploadFraction() * 100)}%` : ""; // empty when idle: the tab reads "Uploads"
+  return badge;
+}
+
+/** Progress of one upload of the list: bytes sent so far, including the files being sent. */
+function batchSent(b) {
+  let sent = b.bytesDone;
+  for (const item of upload.inFlight.values()) if (item.batch === b) sent += item.loaded;
+  return Math.min(sent, b.bytesTotal);
+}
+
+/** The list of the Uploads page: every upload of this session, newest first. */
+function renderUploadHistory() {
+  if (!upload.batches.length) return h("div", { class: "empty" }, "Nothing uploaded yet. Uploads of this browser session are listed here with their progress.");
+  const now = Date.now();
+  const rows = upload.batches.map((b) => {
+    const done = b.uploaded + b.duplicates + b.failed;
+    const sent = batchSent(b);
+    const fraction = b.bytesTotal ? sent / b.bytesTotal : (b.total ? done / b.total : 1);
+    const running = !b.finishedAt;
+    const started = running && (done > 0 || sent > 0);
+    const seconds = ((b.finishedAt || now) - b.started) / 1000;
+    let detail;
+    if (!running) detail = `${formatBytes(b.bytesTotal)} in ${formatDuration(Math.max(1, seconds))}`;
+    else if (!started) detail = "Waiting for the uploads before it";
+    else {
+      const speed = sent / Math.max(seconds, 0.5);   // bytes per second since it started
+      const left = speed > 0 ? (b.bytesTotal - sent) / speed : 0;
+      detail = `${formatBytes(sent)} of ${formatBytes(b.bytesTotal)} · ${formatBytes(speed)}/s · about ${formatDuration(Math.max(1, left))} left`;
+    }
+    const fill = h("span");
+    fill.style.width = `${Math.round(fraction * 100)}%`;
+    const [stateClass, stateText] = running ? (started ? ["state-running", "Uploading"] : ["state-pending", "Waiting"])
+      : b.failed ? ["state-failure", b.failed === b.total ? "Failed" : "Done with errors"] : ["state-success", "Done"];
+    return h("tr", null,
+      h("td", { class: "nowrap" }, new Date(b.started).toLocaleTimeString()),
+      h("td", null, h("div", { class: "patient" }, b.label), h("div", { class: "sub" }, `${b.total} ${b.total === 1 ? "file" : "files"}, ${formatBytes(b.bytesTotal)}`)),
+      h("td", { class: "upload-progress-cell" },
+        h("div", { class: "upload-progress-line" }, h("div", { class: "progress" }, fill), h("b", null, `${Math.floor(fraction * 100)}%`)),
+        h("div", { class: "sub" }, detail)),
+      h("td", { class: "num nowrap" }, `${done} of ${b.total}`),
+      h("td", { class: "num" }, b.uploaded),
+      h("td", { class: "num" }, b.duplicates),
+      h("td", { class: b.failed ? "num error-line" : "num" }, b.failed),
+      h("td", { class: "num" }, b.studyIds.size),
+      h("td", null, h("span", { class: `chip ${stateClass}` }, stateText)));
+  });
+  return h("div", { class: "table-wrap" }, h("table", { class: "data" },
+    h("thead", null, h("tr", null, ["Started", "Upload", "Progress", "Files", "New", "Already stored", "Failed", "Studies", "State"]
+      .map((t) => h("th", { class: ["Files", "New", "Already stored", "Failed", "Studies"].includes(t) ? "num" : null }, t)))),
+    h("tbody", null, rows)));
+}
+
 /** Redraws counters, progress bar, active files and error list (if the tab is visible). */
 function updateUploadUi() {
+  const badge = document.getElementById("upload-badge");
+  if (badge) {
+    badge.hidden = !uploading();
+    badge.textContent = uploading() ? `${Math.floor(uploadFraction() * 100)}%` : "";
+  }
+  // The list of the Uploads page (it is there even when nothing is running). Redrawn at most twice a
+  // second: progress events come far more often, and the list can hold 50 uploads. The last redraw,
+  // when everything is done, is never skipped.
+  const history = upload.ui && upload.ui.history;
+  if (history && history.isConnected && (!uploading() || Date.now() - upload.historyDrawnAt > 500)) {
+    upload.historyDrawnAt = Date.now();
+    history.replaceChildren(renderUploadHistory());
+  }
   const ui = upload.ui;
   if (!ui || !document.body.contains(ui.root)) return;
 
@@ -1400,6 +1552,8 @@ async function filesFromDrop(dataTransfer) {
     .map((item) => (item.webkitGetAsEntry ? item.webkitGetAsEntry() : null))
     .filter(Boolean);
   if (!entries.length) return Array.from(dataTransfer.files);
+  // A name for the list of the Uploads page: "Folder CT_2024", "scan.dcm" or "3 items".
+  const label = entries.length === 1 ? (entries[0].isDirectory ? `Folder ${entries[0].name}` : entries[0].name) : `${entries.length} items`;
 
   const files = [];
   async function walk(entry) {
@@ -1415,6 +1569,7 @@ async function filesFromDrop(dataTransfer) {
     }
   }
   for (const entry of entries) await walk(entry);
+  files.label = label;
   return files;
 }
 
@@ -1440,18 +1595,32 @@ function buildDropzone({ title, hint = "", home = false }) {
   dropzone.addEventListener("drop", async (e) => {
     e.preventDefault();
     dropzone.classList.remove("over");
-    enqueueFiles(await filesFromDrop(e.dataTransfer));
+    const files = await filesFromDrop(e.dataTransfer);
+    enqueueFiles(files, files.label);
   });
   return dropzone;
 }
 
-/** The "Upload" tab. */
+/** The "Uploads" tab: the drop zone, the progress of the current upload and every upload of this session. */
 function buildUploadView() {
   const dropzone = buildDropzone({
     title: "Drop DICOM files or a whole study folder here",
     hint: "DICOM files (.dcm or without extension) and ZIP archives are accepted. Each file is sent separately.",
   });
-  return h("div", { class: "view" }, h("div", { class: "page-head" }, h("h1", null, "Upload")), dropzone, buildUploadProgress());
+  const progress = buildUploadProgress();
+  const history = h("section", { class: "panel" });
+  upload.ui.history = history;
+  const view = h("div", { class: "view" },
+    h("div", { class: "page-head" }, h("h1", null, "Uploads")), dropzone, progress,
+    h("div", { class: "page-head" }, h("h2", null, "Uploads of this session")), history);
+  history.replaceChildren(renderUploadHistory());
+  // While something is being sent the list refreshes with every progress event; this keeps the
+  // speed and time left moving between them, and stops by itself when the page is left.
+  const tick = setInterval(() => {
+    if (!history.isConnected) { clearInterval(tick); return; }
+    if (uploading()) { upload.historyDrawnAt = Date.now(); history.replaceChildren(renderUploadHistory()); }
+  }, 1000);
+  return view;
 }
 
 /**
@@ -1695,7 +1864,8 @@ function buildAuditView() {
    9a. SHARING STUDIES WITH PEOPLE OUTSIDE
    A staff member creates an invitation: a link plus a generated password that opens ONE
    study for someone outside (online viewing + a limited number of ZIP downloads, until the
-   link expires). The password is shown only once, when the link is created.
+   link expires). The password can be shown again from the Shares list while the link is active,
+   unless an administrator switched that off (Settings > Share links).
    ==================================================================== */
 
 /**
@@ -1718,11 +1888,13 @@ async function copyText(text) {
 }
 
 /** A button that copies `getText()` and says so. */
-function copyButton(label, getText) {
-  return h("button", {
+function copyButton(label, getText, iconName = "") {
+  const props = {
     class: "btn small", type: "button",
     onclick: async () => toast((await copyText(getText())) ? "Copied." : "Could not copy: select the text and copy it by hand.", "info", 2500),
-  }, label);
+  };
+  // An icon in the simplified view when the caller gives one (the Shares list); text everywhere else.
+  return iconName ? actionButton("button", iconName, label, label, props) : h("button", props, label);
 }
 
 /** "1 d 3 h 20 min" / "45 min" / "30 s". */
@@ -1733,6 +1905,91 @@ function formatDuration(seconds) {
   if (hours > 0) return `${hours} h ${minutes} min`;
   if (minutes > 0) return `${minutes} min`;
   return `${s} s`;
+}
+
+/** "2 days 5 hours 20 minutes" for a number of minutes (the parts that are not zero). */
+function durationWords(totalMinutes) {
+  const d = Math.floor(totalMinutes / 1440), hh = Math.floor((totalMinutes % 1440) / 60), mm = totalMinutes % 60;
+  const part = (n, one, many) => (n ? `${n} ${n === 1 ? one : many}` : "");
+  return [part(d, "day", "days"), part(hh, "hour", "hours"), part(mm, "minute", "minutes")].filter(Boolean).join(" ") || "0 minutes";
+}
+
+/**
+ * How long a link works: three fields (days, hours, minutes) instead of a number of hours.
+ * `.minutes` is the total; `.problem()` says what is wrong, or "" when it is fine.
+ */
+function buildDurationInput(totalMinutes, maxHours, legend) {
+  const maxMinutes = maxHours * 60;
+  const number = (value, max, label) => h("input", { type: "number", min: 0, max, value, required: true, "aria-label": label, class: "duration-part" });
+  const days = number(Math.floor(totalMinutes / 1440), Math.floor(maxMinutes / 1440), "Days");
+  const hours = number(Math.floor((totalMinutes % 1440) / 60), 23, "Hours");
+  const minutes = number(totalMinutes % 60, 59, "Minutes");
+  const part = (input, text) => h("label", { class: "duration-field" }, input, h("span", null, text));
+  const total = () => (Number(days.value) || 0) * 1440 + (Number(hours.value) || 0) * 60 + (Number(minutes.value) || 0);
+  return {
+    node: h("fieldset", { class: "duration" }, h("legend", null, `${legend} (at most ${durationWords(maxMinutes)})`),
+      part(days, "days"), part(hours, "hours"), part(minutes, "minutes")),
+    get minutes() { return total(); },
+    problem() {
+      if (total() < 1) return "Choose how long the link works: at least 1 minute.";
+      if (total() > maxMinutes) return `A link can work for at most ${durationWords(maxMinutes)}.`;
+      return "";
+    },
+  };
+}
+
+/**
+ * "Send the invitation by email" of the Share windows: off by default. `.value` is null, or the
+ * `email` object the server expects. `canIncludePassword()` says whether the portal has the password.
+ */
+function buildEmailOptions(canIncludePassword) {
+  const feature = state.user.features.share;
+  if (!feature.email) {
+    return {
+      node: h("p", { class: "hint" }, "To send invitations by email, an administrator must first set up the mail server in Settings > Network & sharing > Email."),
+      value: null, refresh() {},
+    };
+  }
+  const send = h("input", { type: "checkbox" });
+  const to = h("input", { type: "text", placeholder: "name@example.com (several: separate them with commas)", autocomplete: "off", "aria-label": "Email addresses" });
+  const message = h("textarea", { rows: 3, maxlength: 1000, placeholder: "Optional message, e.g. Here are the images we discussed on the phone." });
+  const withPassword = h("input", { type: "checkbox" });
+  const passwordHint = h("p", { class: "hint" });
+  const details = h("div", { class: "email-details", hidden: true },
+    h("label", null, "To", to),
+    h("label", null, "Message (optional)", message),
+    h("label", { class: "check" }, withPassword, "Include the password in the email"),
+    passwordHint);
+  function refresh() {
+    details.hidden = !send.checked;
+    to.required = send.checked;
+    const possible = canIncludePassword();
+    withPassword.disabled = !possible;
+    if (!possible) withPassword.checked = false;
+    passwordHint.textContent = !possible
+      ? "This link's password is not kept, so it cannot go in the email: tick \"Give the link a new password\" to include one."
+      : withPassword.checked
+        ? "Anyone who can read this email can open the study. Safer: leave it out and give the password by phone or text message."
+        : "The email says the password will be given separately (by phone or text message): safer.";
+  }
+  send.addEventListener("change", () => { refresh(); if (send.checked) to.focus(); });
+  withPassword.addEventListener("change", refresh);
+  refresh();
+  return {
+    node: h("div", { class: "email-options" }, h("label", { class: "check" }, send, "Send the invitation by email"), details),
+    get value() {
+      return send.checked ? { to: to.value, message: message.value, include_password: withPassword.checked } : null;
+    },
+    refresh,
+  };
+}
+
+/** One line about the email sent with a link (answer of the server), or null. */
+function emailOutcome(email) {
+  if (!email) return null;
+  return email.sent
+    ? h("p", { class: "notice" }, `Invitation emailed to ${email.to}.`)
+    : h("p", { class: "form-error" }, `The link is ready, but the email to ${email.to} was not sent: ${email.error}`);
 }
 
 /** Dialog to invite somebody outside to look at a study (the "Share..." button of a study). */
@@ -1756,8 +2013,9 @@ function openShareDialog(study) {
       return;
     }
     const error = h("div", { class: "form-error", role: "alert", hidden: true });
-    const hours = h("input", { type: "number", min: 1, max: feature.max_hours, value: feature.default_hours, required: true });
+    const duration = buildDurationInput(feature.default_hours * 60, feature.max_hours, "The link works for");
     const downloads = h("input", { type: "number", min: 0, max: feature.max_downloads, value: feature.default_downloads, required: true });
+    const emailOptions = buildEmailOptions(() => true);
     const note = h("input", { maxlength: 120, placeholder: "For your own records, e.g. Dr. Smith, second opinion", autocomplete: "off" });
     const submit = h("button", { class: "btn primary", type: "submit" }, "Create link and password");
     dialog.replaceChildren(h("form", {
@@ -1765,9 +2023,13 @@ function openShareDialog(study) {
       onsubmit: async (event) => {
         event.preventDefault();
         error.hidden = true;
+        const problem = duration.problem();
+        if (problem) { error.textContent = problem; error.hidden = false; return; }
         submit.disabled = true;
         try {
-          showResult(await api("POST", `/api/studies/${study.id}/share`, { hours: Number(hours.value), downloads: Number(downloads.value), note: note.value }));
+          showResult(await api("POST", `/api/studies/${study.id}/share`, {
+            minutes: duration.minutes, downloads: Number(downloads.value), note: note.value, email: emailOptions.value,
+          }));
         } catch (e) {
           error.textContent = e.message;
           error.hidden = false;
@@ -1777,14 +2039,15 @@ function openShareDialog(study) {
     },
       h("h2", null, "Share this study with somebody outside"),
       who, error,
-      h("label", null, `The link works for (hours, up to ${feature.max_hours})`, hours),
+      duration.node,
       h("label", null, `Downloads allowed as ZIP (0 = online viewing only, up to ${feature.max_downloads})`, downloads),
       h("label", null, "Note (optional)", note),
+      emailOptions.node,
       h("p", { class: "muted" }, "The person gets a link and a password that opens only this study. They can look at it online until the link expires; running out of downloads does not stop that."),
       h("div", { class: "dialog-actions" }, h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Cancel"), submit)));
   }
 
-  /** Step 2: the link and the password, the only time the password can be read. */
+  /** Step 2: the link and the password. */
   function showResult(result) {
     const expires = new Date(result.expires_at * 1000).toLocaleString();
     const link = h("input", { readonly: true, value: result.url, "aria-label": "Link", onfocus: (e) => e.target.select() });
@@ -1795,8 +2058,11 @@ function openShareDialog(study) {
       h("label", null, "Link", h("div", { class: "secret-box" }, link, copyButton("Copy link", () => result.url))),
       h("div", null, h("div", { class: "muted" }, "Password"),
         h("div", { class: "secret-box" }, h("span", { class: "password" }, result.password), copyButton("Copy password", () => result.password))),
-      h("p", { class: "form-error" }, "The password is shown only now and cannot be recovered. Give it to the person by a different channel than the link (a phone call, an SMS)."),
+      result.password_kept
+        ? h("p", { class: "muted" }, "Give the password to the person by a different channel than the link (a phone call, an SMS). You can see it again in the Shares list while the link is active.")
+        : h("p", { class: "form-error" }, "The password is shown only now and cannot be recovered. Give it to the person by a different channel than the link (a phone call, an SMS)."),
       h("p", { class: "muted" }, `Valid until ${expires}. Downloads allowed: ${result.max_downloads}.`),
+      emailOutcome(result.email),
       h("div", { class: "dialog-actions" }, copyButton("Copy invitation text (without the password)", invitation), close)));
   }
 
@@ -1804,7 +2070,139 @@ function openShareDialog(study) {
   dialog.showModal();
 }
 
-/** The "Shares" tab: the invitations, with time and downloads left, and a Revoke button. */
+/**
+ * Shows the password of an active invitation again (Shares list). The server records it in the
+ * audit log; the password stays only in this dialog and is gone when it closes.
+ */
+async function showSharePassword(share) {
+  let password;
+  try {
+    ({ password } = await api("POST", `/api/shares/${share.id}/password`));
+  } catch (e) { toastError(e); return; }
+  passwordDialog(share, "Password of the link", password,
+    "Give it by a different channel than the link (a phone call, an SMS). Showing it was recorded in the audit log.");
+}
+
+/** A small dialog with a link's password and a copy button. */
+function passwordDialog(share, title, password, message) {
+  const dialog = h("dialog", null, h("div", { class: "dialog-form" },
+    h("h2", null, title),
+    h("p", null, share.label.replaceAll(" | ", " - "), share.note ? h("span", { class: "muted" }, ` (${share.note})`) : null),
+    h("div", { class: "secret-box" }, h("span", { class: "password" }, password), copyButton("Copy password", () => password)),
+    h("p", { class: "muted" }, message),
+    h("div", { class: "dialog-actions" }, h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Close"))));
+  dialog.addEventListener("close", () => dialog.remove());
+  document.body.append(dialog);
+  dialog.showModal();
+}
+
+/** Small modal with a question and two buttons; resolves true when confirmed. */
+function confirmDialog(title, text, confirmLabel) {
+  return new Promise((resolve) => {
+    let answer = false;
+    const dialog = h("dialog", null, h("div", { class: "dialog-form" },
+      h("h2", null, title), h("p", null, text),
+      h("div", { class: "dialog-actions" },
+        h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Cancel"),
+        h("button", { class: "btn primary", type: "button", onclick: () => { answer = true; dialog.close(); } }, confirmLabel))));
+    dialog.addEventListener("close", () => { dialog.remove(); resolve(answer); });
+    document.body.append(dialog);
+    dialog.showModal();
+  });
+}
+
+/** Gives a link a new password (and shows it). The old one stops working at once. */
+async function newSharePassword(share, reload) {
+  try {
+    const r = await api("PUT", `/api/shares/${share.id}`, { new_password: true });
+    passwordDialog(share, "New password of the link", r.password, r.password_kept
+      ? "The previous password no longer works. Give this one by a different channel than the link (a phone call, an SMS); you can see it again later from the Shares list."
+      : "The previous password no longer works. This one is shown only now: give it by a different channel than the link (a phone call, an SMS).");
+    reload();
+  } catch (e) { toastError(e); }
+}
+
+/** A link whose password was not kept (made before passwords were kept): offer a new one. */
+async function offerNewSharePassword(share, reload) {
+  const ok = await confirmDialog("This password cannot be shown",
+    "This link was created before passwords were kept, so its password cannot be read back. You can give the link a new password: the current one stops working, and whoever is using the link must type the new one.",
+    "Create a new password");
+  if (ok) newSharePassword(share, reload);
+}
+
+/**
+ * Changes a link (Shares > Edit): how long it still works (also brings an expired link back),
+ * how many downloads are left, the note, and optionally a new password.
+ */
+function openShareEditor(share, reload) {
+  const feature = state.user.features.share;
+  const now = Date.now() / 1000;
+  const active = share.status === "active";
+  // The time left, to the minute (an expired link starts from the default validity).
+  const initialMinutes = active ? Math.min(feature.max_hours * 60, Math.max(1, Math.ceil((share.expires_at - now) / 60))) : feature.default_hours * 60;
+  const initialLeft = Math.min(feature.max_downloads, Math.max(0, share.max_downloads - share.downloads_used));
+  const error = h("div", { class: "form-error", role: "alert", hidden: true });
+  const duration = buildDurationInput(initialMinutes, feature.max_hours, "The link works for, from now");
+  const left = h("input", { type: "number", min: 0, max: feature.max_downloads, value: initialLeft, required: true });
+  const note = h("input", { maxlength: 120, value: share.note || "", autocomplete: "off" });
+  const newPassword = h("input", { type: "checkbox" });
+  const emailOptions = buildEmailOptions(() => newPassword.checked || !!share.password_available || (!active && !!share.password_kept));
+  newPassword.addEventListener("change", () => emailOptions.refresh());
+  const submit = h("button", { class: "btn primary", type: "submit" }, "Save");
+
+  const dialog = h("dialog", null, h("form", {
+    onsubmit: async (event) => {
+      event.preventDefault();
+      error.hidden = true;
+      const problem = duration.problem();
+      if (problem) { error.textContent = problem; error.hidden = false; return; }
+      submit.disabled = true;
+      // Only what was changed is sent: an untouched time left must not be rounded up to the minute.
+      const body = { note: note.value };
+      if (!active || duration.minutes !== initialMinutes) body.minutes = duration.minutes;
+      if (Number(left.value) !== initialLeft) body.downloads_left = Number(left.value);
+      if (newPassword.checked) body.new_password = true;
+      if (emailOptions.value) body.email = emailOptions.value;
+      try {
+        const r = await api("PUT", `/api/shares/${share.id}`, body);
+        dialog.close();
+        reload();
+        if (r.email) {
+          if (r.email.sent) toast(`Invitation emailed to ${r.email.to}.`);
+          else toast(`The link was updated, but the email was not sent: ${r.email.error}`, "error", 10000);
+        }
+        if (r.password) {
+          passwordDialog(share, "New password of the link", r.password, r.password_kept
+            ? "The previous password no longer works. Give this one by a different channel than the link; you can see it again later from the Shares list."
+            : "The previous password no longer works. This one is shown only now: give it by a different channel than the link.");
+        } else if (!r.email) {
+          toast("Link updated.");
+        }
+      } catch (e) {
+        error.textContent = e.message;
+        error.hidden = false;
+        submit.disabled = false;
+      }
+    },
+  },
+    h("h2", null, "Change the link"),
+    h("p", null, h("b", null, share.label.replaceAll(" | ", " - "))),
+    h("p", { class: "muted" }, active
+      ? `It works for ${formatDuration(share.expires_at - now)} more (until ${formatTimestamp(share.expires_at)}). ${share.downloads_used} of ${share.max_downloads} downloads used.`
+      : `It ended on ${formatTimestamp(share.expires_at)}: saving makes it work again. ${share.downloads_used} of ${share.max_downloads} downloads used.`),
+    error,
+    duration.node,
+    h("label", null, `Downloads left from now on (0 = online viewing only, up to ${feature.max_downloads})`, left),
+    h("label", null, "Note (for your own records)", note),
+    h("label", { class: "check" }, newPassword, "Give the link a new password (the current one stops working)"),
+    emailOptions.node,
+    h("div", { class: "dialog-actions" }, h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Cancel"), submit)));
+  dialog.addEventListener("close", () => dialog.remove());
+  document.body.append(dialog);
+  dialog.showModal();
+}
+
+/** The "Shares" tab: the invitations, with time and downloads left, and Copy link / Password / Edit / Revoke buttons. */
 function buildSharesView() {
   const container = h("section", { class: "panel" });
 
@@ -1822,32 +2220,59 @@ function buildSharesView() {
   function renderTable(shares) {
     const now = Date.now() / 1000;
     return h("div", { class: "table-wrap" }, h("table", { class: "data" },
-      h("thead", null, h("tr", null, ["Study", "By", "Created", "Time left", "Downloads", "Opened", "Status", "Actions"].map((t) => h("th", { class: t === "Actions" ? "num" : null }, t)))),
+      h("thead", null, h("tr", null, ["Study", "By", "Created", "Time left", "Downloads left", "Opened", "Status", "Actions"].map((t) => h("th", { class: t === "Actions" ? "num" : null }, t)))),
       h("tbody", null, shares.map((s) => h("tr", null,
         h("td", null, s.label.replaceAll(" | ", " - "), s.note ? h("div", { class: "sub" }, s.note) : null),
         h("td", null, s.created_by),
         h("td", { class: "nowrap" }, formatTimestamp(s.created_at)),
-        h("td", { class: "nowrap" }, s.status === "active" ? formatDuration(s.expires_at - now) : "-"),
-        h("td", { class: "nowrap" }, `${s.downloads_used} of ${s.max_downloads}`),
+        timeLeftCell(s, now),
+        downloadsCell(s),
         h("td", { class: "nowrap" }, s.access_count ? `${s.access_count}x, last ${formatTimestamp(s.last_access_at)}` : "never"),
         h("td", null, h("span", { class: `chip ${s.status === "active" ? "status-on" : "status-off"}` }, s.status)),
         h("td", null, h("div", { class: "actions" },
-          s.url && s.status === "active" ? copyButton("Copy link", () => s.url) : null,
+          s.url && s.status === "active" ? copyButton("Copy link", () => s.url, "link") : null,
+          // Every active link: its kept password, or (made before passwords were kept) a new one.
+          s.status === "active" && (s.password_available || s.password_kept)
+            ? actionButton("button", "key", "Password", "Show the password", { class: "btn small", type: "button", onclick: () => (s.password_available ? showSharePassword(s) : offerNewSharePassword(s, load)) })
+            : null,
+          s.status !== "revoked"
+            ? actionButton("button", "edit", "Edit...", "Change the time left, the downloads, the note or the password", { class: "btn small", type: "button", onclick: () => openShareEditor(s, load) })
+            : null,
           s.status === "active"
-            ? h("button", {
+            ? actionButton("button", "revoke", "Revoke", "Revoke this link", {
                 class: "btn small danger", type: "button",
                 onclick: async () => {
                   if (!confirm("Revoke this link? The person will not be able to open it any more.")) return;
                   try { await api("POST", `/api/shares/${s.id}/revoke`); toast("Link revoked."); load(); } catch (e) { toastError(e); }
                 },
-              }, "Revoke")
+              })
             : null)))))));
+  }
+
+  /** How long the link still works, and until when (amber in its last hour). */
+  function timeLeftCell(s, now) {
+    const until = `until ${formatTimestamp(s.expires_at)}`;
+    if (s.status === "revoked") return h("td", { class: "nowrap muted" }, "withdrawn");
+    if (s.status !== "active") return h("td", { class: "nowrap" }, h("span", { class: "muted" }, "ended"), h("div", { class: "sub" }, formatTimestamp(s.expires_at)));
+    const left = s.expires_at - now;
+    return h("td", { class: "nowrap" }, h("span", { class: left < 3600 ? "soon" : null }, formatDuration(left)), h("div", { class: "sub" }, until));
+  }
+
+  /** Downloads still allowed, and how many were used (amber when none are left). */
+  function downloadsCell(s) {
+    if (!s.max_downloads) return h("td", { class: "nowrap" }, "view only", h("div", { class: "sub" }, "no download allowed"));
+    // A withdrawn or expired link allows nothing any more: only say what was used.
+    if (s.status !== "active") return h("td", { class: "nowrap muted" }, `${s.downloads_used} of ${s.max_downloads} used`);
+    const left = Math.max(0, s.max_downloads - s.downloads_used);
+    return h("td", { class: "nowrap" },
+      h("span", { class: left === 0 ? "soon" : null }, left === 0 ? "none left" : `${left} left`),
+      h("div", { class: "sub" }, `${s.downloads_used} of ${s.max_downloads} used`));
   }
 
   load();
   return h("div", { class: "view" },
-    h("div", { class: "page-head" }, h("h1", null, "Shares"), h("button", { class: "btn", type: "button", onclick: load }, "Refresh")),
-    h("p", { class: "muted" }, "Invitations for people outside: a link plus a password that opens one study. The password cannot be shown again; revoke a link if it was sent to the wrong person."),
+    h("div", { class: "page-head" }, h("h1", null, "Shares"), actionButton("button", "refresh", "Refresh", "Refresh the list", { class: "btn", type: "button", onclick: load })),
+    h("p", { class: "muted" }, "Invitations for people outside: a link plus a password that opens one study. The password of an active link can be shown again (each time is recorded in the audit log); revoke a link if it was sent to the wrong person."),
     container);
 }
 
@@ -1903,12 +2328,22 @@ const SETTINGS_FIELDS = {
     { key: "remote_bind_addr", label: "Internet address (share links only)", placeholder: "0.0.0.0:8081", hint: "Point the Cloudflare Tunnel here. Only invitation links work through it: there are no accounts and no search on this side." },
     { key: "public_base_url", label: "Public address for Weasis (optional)", placeholder: "https://pacs.example.com", hint: "Empty = automatic: the address you used to open the portal. (Weasis is for staff on the intranet; guests only get the browser viewer.)" },
   ],
+  email: [
+    { key: "smtp_host", label: "Mail server", placeholder: "smtp.example.com", hint: "Your practice's outgoing mail server (SMTP). Empty = the portal sends no email." },
+    { key: "smtp_port", label: "Port", type: "number", min: 1, max: 65535, hint: "Usually 587 (STARTTLS), 465 (TLS) or 25 (a relay on your network)." },
+    { key: "smtp_security", label: "Encryption", type: "select", options: [["starttls", "STARTTLS (usually port 587)"], ["tls", "TLS (usually port 465)"], ["none", "None (only for a relay on your own network)"]] },
+    { key: "smtp_username", label: "User name on the mail server", hint: "Empty when the server accepts the portal without signing in (a relay on your network)." },
+    { key: "smtp_from", label: "Sender of the emails", placeholder: "Chalklands PACS <pacs@example.com>", hint: "The address the invitations come from. Your mail server must allow the portal to send as this address." },
+    { key: "email_footer", label: "Text at the end of every email", type: "textarea", wide: true, hint: "Optional: the practice's address, phone number, opening hours..." },
+  ],
   sharing: [
     { key: "share_public_url", label: "Public address of the share links", placeholder: "https://pacs.example.com", wide: true, hint: "The address outsiders use to reach the internet listener (your Cloudflare hostname). Links look like <this address>/s/<code>. Sharing stays switched off until this is set." },
     { key: "share_default_hours", label: "Link validity, default (hours)", type: "number", min: 1, max: 8760, hint: "48 hours = two days." },
     { key: "share_max_hours", label: "Link validity, maximum (hours)", type: "number", min: 1, max: 8760, hint: "Nobody can create a longer link." },
     { key: "share_default_downloads", label: "Downloads allowed, default", type: "number", min: 0, max: 1000, hint: "0 = online viewing only. Running out of downloads never stops the online viewing: only the time does." },
     { key: "share_max_downloads", label: "Downloads allowed, maximum", type: "number", min: 0, max: 1000 },
+    { key: "share_keep_passwords", label: "Let staff see a link's password again from the Shares list", type: "checkbox", wide: true,
+      hint: "Only the person who created the link, or an administrator, and only while the link is active; every time is recorded in the audit log. A copy of the password is kept in the portal's database until the link is revoked, or 30 days after it expires (so it can still be extended with the same password). Untick it to show passwords only once, when the link is created (the copies kept so far are erased)." },
   ],
   security: [
     { key: "session_hours", label: "Session duration (hours)", type: "number", min: 1, max: 720, hint: "Applies to the next sign-ins." },
@@ -2108,7 +2543,7 @@ const SETTINGS_TABS = [
   { id: "general", label: "General", sections: ["branding", "search", "viewers"] },
   { id: "appearance", label: "Appearance", sections: ["theme", "simplified"] },
   { id: "orthanc", label: "Orthanc", sections: ["orthanc"] },
-  { id: "network", label: "Network & sharing", sections: ["network", "sharing"] },
+  { id: "network", label: "Network & sharing", sections: ["network", "sharing", "email"] },
   { id: "security", label: "Security & roles", sections: ["security", "roles"] },
   { id: "users", label: "Users", build: buildUsersView },
   { id: "nodes", label: "DICOM nodes", build: buildNodesView },
@@ -2269,6 +2704,37 @@ function buildSettingsView() {
 
     const rolesEditor = buildRolesEditor(s.roles, doc.defaults.roles, doc.permissions);
 
+    // ---- Email: the mail server password is write-only (like Orthanc's), and a test button.
+    const smtpPassword = h("input", { type: "password", autocomplete: "new-password", placeholder: s.smtp_password_set ? "A password is saved. Leave empty to keep it." : "No password saved" });
+    const clearSmtpPassword = h("input", { type: "checkbox" });
+    const smtpPasswordField = h("div", { class: "setting" },
+      h("label", null, "Password on the mail server", smtpPassword),
+      h("label", { class: "check" }, clearSmtpPassword, "Remove the saved password"));
+    const testTo = h("input", { type: "text", placeholder: "you@example.com", autocomplete: "off", "aria-label": "Send a test email to" });
+    const testMailBox = h("div", { class: "test-result", hidden: true, role: "status" });
+    const testMailButton = h("button", { class: "btn", type: "button" }, "Send a test email");
+    testMailButton.addEventListener("click", async () => {
+      testMailButton.disabled = true;
+      testMailBox.hidden = false;
+      testMailBox.className = "test-result";
+      testMailBox.textContent = "Sending...";
+      try {
+        const r = await api("POST", "/api/admin/email/test", { to: testTo.value });
+        testMailBox.className = `test-result ${r.ok ? "ok" : "bad"}`;
+        testMailBox.textContent = r.message;
+      } catch (e) {
+        testMailBox.className = "test-result bad";
+        testMailBox.textContent = e.message;
+      } finally {
+        testMailButton.disabled = false;
+      }
+    });
+    const emailFields = SETTINGS_FIELDS.email.map(field);
+    emailFields.splice(4, 0, smtpPasswordField);
+    const testMailField = h("div", { class: "setting wide" },
+      h("span", { class: "field-label" }, "Send a test email to (uses the saved settings: save first)"),
+      h("div", { class: "inline-field" }, testTo, testMailButton), testMailBox);
+
     // ---- Appearance: light / dark and the colours. Every change is previewed at once on this
     // page; it is kept only when saved (leaving the page without saving puts the saved colours back).
     const themeMode = h("select", null,
@@ -2344,6 +2810,8 @@ function buildSettingsView() {
         }
         body.roles = rolesEditor.get();
         body.modality_buttons = modalityEditor.get();
+        if (smtpPassword.value) body.smtp_password = smtpPassword.value;
+        if (clearSmtpPassword.checked) body.clear_smtp_password = true;
         if (withoutAccount()) {
           // No account: no user name and no stored password (the server enforces this too).
           body.orthanc_username = "";
@@ -2380,13 +2848,15 @@ function buildSettingsView() {
       section("viewers", "Viewers and uploads", null, SETTINGS_FIELDS.viewers.map(field)),
       section("theme", "Colours", "Match the portal to your practice's colours. Changes are previewed on this page at once and kept when you save. The logo, the portal name and the window title are in the General tab.",
         themeFields),
-      section("simplified", "Simplified view", "A reduced layout for staff who mostly look at recent studies and upload new ones: the logo, the practice name and the total of studies at the top, a column of icons (Home, Search, Share, Upload, Configuration, Log out) on the left, and a home page with the most recent studies and an area to drop files into. Choose which roles use it in Security & roles > Roles.",
+      section("simplified", "Simplified view", "A reduced layout for staff who mostly look at recent studies and upload new ones: the logo, the practice name and the total of studies at the top, a column of icons (Home, Search, Shares, Uploads, Configuration, Log out) on the left, and a home page with the most recent studies and an area to drop files into. Choose which roles use it in Security & roles > Roles.",
         SETTINGS_FIELDS.simplified.map(field)),
       section("orthanc", "Orthanc connection", "The PACS this portal works with. Saved changes apply immediately, without restarting.",
         urlField, modeField, userField, passwordField,
         h("div", { class: "setting wide" }, testButton, testBox)),
       section("network", "Network", networkIntro, networkFields, listenerInfo),
       section("sharing", "Share links (invitations for people outside)", "A staff member with the share permission can invite somebody outside: a link plus a generated password that opens ONE study, to look at online and to download a limited number of times, until the link expires. These are the defaults offered when creating a link, and the limits nobody can exceed.", SETTINGS_FIELDS.sharing.map(field)),
+      section("email", "Email (sending share invitations)", "The Share windows can send the invitation by email (optional, for each link) when a mail server is set here. The emails are plain text; the password is included only when the staff member ticks it.",
+        emailFields, testMailField),
       section("security", "Sessions and sign-in security", null, SETTINGS_FIELDS.security.map(field)),
       section("roles", "Roles", "Shortcuts that pre-tick permissions when you create or edit a user (Users tab), and the view (normal or simplified) of the users who have that role, used while the simplified view is switched on (Appearance tab). Users keep their own permissions: changing a role's permissions does not change existing users, but changing its view applies to them at their next page load.", rolesEditor.node),
       h("div", { class: "settings-actions" },

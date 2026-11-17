@@ -57,11 +57,10 @@ pub async fn list_users(State(state): State<AppState>, AuthUser(admin): AuthUser
         .list_users()?
         .into_iter()
         .map(|u| {
-            let role = settings.role_of(&u.role, &u.permissions).map(|r| r.key.clone());
-            let interface = settings.interface_for(&u.role, &u.permissions);
+            let role = settings.role_of(&u.role, &u.permissions);
             let mut value = serde_json::to_value(&u).unwrap_or_default();
-            value["effective_role"] = json!(role);
-            value["interface"] = json!(interface);
+            value["effective_role"] = json!(role.map(|r| &r.key));
+            value["interface"] = json!(settings.interface_of(role));
             value
         })
         .collect();
@@ -69,7 +68,7 @@ pub async fn list_users(State(state): State<AppState>, AuthUser(admin): AuthUser
         "users": users,
         "permissions": permissions,
         // Roles are a setting: edited in Settings > Roles.
-        "presets": state.settings.get().roles,
+        "presets": settings.roles,
     })))
 }
 

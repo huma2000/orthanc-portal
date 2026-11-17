@@ -32,6 +32,11 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 argon2 = "0.5"
 rand = "0.8"
 
+# ---- Email ---------------------------------------------------------------
+# lettre: sends share invitations by email through the practice's SMTP server (Settings > Email).
+# Only SMTP + rustls (the TLS stack reqwest already uses: no OpenSSL to install).
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "hostname", "rustls-tls"] }
+
 # ---- Misc ----------------------------------------------------------------
 thiserror = "2"          # ergonomic error enum
 anyhow = "1"             # error handling in main()/config only

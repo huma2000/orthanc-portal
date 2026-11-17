@@ -142,6 +142,8 @@ fn staff_router(state: AppState) -> Router {
         .route("/studies/{id}/share", post(shares::create_share))
         .route("/shares", get(shares::list_shares))
         .route("/shares/{id}/revoke", post(shares::revoke_share))
+        .route("/shares/{id}/password", post(shares::show_password))
+        .route("/shares/{id}", put(shares::update_share))
         // --- administration ---
         .route("/admin/users", get(admin::list_users).post(admin::create_user))
         .route("/admin/users/{id}", put(admin::update_user).delete(admin::delete_user))
@@ -151,6 +153,7 @@ fn staff_router(state: AppState) -> Router {
         // --- configuration from the web interface ---
         .route("/admin/settings", get(settings::get_settings).put(settings::update_settings))
         .route("/admin/orthanc/test", post(settings::test_orthanc))
+        .route("/admin/email/test", post(settings::test_email))
         .route("/admin/nodes", get(settings::list_nodes))
         .route("/admin/nodes/{alias}", put(settings::put_node).delete(settings::delete_node))
         .route("/admin/nodes/{alias}/echo", post(settings::echo_node))

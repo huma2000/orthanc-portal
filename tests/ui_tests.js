@@ -95,14 +95,14 @@ async function newLink(admin, body) {
   const admin = await makeDom(STAFF);
   await admin.login("admin", "SuperSecret123");
   await sleep(1200);
-  check("all tabs are there, including Shares", admin.tabs().join() === "Studies,Series,Upload,Transfers,Shares,Settings", admin.tabs().join());
+  check("all tabs are there, including Shares", admin.tabs().join() === "Studies,Series,Uploads,Transfers,Shares,Settings", admin.tabs().join());
 
   console.log("--- Settings is organised in tabs (users, DICOM nodes and the audit log live there)");
   await admin.tab("Settings");
   await until(() => admin.$("form.settings-form"), 6000);
   const subtab = (name) => admin.$$(".subtabs [role=tab]").find((b) => b.textContent === name);
   const visibleSections = () => admin.$$("section.settings-section").filter((s) => !s.hidden).map((s) => s.querySelector("h2").textContent);
-  check("Settings tabs", admin.$$(".subtabs [role=tab]").map((b) => b.textContent).join() === "General,Orthanc,Network & sharing,Security & roles,Users,DICOM nodes,Audit log",
+  check("Settings tabs", admin.$$(".subtabs [role=tab]").map((b) => b.textContent).join() === "General,Appearance,Orthanc,Network & sharing,Security & roles,Users,DICOM nodes,Audit log",
     admin.$$(".subtabs [role=tab]").map((b) => b.textContent).join());
   check("no stray 'null' text on the page (it used to appear under the title)",
     !admin.$$("main *").some((el) => Array.from(el.childNodes).some((n) => n.nodeType === 3 && n.textContent.trim() === "null")));
@@ -199,8 +199,9 @@ async function newLink(admin, body) {
   admin.click(admin.button(admin.$("tr.study"), "Share..."));
   await until(() => admin.$("dialog.share-dialog form"));
   dialog = admin.$("dialog.share-dialog");
-  const [hoursInput, downloadsInput] = dialog.querySelectorAll("input[type=number]");
-  check("the form is ready at once after saving the address, with the defaults 48 hours and 1 download", !!hoursInput && hoursInput.value === "48" && downloadsInput.value === "1", dialog.textContent);
+  const [daysInput, hoursInput, minutesInput, downloadsInput] = dialog.querySelectorAll("input[type=number]");
+  check("the form is ready at once after saving the address, with the defaults 2 days (48 hours) and 1 download",
+    !!downloadsInput && daysInput.value === "2" && hoursInput.value === "0" && minutesInput.value === "0" && downloadsInput.value === "1", dialog.textContent);
   check("the form names the study", /DOE, JOHN/.test(dialog.textContent));
   dialog.querySelector("input[maxlength]").value = "Dr. Who";
   admin.submit(dialog.querySelector("form"));
@@ -210,7 +211,7 @@ async function newLink(admin, body) {
   check("the link is <public address>/s/<code>", /^https:\/\/pacs\.example\.com\/s\/[0-9a-f]{48}$/.test(url), url);
   check("the password has 3 groups of 4 readable characters", /^[A-HJKMNP-Z2-9]{4}-[A-HJKMNP-Z2-9]{4}-[A-HJKMNP-Z2-9]{4}$/.test(password), password);
   check("copy buttons for the link, the password and the invitation text", ["Copy link", "Copy password", "Copy invitation text (without the password)"].every((n) => !!admin.button(dialog, n)));
-  check("the dialog warns that the password cannot be shown again", /shown only now/.test(dialog.textContent));
+  check("the dialog says the password can be seen again in the Shares list", /see it again in the Shares list/.test(dialog.textContent));
   check("...and the validity and downloads are stated", /Downloads allowed: 1/.test(dialog.textContent) && /Valid until/.test(dialog.textContent));
   admin.click(admin.button(dialog, "Close"));
   check("closing removes the dialog", !admin.$("dialog.share-dialog"));

@@ -215,6 +215,7 @@ screens whose changes apply at once.
 | **Orthanc > Orthanc connection** | Address; **with an account** (user name + password, write-only: never sent back to the browser) **or without an account** (for an Orthanc that only accepts a list of allowed computers); **Test connection** (mode used, version, DICOMweb/OHIF plugins, number of DICOM nodes; works on values you have typed but not yet saved) |
 | **Network & sharing > Network** | Intranet address, enable/disable the internet listener (invitation links only) and its address, optional fixed public address for Weasis |
 | **Network & sharing > Share links** | **The public address of the share links** (your Cloudflare hostname; sharing stays off until it is set), the default and maximum validity (hours) and the default and maximum number of ZIP downloads |
+| **Network & sharing > Email** | The mail server that sends share invitations (optional): server, port, encryption (STARTTLS / TLS / none), user name and password (write-only), sender address, a text added at the end of every email, and **Send a test email** |
 | **Security & roles > Sessions and sign-in security** | Session length, Weasis link validity, failed sign-ins before lockout, lockout length, secure-cookie mode, how long to keep the audit log (0 = forever) |
 | **Security & roles > Roles** | The role shortcuts offered in the user form (add, rename, change permissions, restore defaults) and the **view** (normal or simplified) of each role |
 | **Users** | Accounts, permissions, enable/disable, password reset |
@@ -269,7 +270,7 @@ the **simplified view**:
 
 * The **header** shows the logo and the portal name (*General > Branding*) and the **total number of studies**
   in Orthanc.
-* The **column of icons** leads to **Home**, **Search**, **Share**, **Upload**, **Configuration** (administrators)
+* The **column of icons** leads to **Home**, **Search**, **Shares**, **Uploads**, **Configuration** (administrators)
   and **Log out**. Each icon names itself when the mouse rests on it (or always, under the icon, if you tick
   *Write the name under each icon*). An icon is shown only to users with the matching permission. On a phone
   the column becomes a bar at the bottom of the screen.
@@ -278,7 +279,10 @@ the **simplified view**:
   chosen instead (a click on a card opens the study with the same buttons and its series). How many studies,
   and whether "recent" means *last received by the PACS* or *newest study date*, are settings. Below them, files
   and whole folders can be **dropped** to upload them; the list and the total refresh when the upload ends.
-* Search, Share, Upload and Configuration are the same pages as in the normal view.
+* Search, Shares, Uploads and Configuration are the same pages as in the normal view.
+* **Uploads** lists every upload of the browser session (newest first) with a progress bar, speed, time left,
+  files done, new / already stored / failed and the studies touched. While files are being sent, the Uploads
+  icon (and the Uploads tab of the normal view) shows the percentage, so the upload can be followed from any page.
 
 **Who gets which view.** Every role (*Security & roles > Roles*) has a **view**: normal or simplified. The
 role is saved with each account (the *Role* list of the user form; *Custom* = no role). Accounts created before
@@ -480,15 +484,43 @@ maximums nobody can exceed (720 hours, 20 downloads). Make sure the Cloudflare T
 **Creating an invitation (staff with the `share` permission, on the intranet).**
 
 1. **Studies** tab, **Share...** on the study.
-2. Choose **how many hours** the link works (default 48), **how many ZIP downloads** it allows (default 1; **0 =
-   online viewing only**) and, if you wish, a note for your own records (for example "Dr. Smith, second opinion").
+2. Choose **how long** the link works, in **days, hours and minutes** (default 2 days; at most the maximum of
+   Settings, 30 days by default), **how many ZIP downloads** it allows (default 1; **0 = online viewing only**)
+   and, if you wish, a note for your own records (for example "Dr. Smith, second opinion"). Optionally tick
+   **Send the invitation by email** (see below).
 3. **Create link and password.** You get the **link** (`https://pacs.example.com/s/<48 random characters>`) and a
    generated **password** (`K7QX-M2PD-9RHW`: 12 characters without look-alikes such as `0/O` or `1/I/L`). Both
-   have copy buttons. **The password is shown only now** and cannot be recovered; send it by a different
-   channel than the link (a phone call, an SMS).
+   have copy buttons. Send the password by a different channel than the link (a phone call, an SMS).
 4. The **Shares** tab lists the invitations (yours; administrators see everyone's) with the study, who made
-   it, time left, downloads used, how often it was opened, its status (active / expired / revoked) and a
-   **Revoke** button. Revoking cuts off a guest who is looking at the study at that very moment.
+   it, time left, downloads left, how often it was opened, its status (active / expired / revoked) and
+   **Copy link**, **Password**, **Edit** and **Revoke** buttons. Revoking cuts off a guest who is looking at the
+   study at that very moment.
+5. **Edit** changes a link that was not revoked: how many hours it still works (counted from now; this also
+   brings an **expired** link back), how many **downloads are left** from now on, the note, and optionally a
+   **new password** (the old one stops working at once and whoever is using the link must type the new one).
+   Only the link's creator or an administrator; the same limits as for a new link; recorded in the audit log.
+   A revoked link cannot be changed: create a new one.
+
+**Sending the invitation by email (optional).** Once an administrator has set up a mail server in *Settings >
+Network & sharing > Email* (and checked it with **Send a test email**), the Share and Edit windows offer **Send
+the invitation by email**: one or several addresses (separated by commas) and an optional message. The portal
+sends a plain-text email with the link, how long it works, how many downloads are allowed, the message, and the
+text of Settings > Email (your address, phone...). **The password is left out** unless **Include the password in
+the email** is ticked: the email then says the password will be given separately, which is safer (whoever can
+read the email could otherwise open the study). The addresses are checked before the link is created or
+changed; if the mail server then fails, the link is kept and the window says why the email was not sent. Every
+email is recorded in the audit log (`share_emailed`, with or without the password). Without a mail server
+nothing is ever sent and the windows say how to set one up.
+
+**Seeing a password again.** The guest lost the password, or you did not write it down? **Password** in the
+Shares list shows it again: only to the person who created the link or an administrator, only while the link
+is active, and **every time is recorded in the audit log** (`share_password_shown`). To make this possible the
+portal keeps a copy of each password in its database (the file is readable only by the portal's own account),
+erased as soon as the link is revoked, or 30 days after it expires (until then it can be extended with the same
+password). Links created before this existed have no copy (only a one-way hash of their password was ever
+stored): for those, **Password** offers to give the link a new password, which is kept from then on. An administrator who prefers passwords to be shown only once
+unticks *Let staff see a link's password again* in *Settings > Share links*: every copy kept so far is erased
+at once, and from then on only the Argon2 hash is stored.
 
 **What the guest sees.** They open the link, a plain page asks for the password (capital letters, spaces and
 dashes do not matter). With the right one they get a single simple page:
@@ -573,7 +605,9 @@ Built in:
 
 * **Intranet/internet separation** by listener *and* by Cloudflare headers (section 1): the internet port has
   no login, search, upload, send, share or admin routes at all, and the staff port refuses Cloudflare traffic.
-* **Invitation links** (section 8): unguessable link + generated password (Argon2-hashed, shown once), throttled
+* **Invitation links** (section 8): unguessable link + generated password (checked against an Argon2 hash; a
+  copy is kept to show it again to its creator or an administrator while the link is active, audited, erased
+  when the link ends, and can be switched off so it is shown only once), throttled
   per link and per address, confined to one study, no whole DICOM files through the viewer address, atomic
   download counter, expiry and revocation checked on every request, own cookie separate from staff sessions.
 * Passwords hashed with **Argon2**; sign-in takes the same time for unknown users (no user enumeration).
@@ -651,13 +685,16 @@ All JSON. State-changing calls need the header `X-Requested-With: portal`.
 | `GET /api/modalities` | send | DICOM destinations |
 | `POST /api/studies/{id}/send` `{ "target": "alias" }` | send | Start sending a study |
 | `GET /api/transfers` | send | Recent transfers + live job state |
-| `POST /api/studies/{id}/share` `{ "hours": 48, "downloads": 1, "note": "" }` | share | Create an invitation: answers `{ id, url, password, expires_at, hours, max_downloads, label }`; **the only time the password is returned** |
+| `POST /api/studies/{id}/share` `{ "minutes": 2880, "downloads": 1, "note": "", "email"?: { "to", "message"?, "include_password"? } }` | share | Create an invitation (`hours` is still accepted instead of `minutes`): answers `{ id, url, password, password_kept, expires_at, minutes, max_downloads, label, email: { sent, to, error? } }` |
+| `PUT /api/shares/{id}` `{ "minutes"?, "downloads_left"?, "note"?, "new_password"?, "email"? }` | share (creator) or admin | Change a link that was not revoked (`minutes` from now, also for an expired link) and optionally email the update; answers the new `password` when one was asked, and `email` |
+| `POST /api/shares/{id}/password` | share (creator) or admin | `{ password }` of an active invitation, if passwords are kept (409 otherwise); recorded in the audit log |
 | `GET /api/shares` | share | The caller's invitations (admins: everyone's) with status, downloads used, openings |
 | `POST /api/shares/{id}/revoke` | share (creator) or admin | Revoke an invitation at once |
 | `GET/POST /api/admin/users`, `PUT/DELETE /api/admin/users/{id}`, `GET /api/admin/audit` | admin | Users (with `role`; the list adds `effective_role` and `interface`) and audit log |
 | `PUT/DELETE /api/admin/branding/{logo\|favicon}` (raw file body) | admin | Upload / remove the logo or the website icon |
 | `GET/PUT /api/admin/settings` | admin | Read / save the settings (partial update; Orthanc password write-only) |
 | `POST /api/admin/orthanc/test` | admin | "Test connection" (saved or typed values) |
+| `POST /api/admin/email/test` `{ "to" }` | admin | "Send a test email" with the saved mail server settings: `{ ok, message }` |
 | `GET /api/admin/nodes`, `PUT/DELETE /api/admin/nodes/{name}`, `POST /api/admin/nodes/{name}/echo` | admin | Manage DICOM nodes, DICOM ping |
 
 **Guest (internet)**: no session login; the password of the link gives the `share_session` cookie.
@@ -733,6 +770,25 @@ database (no known vulnerable version in `Cargo.lock`). The automated tests live
 * `cargo test`: **17 unit tests** (image validation; password and link generation; the rules that confine a guest
   to one study; account / no account and the wording of Orthanc refusals; the thumbnail cache; tokens and sessions).
 
+**Trying it by hand: `tests/dev_env.sh`.** It builds the portal and starts it with the fake Orthanc in a demo
+mode (14 studies with preview images; every uploaded file becomes a new study), on its own ports and in its own
+folder (`tests/.dev-env`, not committed), so it never collides with the tests or a real installation:
+
+| Command | What it does |
+|---|---|
+| `tests/dev_env.sh start` | Builds and starts everything; the first time, creates demo accounts (one per kind of user, normal and simplified view) and invitation links in every state. Prints the addresses and passwords |
+| `tests/dev_env.sh guest [N]` | **See what a person outside sees**: makes a new invitation link for demo study N (1-14), prints the link and its password, and opens it in your browser. `NO_BROWSER=1` only prints them |
+| `tests/dev_env.sh mail [N]` | The last email the portal sent (share invitations, test emails), as the recipient reads it; `mail 10` lists the last 10. The environment's fake mail server sends nothing anywhere: it keeps every email in `tests/.dev-env/mail/` as an `.eml` file any mail program opens |
+| `tests/dev_env.sh shares` | Adds another set of demo invitation links (active, no downloads left, view only, about to expire, expired, revoked, made by another user) |
+| `tests/dev_env.sh restart` / `stop` / `status` | Rebuild after a code change and start again (users and settings are kept), stop, check |
+| `tests/dev_env.sh reset` | Stop and forget everything |
+
+The staff portal is `http://127.0.0.1:19080`; invitation links use `http://localhost:19081`. The different host
+name matters: browsers keep cookies per host name, so the invitation page never sees your staff sign-in, exactly
+as for a real person outside. Every link the script makes is
+written with its password to `tests/.dev-env/guest-links.txt`. Links made in the portal itself (*Share...* on a
+study) also open locally, since the environment's public address for share links is its own invitation port.
+
 Run them all with `tests/run_all.sh` (needs `python3`, `curl`, and `npm install` once inside `tests/`; build
 first with `cargo build`; set `PORTAL_BIN=target/release/orthanc-portal` to test the release binary). The
 portal has **not** been run against a real Orthanc, a real OHIF
@@ -779,7 +835,7 @@ plugin, a real Weasis or a real DICOM destination here, and the compose files we
 | *Share...* says "Sharing is not set up yet" | An administrator must enter the public address in *Settings > Share links* |
 | The guest opens the link and sees "This link is not available" | The link was revoked, or the address is wrong or incomplete (it must be the whole `/s/<48 characters>`) |
 | The guest sees "This link has expired" | The validity ran out; create a new link (the old one cannot be extended) |
-| The guest lost the password | It cannot be recovered or shown again: revoke the link and create a new one |
+| The guest lost the password | **Password** in the Shares list shows it again while the link is active. If showing passwords again is switched off (or the link is older than this feature): revoke the link and create a new one |
 | "Too many attempts" on the invitation page | Several wrong passwords: that link (or that address) is locked for a few minutes (*Settings > Sessions and sign-in security*) |
 | The guest's *View online* button is grey | The OHIF plugin is not available in Orthanc (see *Requirements*); the ZIP download still works |
 | The guest says the viewer opens but some images do not show | Some object types need whole DICOM files, which guests never get through the viewer address; use the ZIP, or Weasis on the intranet |

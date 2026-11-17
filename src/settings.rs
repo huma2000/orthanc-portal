@@ -68,6 +68,19 @@ impl fmt::Debug for Secret {
     }
 }
 
+/// How the portal talks to the mail server (Settings > Email).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SmtpSecurity {
+    /// Plain connection upgraded to TLS (usually port 587). The common choice.
+    #[default]
+    Starttls,
+    /// TLS from the first byte (usually port 465).
+    Tls,
+    /// No encryption: only for a mail relay on the local network (usually port 25).
+    None,
+}
+
 /// The two looks of the staff portal.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -286,6 +299,31 @@ pub struct Settings {
     /// Suggested number of ZIP downloads of a new link (0 = view only), and the most allowed.
     pub share_default_downloads: u64,
     pub share_max_downloads: u64,
+    /// Keep a copy of each link's password so its creator (or an administrator) can see it again in
+    /// the Shares list while the link is active. Off = shown only once, stored only as a hash.
+    #[serde(default = "default_true")]
+    pub share_keep_passwords: bool,
+
+    // ---- Email (share invitations sent by the portal) -----------------------------
+    /// Mail server. Empty = email is switched off.
+    #[serde(default)]
+    pub smtp_host: String,
+    #[serde(default = "default_smtp_port")]
+    pub smtp_port: u64,
+    #[serde(default)]
+    pub smtp_security: SmtpSecurity,
+    /// Account on the mail server (empty = the server accepts the portal without signing in).
+    #[serde(default)]
+    pub smtp_username: String,
+    /// Its password. Never sent to the browser (see [`Settings::to_view`]).
+    #[serde(default)]
+    pub smtp_password: Secret,
+    /// Sender of the emails, e.g. `Chalklands PACS <pacs@chalklands.example>`.
+    #[serde(default)]
+    pub smtp_from: String,
+    /// Text at the end of every email (address, phone number of the practice...).
+    #[serde(default)]
+    pub email_footer: String,
 
     // ---- Preview thumbnails -----------------------------------------------------
     /// Show a small preview image next to every study and series?
@@ -341,6 +379,9 @@ pub struct Settings {
     pub simplified_upload_text: String,
 }
 
+fn default_smtp_port() -> u64 {
+    587
+}
 fn default_recent_count() -> u64 {
     12
 }
@@ -376,6 +417,14 @@ impl Settings {
             share_max_hours: 720,
             share_default_downloads: 1,
             share_max_downloads: 20,
+            share_keep_passwords: true,
+            smtp_host: String::new(),
+            smtp_port: default_smtp_port(),
+            smtp_security: SmtpSecurity::Starttls,
+            smtp_username: String::new(),
+            smtp_password: Secret::default(),
+            smtp_from: String::new(),
+            email_footer: String::new(),
             public_base_url: String::new(),
             session_hours: 12,
             weasis_token_minutes: 240,
@@ -521,6 +570,14 @@ impl Settings {
         self.remote_bind_addr = self.remote_bind_addr.trim().to_string();
         self.public_base_url = self.public_base_url.trim().trim_end_matches('/').to_string();
         self.share_public_url = self.share_public_url.trim().trim_end_matches('/').to_string();
+        self.smtp_host = self.smtp_host.trim().to_string();
+        self.smtp_username = self.smtp_username.trim().to_string();
+        self.smtp_from = self.smtp_from.trim().to_string();
+        self.email_footer = self.email_footer.trim().to_string();
+        // No account on the mail server means no password.
+        if self.smtp_username.is_empty() {
+            self.smtp_password = Secret::default();
+        }
         for button in &mut self.modality_buttons {
             button.label = button.label.trim().to_string();
             button.title = button.title.trim().to_string();
@@ -608,6 +665,30 @@ impl Settings {
             }
         }
 
+        // --- email
+        if !self.smtp_host.is_empty() {
+            let host_ok = self.smtp_host.len() <= 253
+                && self
+                    .smtp_host
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '[' | ']' | ':'));
+            if !host_ok {
+                return bad("The mail server must be a host name or an IP address, e.g. smtp.example.com".into());
+            }
+            if self.smtp_from.parse::<lettre::message::Mailbox>().is_err() {
+                return bad("Enter the sender of the emails, e.g. Chalklands PACS <pacs@example.com>".into());
+            }
+        }
+        if !(1..=65535).contains(&self.smtp_port) {
+            return bad("The mail server port must be between 1 and 65535".into());
+        }
+        if has_control(&self.smtp_username) || self.smtp_username.len() > 256 || self.smtp_password.0.len() > 256 {
+            return bad("The mail server user name or password is not valid".into());
+        }
+        if self.email_footer.chars().count() > 500 || self.email_footer.chars().any(|c| c.is_control() && c != '\n') {
+            return bad("The text at the end of the emails can have at most 500 characters".into());
+        }
+
         // --- sharing
         if !self.share_public_url.is_empty() {
             // It is written into links people will click: allow nothing exotic.
@@ -670,7 +751,10 @@ impl Settings {
                 ));
             }
             if button.title.chars().count() > 80 || has_control(&button.title) {
-                return bad(format!("The description of the modality button '{}' can have at most 80 characters", button.label));
+                return bad(format!(
+                    "The description of the modality button '{}' can have at most 80 characters",
+                    button.label
+                ));
             }
         }
 
@@ -730,12 +814,15 @@ impl Settings {
         let obj = base.as_object_mut().ok_or_else(|| AppError::Internal("settings are not an object".into()))?;
 
         let mut clear_password = false;
+        let mut clear_smtp_password = false;
         for (key, value) in patch {
             match key.as_str() {
                 "clear_orthanc_password" => clear_password = value.as_bool().unwrap_or(false),
+                "clear_smtp_password" => clear_smtp_password = value.as_bool().unwrap_or(false),
                 // Read-only information the form echoes back: ignore it.
-                "orthanc_password_set" => {}
-                "orthanc_password" => {
+                "orthanc_password_set" | "smtp_password_set" => {}
+                // Write-only secrets: empty = keep the saved one.
+                "orthanc_password" | "smtp_password" => {
                     if value.as_str().map(|p| !p.is_empty()).unwrap_or(false) {
                         obj.insert(key.clone(), value.clone());
                     }
@@ -749,6 +836,9 @@ impl Settings {
         if clear_password {
             obj.insert("orthanc_password".into(), json!(""));
         }
+        if clear_smtp_password {
+            obj.insert("smtp_password".into(), json!(""));
+        }
 
         let mut updated: Settings = serde_json::from_value(base)
             .map_err(|e| AppError::BadRequest(format!("Invalid value in the settings: {e}")))?;
@@ -757,15 +847,22 @@ impl Settings {
         Ok(updated)
     }
 
-    /// The settings as sent to the browser: everything except the Orthanc
-    /// password, replaced by a yes/no `orthanc_password_set`.
+    /// The settings as sent to the browser: everything except the Orthanc and mail server
+    /// passwords, replaced by yes/no `orthanc_password_set` and `smtp_password_set`.
     pub fn to_view(&self) -> Value {
         let mut value = serde_json::to_value(self).unwrap_or(Value::Null);
         if let Some(obj) = value.as_object_mut() {
             obj.remove("orthanc_password");
             obj.insert("orthanc_password_set".into(), json!(!self.orthanc_password.0.is_empty()));
+            obj.remove("smtp_password");
+            obj.insert("smtp_password_set".into(), json!(!self.smtp_password.0.is_empty()));
         }
         value
+    }
+
+    /// Can the portal send emails? (A mail server and a sender are set.)
+    pub fn email_configured(&self) -> bool {
+        !self.smtp_host.is_empty() && !self.smtp_from.is_empty()
     }
 
     /// Names of the settings that differ between `self` and `other` (for the audit
@@ -812,10 +909,15 @@ impl Settings {
     /// The view a user gets: always the normal one while the simplified view is switched
     /// off, otherwise the one of their role (or the default one without a role).
     pub fn interface_for(&self, stored_role: &str, permissions: &PermissionSet) -> Interface {
+        self.interface_of(self.role_of(stored_role, permissions))
+    }
+
+    /// The view given by a role already looked up with [`Settings::role_of`] (`None` = no role).
+    pub fn interface_of(&self, role: Option<&Role>) -> Interface {
         if !self.simplified_enabled {
             return Interface::Normal;
         }
-        self.role_of(stored_role, permissions).map(|r| r.interface).unwrap_or(self.default_interface)
+        role.map(|r| r.interface).unwrap_or(self.default_interface)
     }
 
     /// The colours, as sent to every page (login and invitation pages included).
@@ -882,7 +984,10 @@ mod tests {
         assert_eq!(edited.modality_buttons.len(), 9, "a hidden button is kept, so it can be shown again");
 
         let refused = |list: Value| base.with_patch(&json!({ "modality_buttons": list })).is_err();
-        assert!(refused(json!([{ "label": "CT", "codes": ["CT"] }, { "label": "ct", "codes": ["CT"] }])), "same label twice");
+        assert!(
+            refused(json!([{ "label": "CT", "codes": ["CT"] }, { "label": "ct", "codes": ["CT"] }])),
+            "same label twice"
+        );
         assert!(refused(json!([{ "label": "CT", "codes": [] }])), "no code");
         assert!(refused(json!([{ "label": "CT", "codes": ["C*"] }])), "wildcard in a code");
         assert!(refused(json!([{ "label": "", "codes": ["CT"] }])), "no label");

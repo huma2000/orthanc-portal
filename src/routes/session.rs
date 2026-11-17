@@ -32,6 +32,8 @@ pub struct ShareFeature {
     max_hours: u64,
     default_downloads: u64,
     max_downloads: u64,
+    /// A mail server is set up: the Share windows offer to send the invitation by email.
+    email: bool,
 }
 
 /// Options of the simplified view (Settings > Appearance).
@@ -86,6 +88,7 @@ async fn me_response(state: &AppState, user: User) -> Me {
         max_hours: settings.share_max_hours,
         default_downloads: settings.share_default_downloads,
         max_downloads: settings.share_max_downloads,
+        email: settings.email_configured(),
     };
     let interface = settings.interface_for(&user.role, &user.permissions);
     let interface_switch = settings.simplified_enabled && user.permissions.contains(Permission::SwitchView);

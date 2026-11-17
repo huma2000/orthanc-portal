@@ -693,13 +693,43 @@ dl.share-details dd { margin: 0; font-weight: 600; }
 
 .dropzone.home-drop { padding: 1.4rem 1rem; border-width: 2px; border-style: dashed; }
 .home-drop h2 { font-size: clamp(1.3rem, 3vw, 2.3rem); font-weight: 500; }
-.home-progress { display: grid; gap: 0.5rem; width: min(520px, 100%); }
-.home-progress .muted { font-size: 0.9em; }
 
 /* Study details opened from a card */
 dialog.study-dialog { width: min(760px, calc(100vw - 2rem)); }
 .study-dialog .series-box { margin-left: 0; }
 .study-dialog .actions { justify-content: flex-start; }
+
+/* Uploads: percentage badge on the icon / tab while files are being sent, and the list of uploads */
+.upload-badge {
+  display: inline-block;
+  margin-left: 0.35rem;
+  padding: 0 0.32rem;
+  border-radius: 99px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 0.7rem;
+  font-weight: 700;
+  line-height: 1.45;
+  font-variant-numeric: tabular-nums;
+}
+.side-btn .upload-badge { position: absolute; top: 1px; right: 0; margin: 0; }
+.upload-progress-cell { min-width: 16rem; }
+.upload-errors > .btn { justify-self: start; }   /* "Browse studies": a button, not a bar */
+/* Share windows: how long a link works (days / hours / minutes) and the email options */
+fieldset.duration { display: flex; gap: 0.6rem; flex-wrap: wrap; border: 0; padding: 0; margin: 0; }
+fieldset.duration legend { padding: 0; margin-bottom: 0.25rem; font-size: 0.92em; color: var(--ink-soft); }
+.duration-field { display: flex; align-items: center; gap: 0.4rem; color: var(--ink); }
+.duration-field input { width: 5.5rem; }
+.email-options { display: grid; gap: 0.6rem; padding: 0.7rem; border: 1px solid var(--line); border-radius: 8px; }
+.email-details { display: grid; gap: 0.6rem; }
+.inline-field { display: flex; gap: 0.5rem; align-items: center; }   /* an input with its button */
+.inline-field input { flex: 1; min-width: 0; }
+
+/* Shares: a link in its last hour, or without downloads left */
+.soon { color: var(--warn); font-weight: 600; }
+.upload-progress-line { display: flex; align-items: center; gap: 0.6rem; }
+.upload-progress-line .progress { flex: 1; }
+.upload-progress-line b { min-width: 2.8rem; text-align: right; }
 
 /* Icon buttons of the studies (simplified view) and their tooltip */
 .btn.icon-btn { padding: 0.3rem; min-width: 2.1rem; justify-content: center; }

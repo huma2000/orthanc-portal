@@ -57,7 +57,7 @@ pub struct Share {
     pub id: i64,
     /// Random, unguessable part of the link (`/s/<token>`).
     pub token: String,
-    /// Argon2 hash of the generated password; the password itself is shown once, at creation.
+    /// Argon2 hash of the generated password: what the guest's password is checked against.
     #[serde(skip)]
     pub password_hash: String,
     pub created_at: i64,
@@ -77,6 +77,10 @@ pub struct Share {
     /// How many times the password was entered correctly, and the last time.
     pub access_count: i64,
     pub last_access_at: Option<i64>,
+    /// A copy of the password is kept, so the Shares list can show it again (see
+    /// [`Db::share_password`]). The copy itself is never read with the other fields.
+    #[serde(skip)]
+    pub has_password: bool,
 }
 
 impl Share {
@@ -101,11 +105,17 @@ pub struct NewShare<'a> {
     pub label: &'a str,
     pub note: &'a str,
     pub max_downloads: i64,
+    /// The password itself, kept so it can be shown again (`None` = Settings > Share links says not to).
+    pub password_copy: Option<&'a str>,
 }
+
+/// How long the kept password of an expired link is kept: it can be extended meanwhile and keep it.
+pub const EXPIRED_PASSWORD_GRACE: i64 = 30 * 86_400;
 
 const SHARE_COLUMNS: &str =
     "id, token, password_hash, created_at, expires_at, created_by, study_id, study_uid, label, \
-                             note, max_downloads, downloads_used, revoked_at, access_count, last_access_at";
+                             note, max_downloads, downloads_used, revoked_at, access_count, last_access_at, \
+                             password_copy IS NOT NULL";
 
 fn row_to_share(row: &Row) -> rusqlite::Result<Share> {
     Ok(Share {
@@ -123,6 +133,7 @@ fn row_to_share(row: &Row) -> rusqlite::Result<Share> {
         downloads_used: row.get(11)?,
         revoked_at: row.get(12)?,
         access_count: row.get(13)?,
+        has_password: row.get(15)?,
         last_access_at: row.get(14)?,
     })
 }
@@ -262,7 +273,8 @@ impl Db {
                  downloads_used INTEGER NOT NULL DEFAULT 0,
                  revoked_at     INTEGER,
                  access_count   INTEGER NOT NULL DEFAULT 0,
-                 last_access_at INTEGER
+                 last_access_at INTEGER,
+                 password_copy  TEXT                                    -- kept to show it again; erased when the link ends
              );
 
              -- Logo and website icon uploaded from the Settings screen (kind = 'logo' | 'favicon').
@@ -288,6 +300,13 @@ impl Db {
             if !exists {
                 conn.execute(&format!("ALTER TABLE transfers ADD COLUMN {column} TEXT"), [])?;
             }
+        }
+
+        // Databases created by older versions keep no copy of the share passwords.
+        let has_copy =
+            conn.prepare("SELECT 1 FROM pragma_table_info('shares') WHERE name = 'password_copy'")?.exists([])?;
+        if !has_copy {
+            conn.execute("ALTER TABLE shares ADD COLUMN password_copy TEXT", [])?;
         }
 
         // Databases created by older versions do not remember the role of each user.
@@ -581,8 +600,8 @@ impl Db {
             let conn = self.lock();
             conn.prepare_cached(
                 "INSERT INTO shares (token, password_hash, created_at, expires_at, created_by, study_id, study_uid,
-                                     label, note, max_downloads)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                                     label, note, max_downloads, password_copy)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             )?
             .execute(params![
                 new.token,
@@ -594,11 +613,74 @@ impl Db {
                 new.study_uid,
                 new.label,
                 new.note,
-                new.max_downloads
+                new.max_downloads,
+                new.password_copy
             ])?;
             conn.last_insert_rowid()
         };
         self.get_share(id)?.ok_or(AppError::NotFound)
+    }
+
+    /// The kept password of a link that still works at `now` (`None`: no copy, or the link ended).
+    pub fn share_password(&self, id: i64, now: i64) -> Result<Option<String>, AppError> {
+        let conn = self.lock();
+        let value = conn
+            .prepare_cached(
+                "SELECT password_copy FROM shares
+                 WHERE id = ?1 AND revoked_at IS NULL AND expires_at > ?2 AND password_copy IS NOT NULL",
+            )?
+            .query_row(params![id, now], |r| r.get(0))
+            .optional()?;
+        Ok(value)
+    }
+
+    /// Erases the kept passwords that are no longer needed at `now`: revoked links, and links that
+    /// expired more than [`EXPIRED_PASSWORD_GRACE`] ago (until then an expired link can be extended
+    /// and keep its password). Every kept password when `all` (showing passwords again was switched
+    /// off). Returns how many were erased.
+    pub fn forget_share_passwords(&self, now: i64, all: bool) -> Result<usize, AppError> {
+        let conn = self.lock();
+        let erased = conn
+            .prepare_cached(
+                "UPDATE shares SET password_copy = NULL
+                 WHERE password_copy IS NOT NULL AND (?1 OR revoked_at IS NOT NULL OR expires_at <= ?2)",
+            )?
+            .execute(params![all, now - EXPIRED_PASSWORD_GRACE])?;
+        Ok(erased)
+    }
+
+    /// Changes an invitation that was not revoked (Shares > Edit). `None` keeps a value:
+    /// `expires_at` (unix seconds), `downloads_left` (how many more downloads from now on) and `note`.
+    /// Returns false when the link was revoked meanwhile.
+    pub fn update_share(
+        &self,
+        id: i64,
+        expires_at: Option<i64>,
+        downloads_left: Option<i64>,
+        note: Option<&str>,
+    ) -> Result<bool, AppError> {
+        let conn = self.lock();
+        // "downloads_used + left" in SQL: a download finishing at this very moment is still counted.
+        let changed = conn
+            .prepare_cached(
+                "UPDATE shares SET expires_at = COALESCE(?2, expires_at),
+                                   max_downloads = COALESCE(downloads_used + ?3, max_downloads),
+                                   note = COALESCE(?4, note)
+                 WHERE id = ?1 AND revoked_at IS NULL",
+            )?
+            .execute(params![id, expires_at, downloads_left, note])?;
+        Ok(changed == 1)
+    }
+
+    /// Gives a link that was not revoked a new password (its hash, and the copy when passwords are kept).
+    pub fn set_share_password(&self, id: i64, hash: &str, copy: Option<&str>) -> Result<bool, AppError> {
+        let conn = self.lock();
+        let changed = conn
+            .prepare_cached(
+                "UPDATE shares SET password_hash = ?2, password_copy = ?3 WHERE id = ?1 AND revoked_at IS NULL",
+            )?
+            .execute(params![id, hash, copy])?;
+        Ok(changed == 1)
     }
 
     pub fn get_share(&self, id: i64) -> Result<Option<Share>, AppError> {
@@ -654,7 +736,9 @@ impl Db {
     pub fn revoke_share(&self, id: i64, now: i64) -> Result<bool, AppError> {
         let conn = self.lock();
         let changed = conn
-            .prepare_cached("UPDATE shares SET revoked_at = ?2 WHERE id = ?1 AND revoked_at IS NULL")?
+            .prepare_cached(
+                "UPDATE shares SET revoked_at = ?2, password_copy = NULL WHERE id = ?1 AND revoked_at IS NULL",
+            )?
             .execute(params![id, now])?;
         Ok(changed == 1)
     }

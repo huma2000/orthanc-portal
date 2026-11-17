@@ -43,6 +43,7 @@
 //! | `branding.rs`        | uploaded logo / website icon: validation + memory copy |
 //! | `sharing.rs`         | invitation links: password/token generation, guest rules |
 //! | `thumbnails.rs`      | picks the preview image of a study/series + memory cache |
+//! | `mailer.rs`          | share invitations sent by email (SMTP, Settings > Email) |
 //! | `models.rs`          | study / series / DICOM-node DTOs sent to the browser   |
 //! | `util.rs`            | validation and helper functions                        |
 //! | `state.rs`           | shared application state                               |
@@ -53,6 +54,7 @@ mod branding;
 mod config;
 mod db;
 mod error;
+mod mailer;
 mod models;
 mod orthanc;
 mod permissions;
@@ -156,6 +158,10 @@ async fn main() -> anyhow::Result<()> {
                 state.weasis_tokens.purge_expired();
                 state.share_sessions.purge_expired();
                 state.throttle.purge_old();
+                // The kept passwords of links that have expired are not needed any more.
+                if let Err(e) = state.db.forget_share_passwords(now_unix(), false) {
+                    tracing::warn!("could not erase the passwords of expired share links: {e}");
+                }
 
                 let days = state.settings.get().audit_retention_days;
                 if days > 0 {

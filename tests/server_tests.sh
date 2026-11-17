@@ -148,6 +148,7 @@ ok "...saved without the slash" "$(body $F $A /api/admin/settings | py "d['setti
 ok "the UI is told sharing is ready" "$(body $F $SH /api/me | py "d['features']['share']['configured']")" "True"
 
 echo "== creating invitation links (intranet)"
+put $A '{"share_keep_passwords":false}' > /dev/null   # passwords shown only once: only a hash is stored
 newlink L1 $SH '{}'
 ok "default validity: 48 hours" "$(echo "$L1_JSON" | py "d['hours']")" "48"
 ok "default downloads: 1" "$(echo "$L1_JSON" | py "d['max_downloads']")" "1"
@@ -164,6 +165,102 @@ data = b"".join(open(f, "rb").read() for f in glob.glob(work + "/portal.db*"))
 print("FOUND" if pw.encode() in data or pw.replace("-", "").encode() in data else "absent")
 PY
 )" "absent"
+ok "...and it cannot be shown again (409)" "$(code $F $SH POST /api/shares/$L1_ID/password)" "409"
+ok "...nor offered in the list" "$(body $F $SH /api/shares | py "[s['password_available'] for s in d if s['id']==$L1_ID][0]")" "False"
+
+echo "== showing a link's password again (Settings > Share links, on by default)"
+put $A '{"share_keep_passwords":true}' > /dev/null
+newlink K1 $SH '{}'
+ok "the creation says the password is kept" "$(echo "$K1_JSON" | py "d['password_kept']")" "True"
+ok "the list offers it, without the password itself" "$(body $F $SH /api/shares | py "[s['password_available'] for s in d if s['id']==$K1_ID][0]")" "True"
+hasnt "...the list never contains a password" "$(body $F $A /api/shares)" "$K1_PW"
+ok "its creator sees it again" "$(body $F $SH /api/shares/$K1_ID/password -X POST | py "d['password']")" "$K1_PW"
+ok "an administrator too" "$(body $F $A /api/shares/$K1_ID/password -X POST | py "d['password']")" "$K1_PW"
+ok "another person with the share permission cannot (403)" "$(code $F $SH2 POST /api/shares/$K1_ID/password)" "403"
+ok "a user without the share permission cannot (403)" "$(code $F $V POST /api/shares/$K1_ID/password)" "403"
+ok "it needs the CSRF header (403)" "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Cookie: portal_session=$SH" $F/api/shares/$K1_ID/password)" "403"
+ok "it is not on the internet listener (404)" "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "$H" -H "Cookie: portal_session=$SH" $G/api/shares/$K1_ID/password | sed 's/405/404/')" "404"
+has "every time is in the audit log" "$(body $F $A '/api/admin/audit?limit=20')" "share_password_shown"
+ok "the kept password still opens the link" "$(unlock_code $K1_TOKEN "$K1_PW")" "200"
+code $F $SH POST /api/shares/$K1_ID/revoke > /dev/null
+ok "revoked: it cannot be shown any more (409)" "$(code $F $SH POST /api/shares/$K1_ID/password)" "409"
+ok "...and the copy is erased from the database" "$(python3 -c "import sqlite3;print(sqlite3.connect('$WORK/portal.db').execute('select password_copy is null from shares where id=$K1_ID').fetchone()[0])")" "1"
+newlink K2 $SH '{}'
+OUT=$(put $A '{"share_keep_passwords":false}')
+has "switching it off erases every kept copy" "$OUT" "kept share link passwords were erased"
+ok "...and nothing can be shown (409)" "$(code $F $SH POST /api/shares/$K2_ID/password)" "409"
+put $A '{"share_keep_passwords":true}' > /dev/null
+ok "...not even when switched back on: the copy is gone (409)" "$(code $F $SH POST /api/shares/$K2_ID/password)" "409"
+NEWPW=$(body $F $SH /api/shares/$K2_ID -X PUT -H "$J" -d '{"new_password":true}' | py "d['password']")
+ok "...but the link can be given a new password, kept from then on" "$(body $F $SH /api/shares/$K2_ID/password -X POST | py "d['password']")" "$NEWPW"
+ok "the old password no longer opens it" "$(unlock_code $K2_TOKEN "$K2_PW")" "400"
+ok "the new one does" "$(unlock_code $K2_TOKEN "$NEWPW")" "200"
+
+echo "== changing a link: more time, more downloads, the note"
+newlink E1 $SH '{"hours":2,"downloads":1,"note":"first"}'
+ok "more time: 100 hours from now" "$(code $F $SH PUT /api/shares/$E1_ID -H "$J" -d '{"hours":100}')" "200"
+ok "...is saved" "$(body $F $SH /api/shares | py "[round((s['expires_at']-__import__('time').time())/3600) for s in d if s['id']==$E1_ID][0]")" "100"
+ok "more downloads: 5 left from now on" "$(code $F $SH PUT /api/shares/$E1_ID -H "$J" -d '{"downloads_left":5}')" "200"
+ok "...is saved (used + left)" "$(body $F $SH /api/shares | py "[s['max_downloads']-s['downloads_used'] for s in d if s['id']==$E1_ID][0]")" "5"
+code $F $SH PUT /api/shares/$E1_ID -H "$J" -d '{"note":"second opinion"}' > /dev/null
+ok "the note" "$(body $F $SH /api/shares | py "[s['note'] for s in d if s['id']==$E1_ID][0]")" "second opinion"
+ok "the password is unchanged by that" "$(unlock_code $E1_TOKEN "$E1_PW")" "200"
+ok "beyond the maximum validity (400)" "$(code $F $SH PUT /api/shares/$E1_ID -H "$J" -d '{"hours":721}')" "400"
+ok "beyond the maximum downloads (400)" "$(code $F $SH PUT /api/shares/$E1_ID -H "$J" -d '{"downloads_left":21}')" "400"
+ok "another person with the share permission cannot (403)" "$(code $F $SH2 PUT /api/shares/$E1_ID -H "$J" -d '{"hours":5}')" "403"
+ok "an administrator can" "$(code $F $A PUT /api/shares/$E1_ID -H "$J" -d '{"hours":5}')" "200"
+has "it is in the audit log" "$(body $F $A '/api/admin/audit?limit=10')" "share_updated"
+code $F $SH POST /api/shares/$E1_ID/revoke > /dev/null
+ok "a revoked link cannot be changed (409)" "$(code $F $SH PUT /api/shares/$E1_ID -H "$J" -d '{"hours":5}')" "409"
+ok "the time can be given in minutes (2 days 3 hours 20 minutes)" "$(mkshare $SH '{"minutes":3080}' | py "d['minutes']")" "3080"
+ok "...at least 1 minute (400)" "$(code $F $SH POST /api/studies/$SID/share -H "$J" -d '{"minutes":0}')" "400"
+ok "...at most the maximum, 30 days (400)" "$(code $F $SH POST /api/studies/$SID/share -H "$J" -d '{"minutes":43201}')" "400"
+
+echo "== sending share invitations by email (Settings > Email; tests/mock_smtp.py keeps what it receives)"
+# lastmail -> the text of the newest email the fake mail server received
+lastmail() { python3 - "$WORK/mail" <<'PY'
+import sys, glob
+from email import message_from_bytes, policy
+newest = sorted(glob.glob(sys.argv[1] + "/*.eml"))[-1]
+print(message_from_bytes(open(newest, "rb").read(), policy=policy.default).get_body(("plain",)).get_content())
+PY
+}
+ok "no mail server: the Share window is told" "$(body $F $SH /api/me | py "d['features']['share']['email']")" "False"
+ok "...and asking for an email is refused (400)" "$(code $F $SH POST /api/studies/$SID/share -H "$J" -d '{"email":{"to":"guest@example.org"}}')" "400"
+ok "a mail server needs a sender (400)" "$(put $A '{"smtp_host":"127.0.0.1"}' | tail -1)" "400"
+put $A '{"smtp_host":"127.0.0.1","smtp_port":18025,"smtp_security":"none","smtp_from":"Demo PACS <pacs@example.com>","smtp_username":"mailer","smtp_password":"MailPass123","email_footer":"1 High Street"}' > /dev/null
+ok "the mail server password is never sent back" "$(body $F $A /api/admin/settings | py "('smtp_password' in d['settings'], d['settings']['smtp_password_set'])")" "(False, True)"
+ok "now the Share window offers email" "$(body $F $SH /api/me | py "d['features']['share']['email']")" "True"
+ok "a test email (administrators)" "$(body $F $A /api/admin/email/test -X POST -H "$J" -d '{"to":"admin@example.org"}' | py "d['ok']")" "True"
+has "...arrives" "$(tail -1 $WORK/mail/mail.log)" "test email"
+ok "...not for others (403)" "$(code $F $SH POST /api/admin/email/test -H "$J" -d '{"to":"a@example.org"}')" "403"
+BEFORE=$(body $F $SH /api/shares | py "len(d)")
+ok "a bad address is refused (400)" "$(code $F $SH POST /api/studies/$SID/share -H "$J" -d '{"email":{"to":"not an address"}}')" "400"
+ok "...before anything is created" "$(body $F $SH /api/shares | py "len(d)")" "$BEFORE"
+M1=$(mkshare $SH '{"minutes":3080,"downloads":2,"email":{"to":"Dr Who <who@example.org>","message":"Second opinion please"}}')
+ok "created and emailed" "$(echo "$M1" | py "(d['email']['sent'], d['email']['to'])")" "(True, 'who@example.org')"
+MAIL=$(lastmail)
+has "the email has the link" "$MAIL" "$(echo "$M1" | py "d['url']")"
+has "...how long it works" "$MAIL" "2 days 3 hours 20 minutes"
+has "...the downloads" "$MAIL" "download it 2 times"
+has "...the message" "$MAIL" "Second opinion please"
+has "...the text of Settings > Email" "$MAIL" "1 High Street"
+hasnt "...and not the password" "$MAIL" "$(echo "$M1" | py "d['password']")"
+has "...which it says comes separately" "$MAIL" "given to you separately"
+has "the recipient is right" "$(tail -1 $WORK/mail/mail.log)" "who@example.org"
+M2=$(mkshare $SH '{"email":{"to":"a@example.org","include_password":true}}')
+M2PW=$(echo "$M2" | py "d['password']"); M2ID=$(echo "$M2" | py "d['id']")
+has "the password only when asked for" "$(lastmail)" "Password: $M2PW"
+ok "editing a link and emailing the update" "$(body $F $SH /api/shares/$M2ID -X PUT -H "$J" -d '{"minutes":90,"email":{"to":"a@example.org","include_password":true}}' | py "d['email']['sent']")" "True"
+MAIL=$(lastmail)
+has "...it says it was updated" "$MAIL" "has updated your link"
+has "...with the new time" "$MAIL" "1 hour 30 minutes"
+has "...and the kept password" "$MAIL" "Password: $M2PW"
+has "every email is in the audit log" "$(body $F $A '/api/admin/audit?limit=20')" "share_emailed"
+put $A '{"smtp_port":18026}' > /dev/null   # nothing listens there
+M3=$(mkshare $SH '{"email":{"to":"b@example.org"}}')
+ok "mail server down: the link is still created, the answer says the email was not sent" "$(echo "$M3" | py "(bool(d['url']), d['email']['sent'], bool(d['email']['error']))")" "(True, False, True)"
+put $A '{"smtp_host":""}' > /dev/null
 ok "a user without the share permission cannot create links (403)" "$(code $F $V POST /api/studies/$SID/share -H "$J" -d '{}')" "403"
 ok "a read-only user cannot either" "$(code $F $RD POST /api/studies/$SID/share -H "$J" -d '{}')" "403"
 ok "not signed in: 401" "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "$H" -H "$J" -d '{}' $F/api/studies/$SID/share)" "401"
@@ -176,7 +273,7 @@ ok "creating a link needs the CSRF header (403)" "$(curl -s -o /dev/null -w '%{h
 ok "creator sees their links" "$(body $F $SH /api/shares | py "len(d) >= 2")" "True"
 ok "another sharer does not see them" "$(body $F $SH2 /api/shares | py "len(d)")" "0"
 ok "an administrator sees everyone's" "$(body $F $A /api/shares | py "len(d) >= 2")" "True"
-ok "the list gives the link but never the password" "$(body $F $SH /api/shares | py "'password' in json.dumps(d).lower()")" "False"
+ok "the list gives the link but never the password" "$(body $F $SH /api/shares | py "any('password' in s for s in d) or any(v in json.dumps(d) for v in ('$L1_PW', '$L1_PW'.replace('-', '')))")" "False"
 ok "a status is shown for each link" "$(body $F $SH /api/shares | py "d[-1]['status']")" "active"
 has "the audit log records who shared what" "$(body $F $A '/api/admin/audit?limit=300')" "share_created"
 hasnt "...but never the password" "$(body $F $A '/api/admin/audit?limit=300')" "$L1_PW"
