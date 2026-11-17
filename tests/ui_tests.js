@@ -17,7 +17,7 @@ const STUDY_UID = "1.2.826.0.1.3680043.8.498.1";
 const SHARE_SECTION = "Share links (invitations for people outside)";
 
 /** Runs one SQL statement on the portal's database (used to move a link's expiry around). */
-const sql = (statement) => execFileSync("python3", ["-c", "import sqlite3,sys;c=sqlite3.connect(sys.argv[1],timeout=10);c.execute(sys.argv[2]);c.commit()", path.join(LOGS, "portal.db"), statement]);
+const sql = (statement) => execFileSync(process.env.PYTHON3 || "python3", ["-c", "import sqlite3,sys;c=sqlite3.connect(sys.argv[1],timeout=10);c.execute(sys.argv[2]);c.commit()", path.join(LOGS, "portal.db"), statement]);
 const nowSeconds = () => Math.floor(Date.now() / 1000);
 /** Waits (up to `ms`) until `fn()` is truthy; the pages load their data asynchronously. */
 async function until(fn, ms = 6000) {

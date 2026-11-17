@@ -754,7 +754,8 @@ The code compiles without warnings on Rust 1.91, passes `cargo clippy --all-targ
 formatted with `rustfmt` (see `rustfmt.toml`), and its dependencies were checked against the RustSec advisory
 database (no known vulnerable version in `Cargo.lock`). The automated tests live in the **`tests/`** folder:
 
-* `tests/server_tests.sh`: **336 checks** of the server against a fake Orthanc (`tests/mock_orthanc.py`):
+* `tests/server_tests.sh`: **437 checks** of the server against a fake Orthanc (`tests/mock_orthanc.py`) and a
+  fake mail server (`tests/mock_smtp.py`):
   the two doors (staff portal vs invitation links only, Cloudflare headers refused on the intranet port), creating
   links with the default and the limited validity/downloads, the password gate and its throttling, what a guest
   sees, **the confinement to the shared study** (other studies, unfiltered searches, whole DICOM files, WADO
@@ -767,8 +768,9 @@ database (no known vulnerable version in `Cargo.lock`). The automated tests live
 * `tests/ui_tests.js`: **74 checks** of both web pages in a simulated browser (jsdom): the Share dialog and the
   Shares tab, the guest page (password, study, series, countdown, downloads left, expiry, revoked, 0-download
   links, no OHIF), what each kind of staff account sees, search, the with/without-account choice in Settings;
-* `cargo test`: **17 unit tests** (image validation; password and link generation; the rules that confine a guest
-  to one study; account / no account and the wording of Orthanc refusals; the thumbnail cache; tokens and sessions).
+* `cargo test`: **25 unit tests** (image validation; password and link generation; the rules that confine a guest
+  to one study; account / no account and the wording of Orthanc refusals; the thumbnail cache; tokens and sessions;
+  the view of each role and the appearance settings; email addresses and invitation texts).
 
 **Trying it by hand: `tests/dev_env.sh`.** It builds the portal and starts it with the fake Orthanc in a demo
 mode (14 studies with preview images; every uploaded file becomes a new study), on its own ports and in its own
@@ -789,8 +791,12 @@ as for a real person outside. Every link the script makes is
 written with its password to `tests/.dev-env/guest-links.txt`. Links made in the portal itself (*Share...* on a
 study) also open locally, since the environment's public address for share links is its own invitation port.
 
-Run them all with `tests/run_all.sh` (needs `python3`, `curl`, and `npm install` once inside `tests/`; build
-first with `cargo build`; set `PORTAL_BIN=target/release/orthanc-portal` to test the release binary). The
+Run them all with `tests/run_all.sh` (needs Python 3, `curl`, and `npm install` once inside `tests/`; build
+first with `cargo build`; set `PORTAL_BIN=target/release/orthanc-portal` to test the release binary). They run
+on Linux, macOS and **Windows (Git Bash)**: there `python` is used when `python3` is not available, and the
+one check of Unix file permissions (the database is readable by its owner only) is reported as skipped, since
+Windows has no such permissions. The scripts stop only the processes they started themselves (by their process
+numbers), so they never touch a portal or an Orthanc you are running. The
 portal has **not** been run against a real Orthanc, a real OHIF
 plugin, a real Weasis or a real DICOM destination here, and the compose files were validated with
 `docker compose config` but **never started** (no Docker daemon was available), so on first use please verify:

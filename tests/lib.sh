@@ -12,12 +12,39 @@ SID=aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee
 SER=11111111-22222222-33333333-44444444-55555555
 SR=99999999-88888888-77777777-66666666-55555555
 UID_=1.2.826.0.1.3680043.8.498.1   # StudyInstanceUID of the study the fake Orthanc holds
-PASS=0; FAIL=0
+PASS=0; FAIL=0; SKIP=0
 
-# NOTE: the portal is matched by its exact process name (-x), not with -f: the project folder is
-# also called "orthanc-portal", so `pkill -f` would kill the test script itself.
-stack_stop() { pkill -f "mock_orthanc.py" 2>/dev/null; pkill -f "mock_smtp.py" 2>/dev/null; pkill -x "$(basename "$PORTAL_BIN")" 2>/dev/null; sleep 0.8; }
-mock_start() { python3 "$TESTS/mock_orthanc.py" > "$WORK/mock.out" 2>&1 & python3 "$TESTS/mock_smtp.py" 18025 "$WORK/mail" > "$WORK/smtp.out" 2>&1 & sleep 0.6; }
+# ---- Windows (Git Bash) ----------------------------------------------------------------------------
+# * "python3" may be missing or a Microsoft Store placeholder: use "python" then.
+# * Paths: Git Bash converts /c/... paths for Windows programs only when they are separate arguments,
+#   never inside a piece of code. So Python snippets below always receive paths as arguments (sys.argv).
+# * There is no pkill: the processes started here are stopped by their recorded process numbers (that
+#   is also safer everywhere: it can never stop a portal or an Orthanc that these scripts did not start).
+on_windows() { case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) return 0 ;; *) return 1 ;; esac; }
+# PYTHON3 = the real program (for processes started in the background: their number must be Python's
+# own, so they can be stopped); python3 = the same, for everything else.
+export PYTHON3=python3
+if ! command python3 -c "" 2>/dev/null; then PYTHON3=python; python3() { python "$@"; }; fi
+[ -f "$PORTAL_BIN" ] || { [ -f "$PORTAL_BIN.exe" ] && PORTAL_BIN="$PORTAL_BIN.exe"; }
+
+# Every process started here writes its number to $WORK/<name>.pid, and is stopped by that number.
+remember() { echo "$2" > "$WORK/$1.pid"; }
+# stop_pid NAME -> stops that process and waits (up to 5 s) until it is gone, so its port is free again
+stop_pid() {
+  local file="$WORK/$1.pid" pid i
+  [ -f "$file" ] || return 0
+  pid=$(cat "$file"); rm -f "$file"
+  kill "$pid" 2>/dev/null || return 0
+  for i in $(seq 1 50); do kill -0 "$pid" 2>/dev/null || return 0; sleep 0.1; done
+  kill -9 "$pid" 2>/dev/null
+}
+portal_stop() { stop_pid portal; sleep 0.3; }
+stack_stop() { stop_pid portal; stop_pid mock; stop_pid smtp; sleep 0.3; }
+mock_start() {
+  "$PYTHON3" "$TESTS/mock_orthanc.py" > "$WORK/mock.out" 2>&1 & remember mock $!
+  "$PYTHON3" "$TESTS/mock_smtp.py" 18025 "$WORK/mail" > "$WORK/smtp.out" 2>&1 & remember smtp $!
+  sleep 0.6
+}
 # mock_auth MODE  -> changes how the fake Orthanc protects itself while it runs:
 #   basic = needs the account, none = no users and we are an allowed client, deny = no users and we are NOT allowed
 mock_auth() { curl -s -X POST -d "{\"mode\":\"$1\"}" http://127.0.0.1:18042/__mock/auth > /dev/null; }
@@ -25,12 +52,15 @@ mock_auth() { curl -s -X POST -d "{\"mode\":\"$1\"}" http://127.0.0.1:18042/__mo
 portal_start() {
   env ORTHANC_URL=http://127.0.0.1:18042 ORTHANC_USERNAME=orthanc ORTHANC_PASSWORD=s3cr3tpw DATABASE_PATH="$WORK/portal.db" \
       BIND_ADDR=127.0.0.1:18080 REMOTE_BIND_ADDR=127.0.0.1:18081 ADMIN_PASSWORD=SuperSecret123 "$@" "$PORTAL_BIN" >> "$WORK/portal.log" 2>&1 &
+  remember portal $!
   sleep 2.5
 }
 stack_fresh() { stack_stop; rm -rf "$WORK"; mkdir -p "$WORK"; mock_start; portal_start "$@"; }
 
 ok()    { if [ "$2" == "$3" ]; then PASS=$((PASS+1)); echo "PASS  $1"; else FAIL=$((FAIL+1)); echo "FAIL  $1  (got: $2 | expected: $3)"; fi; }
 has()   { if echo "$2" | grep -qi -- "$3"; then PASS=$((PASS+1)); echo "PASS  $1"; else FAIL=$((FAIL+1)); echo "FAIL  $1  (missing: $3 in: ${2:0:240})"; fi; }
+# skip NAME REASON -> a check that cannot run on this system (counted apart, never as a failure)
+skip()  { SKIP=$((SKIP+1)); echo "SKIP  $1  ($2)"; }
 hasnt() { if echo "$2" | grep -qi -- "$3"; then FAIL=$((FAIL+1)); echo "FAIL  $1  (found: $3)"; else PASS=$((PASS+1)); echo "PASS  $1"; fi; }
 py()    { python3 -c "import sys,json;d=json.load(sys.stdin);print($1)"; }
 # login BASE USER PASS [extra curl args]  -> the session cookie value
@@ -52,4 +82,6 @@ unlock() { local t=$1 p=$2; shift 2; curl -s -D - -o /dev/null --max-time 15 "$@
 gcode() { local cookie=$1 method=$2 path=$3; shift 3; curl -s -o /dev/null -w "%{http_code}" --max-time 8 -X "$method" -H "Cookie: share_session=$cookie" -H "$H" "$@" "$G$path"; }
 gbody() { local cookie=$1 path=$2; shift 2; curl -s --max-time 8 -H "Cookie: share_session=$cookie" -H "$H" "$@" "$G$path"; }
 # sql "statement"  -> runs it on the portal's database (used to move a link's expiry into the past)
-sql() { python3 -c "import sqlite3,sys;c=sqlite3.connect('$WORK/portal.db', timeout=10);c.execute(sys.argv[1]);c.commit()" "$1"; }
+sql() { python3 -c "import sqlite3,sys;c=sqlite3.connect(sys.argv[2], timeout=10);c.execute(sys.argv[1]);c.commit()" "$1" "$WORK/portal.db"; }
+# sqlval "select ..." -> the first value of the first row
+sqlval() { python3 -c "import sqlite3,sys;print(sqlite3.connect(sys.argv[2], timeout=10).execute(sys.argv[1]).fetchone()[0])" "$1" "$WORK/portal.db"; }

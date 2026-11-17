@@ -156,7 +156,7 @@ ok "it expires in 48 hours from now" "$(echo "$L1_JSON" | py "172700 < d['expire
 ok "the link is <public address>/s/<48 hex characters>" "$(echo "$L1_JSON" | py "bool(__import__('re').fullmatch(r'https://pacs\.example\.com/s/[0-9a-f]{48}', d['url']))")" "True"
 ok "the password is 3 groups of 4 readable characters" "$(echo "$L1_PW" | grep -Ec '^[A-HJKMNP-Z2-9]{4}-[A-HJKMNP-Z2-9]{4}-[A-HJKMNP-Z2-9]{4}$')" "1"
 ok "no two links share a token" "$([ "$L1_TOKEN" != "$(mkshare $SH '{}' | py "d['url'].rsplit('/s/',1)[1]")" ] && echo different)" "different"
-HASH=$(python3 -c "import sqlite3;print(sqlite3.connect('$WORK/portal.db').execute('select password_hash from shares where id=$L1_ID').fetchone()[0])")
+HASH=$(sqlval "select password_hash from shares where id=$L1_ID")
 ok "the password is stored only as an Argon2 hash" "${HASH:0:9}" '$argon2id'
 ok "the plain password is nowhere in the database files" "$(python3 - "$WORK" "$L1_PW" <<'PY'
 import sys, glob
@@ -184,7 +184,7 @@ has "every time is in the audit log" "$(body $F $A '/api/admin/audit?limit=20')"
 ok "the kept password still opens the link" "$(unlock_code $K1_TOKEN "$K1_PW")" "200"
 code $F $SH POST /api/shares/$K1_ID/revoke > /dev/null
 ok "revoked: it cannot be shown any more (409)" "$(code $F $SH POST /api/shares/$K1_ID/password)" "409"
-ok "...and the copy is erased from the database" "$(python3 -c "import sqlite3;print(sqlite3.connect('$WORK/portal.db').execute('select password_copy is null from shares where id=$K1_ID').fetchone()[0])")" "1"
+ok "...and the copy is erased from the database" "$(sqlval "select password_copy is null from shares where id=$K1_ID")" "1"
 newlink K2 $SH '{}'
 OUT=$(put $A '{"share_keep_passwords":false}')
 has "switching it off erases every kept copy" "$OUT" "kept share link passwords were erased"
@@ -559,7 +559,8 @@ has "Permissions-Policy header" "$(curl -sI $F/)" "permissions-policy"
 has "the page may show the thumbnails it loads (CSP img-src allows blob:)" "$(curl -sI $F/ | grep -i content-security-policy)" "img-src 'self' data: blob:"
 has "API answers are no-store" "$(curl -sI -H "Cookie: portal_session=$A" $F/api/me)" "cache-control: no-store"
 has "HSTS only over HTTPS" "$(curl -sI -H 'X-Forwarded-Proto: https' $F/)" "strict-transport-security"
-ok "database file is private (600)" "$(stat -c %a $WORK/portal.db)" "600"
+if on_windows; then skip "database file is private (600)" "Unix file permissions do not exist on Windows; the portal sets them on Linux and macOS"
+else ok "database file is private (600)" "$(stat -c %a $WORK/portal.db)" "600"; fi
 
 echo "== Orthanc with and without an account"
 # Orthanc may be protected by users (HTTP Basic) or have NO users and only accept a list of allowed
@@ -567,7 +568,11 @@ echo "== Orthanc with and without an account"
 # explain a refusal in the words that fit that setup. The fake Orthanc switches between the setups.
 otest() { body $F $A /api/admin/orthanc/test -X POST -H "$J" -d "${1:-{\}}"; }
 sview() { body $F $A /api/admin/settings | py "$1"; }
-sent()  { python3 -c "import json;L=[json.loads(l) for l in open('$WORK/auth.log')];print(len(L)>0, sum(1 for r in L if r['authorization']), sum(1 for r in L if (r['authorization'] or '').startswith('Basic ')))"; }
+# What the fake Orthanc received since the last mark_auth: any request? how many with an Authorization
+# header? how many with Basic credentials? (The log is never emptied: on Windows a write still in
+# progress could then land past the new end of the file. Counting lines from a mark avoids that race.)
+mark_auth() { AUTH_FROM=$(wc -l < "$WORK/auth.log"); }
+sent()  { python3 -c "import json,sys;L=[json.loads(l) for l in open(sys.argv[1]).readlines()[int(sys.argv[2]):] if l.strip()];print(len(L)>0, sum(1 for r in L if r['authorization']), sum(1 for r in L if (r['authorization'] or '').startswith('Basic ')))" "$WORK/auth.log" "${AUTH_FROM:-0}"; }
 
 T=$(otest)
 has "with an account: the test says which one it used" "$(echo "$T" | py "d['message']")" "with the account 'orthanc'"
@@ -585,7 +590,7 @@ ok "Test connection: refused" "$(echo "$T" | py "d['ok']")" "False"
 has "...and advises entering the account" "$(echo "$T" | py "d['message']")" "Enter the account"
 
 # --- an Orthanc without users, which accepts this machine
-mock_auth none; : > "$WORK/auth.log"
+mock_auth none; mark_auth
 ok "Orthanc without users: the study list works" "$(code $F $V GET /api/studies)" "200"
 ok "...a study's series" "$(code $F $V GET /api/studies/$SID/series)" "200"
 ok "...a ZIP download" "$(code $F $A GET /api/studies/$SID/download)" "200"
@@ -611,10 +616,10 @@ ok "...not ok" "$(echo "$T" | py "d['ok']")" "False"
 put $A '{"orthanc_username":"orthanc","orthanc_password":"s3cr3tpw"}' > /dev/null
 T=$(otest)
 has "account configured but Orthanc still forbids: the message names the account" "$(echo "$T" | py "d['message']")" "does not allow the account 'orthanc'"
-mock_auth basic; : > "$WORK/auth.log"
+mock_auth basic; mark_auth
 ok "Orthanc with users and the right account: works" "$(code $F $V GET /api/studies)" "200"
 ok "...every request carried the account's credentials" "$(sent | awk '{print ($1=="True" && $2==$3 && $2>0) ? "yes" : "no"}')" "yes"
-mock_auth none; : > "$WORK/auth.log"
+mock_auth none; mark_auth
 ok "an account is sent even to an Orthanc that ignores it" "$(code $F $V GET /api/studies)/$(sent | awk '{print ($1=="True" && $2==$3) ? "sent" : "missing"}')" "200/sent"
 mock_auth basic
 put $A '{"orthanc_password":"wrong-password"}' > /dev/null
@@ -650,7 +655,7 @@ B=$(login $F admin2 AdminTwoPass123)
 ( curl -s -o /dev/null -w "%{http_code}" -X PUT -H "Cookie: portal_session=$A" -H "$H" -H "$J" -d '{"permissions":["read"]}' $F/api/admin/users/$ID2 > c1.out &
   curl -s -o /dev/null -w "%{http_code}" -X PUT -H "Cookie: portal_session=$B" -H "$H" -H "$J" -d '{"permissions":["read"]}' $F/api/admin/users/$ID1 > c2.out & wait )
 ok "two administrators demoting each other: exactly one succeeds" "$(printf '%s\n%s\n' "$(cat c1.out)" "$(cat c2.out)" | grep -c '^200$')" "1"
-ok "...and one active administrator always remains" "$(python3 -c "import sqlite3;print(sqlite3.connect('$WORK/portal.db').execute(\"select count(*) from users where active=1 and permissions like '%admin%'\").fetchone()[0])")" "1"
+ok "...and one active administrator always remains" "$(sqlval "select count(*) from users where active=1 and permissions like '%admin%'")" "1"
 
 echo "== first start without an account"
 # First start without any account, as the compose file of deploy/existing-orthanc does it
@@ -666,8 +671,7 @@ has "...Test connection says it is connected without an account" "$(otest | py "
 
 echo "== ports: busy ports, fallback and LISTENERS_FROM_ENV"
 # hold_port PORT -> keeps 127.0.0.1:PORT busy (as "another program" would) until killed
-hold_port() { python3 -c "import socket,time;s=socket.socket();s.bind(('127.0.0.1',$1));s.listen();time.sleep(60)" & sleep 0.5; }
-portal_stop() { pkill -x "$(basename "$PORTAL_BIN")" 2>/dev/null; sleep 0.8; }
+hold_port() { "$PYTHON3" -c "import socket,time;s=socket.socket();s.bind(('127.0.0.1',$1));s.listen();time.sleep(60)" & sleep 0.5; }
 A=$(login $F admin SuperSecret123)
 put $A '{"bind_addr":"127.0.0.1:18090"}' > /dev/null      # saved in the database
 portal_stop
@@ -693,6 +697,6 @@ has "...with a message pointing to INTRANET_PORT" "$OUT" "INTRANET_PORT"
 ok "...other settings can still be saved" "$(put $A '{"session_hours":11,"bind_addr":"127.0.0.1:18095"}' | tail -1)" "200"
 F=http://127.0.0.1:18080; G=http://127.0.0.1:18081
 
-echo; echo "RESULT: $PASS passed, $FAIL failed"
+echo; echo "RESULT: $PASS passed, $FAIL failed$([ "$SKIP" -gt 0 ] && echo ", $SKIP skipped")"
 stack_stop
 [ "$FAIL" -eq 0 ]
