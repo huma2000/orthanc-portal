@@ -123,17 +123,17 @@ Cloudflare Tunnel.
 
 ```bash
 cd deploy
-# 1. edit orthanc.json: change the password of the "portal" account under "RegisteredUsers"
 cp .env.example .env
-# 2. edit .env:
-#      ORTHANC_PORTAL_PASSWORD=<the same password as in orthanc.json>
+# edit .env:
+#      ORTHANC_PORTAL_PASSWORD=<a long random password: Orthanc and the portal both read it from here>
 #      TUNNEL_TOKEN=<Cloudflare tunnel token, see section 10>
 #      ADMIN_PASSWORD=<first portal administrator password, at least 10 characters (or empty: printed in the log)>
 docker compose up -d --build
 ```
 
 What the Orthanc is already set up with (`deploy/orthanc.json`, official `jodogne/orthanc-plugins` image):
-the account the portal uses, the **DICOMweb** plugin and the **OHIF** plugin with the `dicom-web` data source,
+the account the portal uses (its password is read from `ORTHANC_PORTAL_PASSWORD` in `.env`: there is no default
+password, and nothing to edit in `orthanc.json`), the **DICOMweb** plugin and the **OHIF** plugin with the `dicom-web` data source,
 DICOM nodes kept in its database (so the ones you add in the portal survive a restart), DICOM port `4242`
 published for your scanners (`DICOM_PORT` in `.env`; remove that line if nothing sends images by DICOM) and its web port `8042`
 **not published**: only the portal can reach it. Images and index live in the `orthanc-db` volume (**back it
@@ -615,6 +615,10 @@ Built in:
   when the link ends, and can be switched off so it is shown only once), throttled
   per link and per address, confined to one study, no whole DICOM files through the viewer address, atomic
   download counter, expiry and revocation checked on every request, own cookie separate from staff sessions.
+* **Email invitations** (optional): plain text only; recipient addresses are parsed strictly (no header injection);
+  at most 10 recipients per invitation and **30 per staff member per hour** (a stolen account cannot use the
+  practice's mail server for spam); the mail server password is write-only and is **never sent without
+  encryption** (signing in requires STARTTLS or TLS); every email is in the audit log.
 * Passwords hashed with **Argon2**; sign-in takes the same time for unknown users (no user enumeration).
 * Temporary lock after repeated failed logins, **per account and per address**: a single address that fails
   4 times more often than the per-account limit is locked too, so it cannot try thousands of different names
@@ -759,7 +763,7 @@ The code compiles without warnings on Rust 1.91, passes `cargo clippy --all-targ
 formatted with `rustfmt` (see `rustfmt.toml`), and its dependencies were checked against the RustSec advisory
 database (no known vulnerable version in `Cargo.lock`). The automated tests live in the **`tests/`** folder:
 
-* `tests/server_tests.sh`: **437 checks** of the server against a fake Orthanc (`tests/mock_orthanc.py`) and a
+* `tests/server_tests.sh`: **439 checks** of the server against a fake Orthanc (`tests/mock_orthanc.py`) and a
   fake mail server (`tests/mock_smtp.py`):
   the two doors (staff portal vs invitation links only, Cloudflare headers refused on the intranet port), creating
   links with the default and the limited validity/downloads, the password gate and its throttling, what a guest
@@ -773,9 +777,10 @@ database (no known vulnerable version in `Cargo.lock`). The automated tests live
 * `tests/ui_tests.js`: **74 checks** of both web pages in a simulated browser (jsdom): the Share dialog and the
   Shares tab, the guest page (password, study, series, countdown, downloads left, expiry, revoked, 0-download
   links, no OHIF), what each kind of staff account sees, search, the with/without-account choice in Settings;
-* `cargo test`: **25 unit tests** (image validation; password and link generation; the rules that confine a guest
+* `cargo test`: **27 unit tests** (image validation; password and link generation; the rules that confine a guest
   to one study; account / no account and the wording of Orthanc refusals; the thumbnail cache; tokens and sessions;
-  the view of each role and the appearance settings; email addresses and invitation texts).
+  the view of each role and the appearance settings; email addresses, invitation texts, the hourly email limit and
+  the rule that the mail server password never travels unencrypted).
 
 **Trying it by hand: `tests/dev_env.sh`.** It builds the portal and starts it with the fake Orthanc in a demo
 mode (14 studies with preview images; every uploaded file becomes a new study), on its own ports and in its own

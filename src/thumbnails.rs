@@ -88,10 +88,8 @@ impl ThumbnailCache {
     /// `Some(Some(t))` = remembered thumbnail.
     pub fn get(&self, key: &str) -> Option<Option<Arc<Thumb>>> {
         let mut inner = self.lock();
-        let expired = match inner.entries.get(key) {
-            None => return None,
-            Some(e) => e.stored_at.elapsed() > if e.thumb.is_some() { FOUND_TTL } else { MISSING_TTL },
-        };
+        let e = inner.entries.get(key)?;
+        let expired = e.stored_at.elapsed() > if e.thumb.is_some() { FOUND_TTL } else { MISSING_TTL };
         if expired {
             if let Some(old) = inner.entries.remove(key) {
                 inner.bytes -= old.cost;

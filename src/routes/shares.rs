@@ -66,7 +66,7 @@ struct PreparedEmail {
     include_password: bool,
 }
 
-fn prepare_email(settings: &Settings, req: Option<EmailRequest>) -> AppResult<Option<PreparedEmail>> {
+fn prepare_email(settings: &Settings, user: &str, req: Option<EmailRequest>) -> AppResult<Option<PreparedEmail>> {
     let Some(req) = req else { return Ok(None) };
     if !settings.email_configured() {
         return Err(AppError::BadRequest(
@@ -74,6 +74,8 @@ fn prepare_email(settings: &Settings, req: Option<EmailRequest>) -> AppResult<Op
         ));
     }
     let to = mailer::parse_recipients(&req.to).map_err(AppError::BadRequest)?;
+    // Counted now, before anything is created: a refused email never leaves a half-made link.
+    mailer::reserve_quota(user, to.len(), now_unix()).map_err(AppError::TooManyRequests)?;
     let message: String = req.message.trim().chars().filter(|c| *c == '\n' || !c.is_control()).take(1000).collect();
     Ok(Some(PreparedEmail { to, message, include_password: req.include_password }))
 }
@@ -173,7 +175,7 @@ pub async fn create_share(
         return Err(AppError::BadRequest(format!("A link can allow 0 to {} downloads", settings.share_max_downloads)));
     }
     let note: String = req.note.unwrap_or_default().trim().chars().filter(|c| !c.is_control()).take(120).collect();
-    let email = prepare_email(&settings, req.email)?;
+    let email = prepare_email(&settings, &user.username, req.email)?;
 
     // Reading the study checks that it exists and gives what the link will point at.
     let study = StudySummary::from_orthanc(&state.orthanc.get_json(&format!("/studies/{id}")).await?);
@@ -369,7 +371,7 @@ pub async fn update_share(
         None => None,
     };
     let note: Option<String> = req.note.map(|n| n.trim().chars().filter(|c| !c.is_control()).take(120).collect());
-    let email = prepare_email(&settings, req.email)?;
+    let email = prepare_email(&settings, &user.username, req.email)?;
     // The password can go in the email only if the portal has it: a new one, or a kept copy.
     if email.as_ref().is_some_and(|e| e.include_password)
         && !req.new_password

@@ -5,9 +5,9 @@
 #  Cloudflare Tunnel only, for an Orthanc with or without user accounts.
 #
 #  Usage (from this "deploy" folder):
-#     1. Edit orthanc.json  -> change the "portal" password (RegisteredUsers)
+#     1. (nothing to edit in orthanc.json: the password comes from .env)
 #     2. cp .env.example .env   and fill it in:
-#           ORTHANC_PORTAL_PASSWORD=<same password as in orthanc.json>
+#           ORTHANC_PORTAL_PASSWORD=<a long random password; Orthanc and the portal both use it>
 #           ADMIN_PASSWORD=<first portal administrator password, 10+ chars>
 #           TUNNEL_TOKEN=<token of your Cloudflare Tunnel>   (see README)
 #     3. docker compose up -d --build
@@ -36,6 +36,9 @@ services:
     # Pin a specific version tag in production instead of "latest".
     image: jodogne/orthanc-plugins:latest
     restart: unless-stopped
+    environment:
+      # Read by orthanc.json ("portal" account): the same value the portal uses below.
+      ORTHANC_PORTAL_PASSWORD: ${ORTHANC_PORTAL_PASSWORD:?Set ORTHANC_PORTAL_PASSWORD in the .env file}
     volumes:
       - ./orthanc.json:/etc/orthanc/orthanc.json:ro   # configuration
       - orthanc-db:/var/lib/orthanc/db                # images + index (BACK THIS UP)
@@ -58,7 +61,7 @@ services:
       # interface (sign in as admin > Settings). The saved values then win.
       ORTHANC_URL: http://orthanc:8042          # "orthanc" = service name above
       ORTHANC_USERNAME: portal                  # must match RegisteredUsers in orthanc.json
-      ORTHANC_PASSWORD: ${ORTHANC_PORTAL_PASSWORD:?Set ORTHANC_PORTAL_PASSWORD in the .env file, with the same value as the "portal" password in orthanc.json}
+      ORTHANC_PASSWORD: ${ORTHANC_PORTAL_PASSWORD:?Set ORTHANC_PORTAL_PASSWORD in the .env file}
       ADMIN_USERNAME: admin
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}       # empty = a random one is printed in the log
       # Listening ports: ALWAYS these (they are read-only in Settings > Network).
@@ -72,6 +75,15 @@ services:
       # intranet access: http://<server>:<INTRANET_PORT>
       - "${INTRANET_BIND:-0.0.0.0}:${INTRANET_PORT:-8080}:${INTRANET_PORT:-8080}"
       # The internet port is deliberately NOT published: only cloudflared (same Docker network) uses it.
+    # Hardening (as in the other compose files). The only thing the portal writes is its database in /data.
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
 
   # ---- Cloudflare Tunnel (internet access, no open inbound port) --------
   cloudflared:

@@ -228,8 +228,11 @@ PY
 ok "no mail server: the Share window is told" "$(body $F $SH /api/me | py "d['features']['share']['email']")" "False"
 ok "...and asking for an email is refused (400)" "$(code $F $SH POST /api/studies/$SID/share -H "$J" -d '{"email":{"to":"guest@example.org"}}')" "400"
 ok "a mail server needs a sender (400)" "$(put $A '{"smtp_host":"127.0.0.1"}' | tail -1)" "400"
-put $A '{"smtp_host":"127.0.0.1","smtp_port":18025,"smtp_security":"none","smtp_from":"Demo PACS <pacs@example.com>","smtp_username":"mailer","smtp_password":"MailPass123","email_footer":"1 High Street"}' > /dev/null
+ok "signing in to it without encryption is refused (400)" "$(put $A '{"smtp_host":"127.0.0.1","smtp_port":18025,"smtp_security":"none","smtp_from":"Demo PACS <pacs@example.com>","smtp_username":"mailer","smtp_password":"MailPass123"}' | tail -1)" "400"
+put $A '{"smtp_host":"127.0.0.1","smtp_port":18025,"smtp_security":"starttls","smtp_from":"Demo PACS <pacs@example.com>","smtp_username":"mailer","smtp_password":"MailPass123"}' > /dev/null
 ok "the mail server password is never sent back" "$(body $F $A /api/admin/settings | py "('smtp_password' in d['settings'], d['settings']['smtp_password_set'])")" "(False, True)"
+# The fake mail server has no encryption: from here on it is used as a relay without sign-in.
+put $A '{"smtp_security":"none","smtp_username":"","email_footer":"1 High Street"}' > /dev/null
 ok "now the Share window offers email" "$(body $F $SH /api/me | py "d['features']['share']['email']")" "True"
 ok "a test email (administrators)" "$(body $F $A /api/admin/email/test -X POST -H "$J" -d '{"to":"admin@example.org"}' | py "d['ok']")" "True"
 has "...arrives" "$(tail -1 $WORK/mail/mail.log)" "test email"
@@ -257,6 +260,7 @@ has "...it says it was updated" "$MAIL" "has updated your link"
 has "...with the new time" "$MAIL" "1 hour 30 minutes"
 has "...and the kept password" "$MAIL" "Password: $M2PW"
 has "every email is in the audit log" "$(body $F $A '/api/admin/audit?limit=20')" "share_emailed"
+ok "at most 30 invitation emails per person and per hour (429)" "$(code $F $SH POST /api/studies/$SID/share -H "$J" -d "{\"email\":{\"to\":\"$(python3 -c "print(','.join(f'p{i}@example.org' for i in range(10)))")\"}}" > /dev/null; code $F $SH POST /api/studies/$SID/share -H "$J" -d "{\"email\":{\"to\":\"$(python3 -c "print(','.join(f'q{i}@example.org' for i in range(10)))")\"}}" > /dev/null; code $F $SH POST /api/studies/$SID/share -H "$J" -d "{\"email\":{\"to\":\"$(python3 -c "print(','.join(f'r{i}@example.org' for i in range(10)))")\"}}")" "429"
 put $A '{"smtp_port":18026}' > /dev/null   # nothing listens there
 M3=$(mkshare $SH '{"email":{"to":"b@example.org"}}')
 ok "mail server down: the link is still created, the answer says the email was not sent" "$(echo "$M3" | py "(bool(d['url']), d['email']['sent'], bool(d['email']['error']))")" "(True, False, True)"

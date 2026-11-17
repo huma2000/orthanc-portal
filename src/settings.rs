@@ -685,6 +685,15 @@ impl Settings {
         if has_control(&self.smtp_username) || self.smtp_username.len() > 256 || self.smtp_password.0.len() > 256 {
             return bad("The mail server user name or password is not valid".into());
         }
+        // Signing in over an unencrypted connection would send the password in clear on the network.
+        if !self.smtp_username.is_empty() && self.smtp_security == SmtpSecurity::None {
+            return bad(
+                "Signing in to the mail server needs encryption (STARTTLS or TLS): without it the password would \
+                 travel unprotected. Choose an encryption, or leave the user name empty for a relay that needs no \
+                 sign-in"
+                    .into(),
+            );
+        }
         if self.email_footer.chars().count() > 500 || self.email_footer.chars().any(|c| c.is_control() && c != '\n') {
             return bad("The text at the end of the emails can have at most 500 characters".into());
         }
@@ -1011,6 +1020,22 @@ mod tests {
         assert_eq!(s.interface_for("administrator", &viewer), Interface::Normal, "the stored role wins");
         assert_eq!(s.interface_for("gone", &custom), Interface::Simplified, "unknown role: the default");
         assert_eq!(s.role_of("gone", &custom).map(|r| r.key.as_str()), None);
+    }
+
+    /// The mail server password never travels without encryption.
+    #[test]
+    fn mail_sign_in_needs_encryption() {
+        let base = Settings::defaults();
+        let mail = |security: &str, user: &str| {
+            base.with_patch(&json!({
+                "smtp_host": "smtp.example.com", "smtp_from": "PACS <pacs@example.com>",
+                "smtp_security": security, "smtp_username": user, "smtp_password": "secret"
+            }))
+        };
+        assert!(mail("none", "mailer").is_err(), "a password over a plain connection");
+        assert!(mail("none", "").is_ok(), "a relay without sign-in");
+        assert!(mail("starttls", "mailer").is_ok());
+        assert!(mail("tls", "mailer").is_ok());
     }
 
     /// Colours and texts of the appearance tab are checked.

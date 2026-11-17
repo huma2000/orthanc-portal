@@ -14,11 +14,13 @@
   // Allow connections from other containers. Port 8042 is NOT published by
   // docker-compose, so only the portal can reach it.
   "RemoteAccessAllowed": true,
-  // The portal logs in with this account. CHANGE THE PASSWORD, and use the same
-  // value as ORTHANC_PORTAL_PASSWORD in the .env file next to docker-compose.yml.
+  // The portal logs in with this account. Its password comes from ORTHANC_PORTAL_PASSWORD
+  // in the .env file next to docker-compose.yml (Orthanc replaces ${...} with the value of
+  // that environment variable): ONE place to set it, and no default password. If it is not
+  // set, docker compose refuses to start.
   "AuthenticationEnabled": true,
   "RegisteredUsers": {
-    "portal": "change-this-password"
+    "portal": "${ORTHANC_PORTAL_PASSWORD}"
   },
 
   // ----- DICOM protocol (scanners / modalities send images here) -----

@@ -15,10 +15,42 @@ use lettre::message::header::ContentType;
 use lettre::message::Mailbox;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{Message, SmtpTransport, Transport};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 /// At most this many recipients per invitation.
 pub const MAX_RECIPIENTS: usize = 10;
+
+/// At most this many invitation recipients per staff member and per hour. Plenty for sharing studies,
+/// but a stolen account cannot turn the practice's mail server into a source of spam or phishing.
+pub const MAX_RECIPIENTS_PER_HOUR: usize = 30;
+
+/// When each staff member sent invitation emails (unix seconds, one entry per recipient), for the
+/// last hour. In memory: a restart forgets it, which is harmless.
+fn sent_log() -> &'static Mutex<HashMap<String, Vec<i64>>> {
+    static LOG: OnceLock<Mutex<HashMap<String, Vec<i64>>>> = OnceLock::new();
+    LOG.get_or_init(Default::default)
+}
+
+/// May `user` email `recipients` more people now? If yes, they are counted at once (so two
+/// simultaneous requests cannot both slip under the limit).
+pub fn reserve_quota(user: &str, recipients: usize, now: i64) -> Result<(), String> {
+    let mut log = sent_log().lock().unwrap_or_else(|e| e.into_inner());
+    log.retain(|_, times| {
+        times.retain(|t| now - t < 3600);
+        !times.is_empty()
+    });
+    let times = log.entry(user.to_lowercase()).or_default();
+    if times.len() + recipients > MAX_RECIPIENTS_PER_HOUR {
+        return Err(format!(
+            "You can email invitations to at most {MAX_RECIPIENTS_PER_HOUR} people per hour. Try again later, or \
+             copy the link and send it yourself."
+        ));
+    }
+    times.extend(std::iter::repeat_n(now, recipients));
+    Ok(())
+}
 
 /// "a@b.org, Dr Smith <c@d.org>; e@f.org" -> the mailboxes, or a message saying what is wrong.
 pub fn parse_recipients(raw: &str) -> Result<Vec<Mailbox>, String> {
@@ -179,7 +211,18 @@ mod tests {
         assert!(parse_recipients("").is_err());
         assert!(parse_recipients("not an address").is_err());
         assert!(parse_recipients("a@b.org\r\nBcc: x@y.org").is_err(), "no header injection");
-        assert!(parse_recipients(&vec!["a@b.org"; 11].join(",")).is_err());
+        assert!(parse_recipients(&["a@b.org"; 11].join(",")).is_err());
+    }
+
+    #[test]
+    fn emails_per_hour_are_limited() {
+        let now = 1_000_000;
+        assert!(reserve_quota("quota-test", MAX_RECIPIENTS_PER_HOUR - 1, now).is_ok());
+        assert!(reserve_quota("QUOTA-TEST", 2, now).is_err(), "the same person, whatever the case");
+        assert!(reserve_quota("quota-test", 1, now + 10).is_ok(), "exactly at the limit");
+        assert!(reserve_quota("quota-test", 1, now + 20).is_err());
+        assert!(reserve_quota("someone-else", 5, now).is_ok(), "other people are not affected");
+        assert!(reserve_quota("quota-test", 1, now + 3600).is_ok(), "an hour later");
     }
 
     #[test]
