@@ -749,6 +749,14 @@ fieldset.duration legend { padding: 0; margin-bottom: 0.25rem; font-size: 0.92em
   pointer-events: none;
 }
 
+/* Help page: readable line length, topic buttons, small inline icons in the text */
+.view.help { max-width: 62rem; }
+.help-toc { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.help-section { padding: 1.1rem 1.3rem; display: grid; gap: 0.6rem; line-height: 1.55; scroll-margin-top: 1rem; }
+.help-section ul, .help-section ol { margin: 0; padding-left: 1.3rem; display: grid; gap: 0.35rem; }
+.help-icon { display: inline-flex; vertical-align: -0.2em; padding: 1px 3px; border: 1px solid var(--line-strong); border-radius: 5px; }
+.help-icon svg { width: 1.05em; height: 1.05em; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
 /* Settings > Appearance: colour pickers */
 .color-setting { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
 .color-setting input[type="color"] { width: 3.2rem; height: 2.2rem; padding: 2px; cursor: pointer; }

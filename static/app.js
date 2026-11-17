@@ -18,6 +18,7 @@
     8. Upload                       (queue, parallel XHR uploads, drag & drop)
     9. Transfers, Users (admin) and Audit log
    9a. Sharing studies with people outside (Share dialog, Shares tab)
+   9c. Help                         (instructions for the user reading them)
    9b. Settings and DICOM nodes (admin, intranet only): the whole configuration,
        including the branding (window title, website icon, logo)
    10. Start-up
@@ -234,6 +235,7 @@ const VIEWS = [
   { id: "transfers", label: "Transfers", needs: "send", wide: true, build: buildTransfersView },
   { id: "shares", label: "Shares", needs: "share", wide: true, build: buildSharesView },
   { id: "settings", label: "Settings", needs: "admin", build: buildSettingsView },
+  { id: "help", label: "Help", needs: null, build: buildHelpView },
 ];
 
 /** Opens Settings on one of its tabs (e.g. "orthanc" from the Orthanc notice). */
@@ -310,7 +312,7 @@ function renderApp() {
   }
 
   // Only the tabs this user may use.
-  const views = VIEWS.filter((v) => can(v.needs));
+  const views = VIEWS.filter((v) => !v.needs || can(v.needs));
   if (!views.some((v) => v.id === state.view)) state.view = views.length ? views[0].id : null;
   const current = views.find((v) => v.id === state.view);
 
@@ -525,6 +527,7 @@ const ICONS = {
   settings: [GEAR_PATH, { c: [12, 12, 3.2] }],
   logout: ["M13 3.5h6v17h-6", "M3.5 12h11", "M11 8.5l3.5 3.5-3.5 3.5"],
   swap: ["M4 8h14", "M15 5l3 3-3 3", "M20 16H6", "M9 13l-3 3 3 3"],
+  help: [{ c: [12, 12, 9] }, "M9.6 9.4a2.5 2.5 0 1 1 3.4 2.4c-.6.3-1 .8-1 1.5v.6", { c: [12, 16.9, 0.35] }],
   // Buttons of a study (simplified view)
   weasis: ["M3 4.5h18v11.5H3z", "M8.5 20.5h7", "M12 16v4.5"],                       // a desktop screen
   ohif: ["M3 5h18v14H3z", "M3 9h18", { c: [5.5, 7, 0.4] }, { c: [7.5, 7, 0.4] }, "M8 14.5s1.6-2.5 4-2.5 4 2.5 4 2.5-1.6 2.5-4 2.5-4-2.5-4-2.5z"], // a browser window with an eye
@@ -614,6 +617,7 @@ const SIMPLE_PAGES = [
   { id: "search", label: "Search", icon: "search", needs: "read", build: () => buildSearchView(STUDY_SEARCH) },
   { id: "shares", label: "Shares", icon: "share", needs: "share", build: buildSharesView },
   { id: "upload", label: "Uploads", icon: "upload", needs: "upload", build: buildUploadView },
+  { id: "help", label: "Help", icon: "help", needs: null, bottom: true, build: buildHelpView },
   { id: "settings", label: "Configuration", icon: "settings", needs: "admin", bottom: true, build: buildSettingsView },
 ];
 
@@ -2277,6 +2281,192 @@ function buildSharesView() {
 }
 
 /* ====================================================================
+   9c. HELP
+   Instructions for everyday users, written for people who are not administrators. The page is
+   built for the person reading it: only the parts their permissions give access to, only the
+   features switched on in this installation (Weasis, OHIF, email...), and in the words of the
+   view they use (icons in the simplified view, tabs in the normal one).
+   ==================================================================== */
+
+/** A small inline copy of an icon, to show in the text which button is meant. */
+const helpIcon = (name) => h("span", { class: "help-icon", "aria-hidden": "true" }, icon(name));
+/** A button name as it appears on screen: the icon in the simplified view, the text in the normal one. */
+const helpButton = (iconName, text) => (iconButtons() ? [helpIcon(iconName), ` (${text})`] : h("b", null, text));
+/** A bullet list: one bullet per argument (an argument may be several pieces: text, icons...); null = left out. */
+const ul = (...items) => h("ul", null, items.filter(Boolean).map((item) => h("li", null, item)));
+
+/**
+ * The sections of the Help page. `show` says whether this user sees it; `body` builds its content.
+ * Keep the wording plain: the readers are clinical and front-desk staff, not IT people.
+ */
+function helpSections() {
+  const simple = currentInterface() === "simplified";
+  const f = state.user.features;
+  const share = f.share || {};
+  const where = (simpleName, normalName) => (simple ? h("b", null, simpleName) : h("b", null, normalName));
+  return [
+    {
+      id: "around", title: "Getting around", show: true,
+      body: () => [
+        simple
+          ? h("p", null, "The column of icons on the left takes you to each part of the portal (on a phone, the icons are along the bottom of the screen). Rest the mouse on an icon to see its name. Buttons that show only an icon work the same way: rest the mouse on one to see what it does.")
+          : h("p", null, "The tabs at the top of the page take you to each part of the portal."),
+        h("p", null, "What you can use:"),
+        ul(
+          simple ? [helpIcon("home"), " ", h("b", null, "Home"), ": the latest studies and an area to upload files."] : null,
+          can("read") ? [simple ? [helpIcon("search"), " "] : null, where("Search", "Studies and Series"), ": find a study or a series."] : null,
+          can("upload") ? [simple ? [helpIcon("upload"), " "] : null, h("b", null, "Uploads"), ": add images to the archive and follow the uploads."] : null,
+          can("send") && !simple ? [h("b", null, "Transfers"), ": follow the studies you sent to another system."] : null,
+          can("share") ? [simple ? [helpIcon("share"), " "] : null, h("b", null, "Shares"), ": the links you created to show a study to someone outside."] : null,
+          [simple ? [helpIcon("help"), " "] : null, h("b", null, "Help"), ": this page."],
+        ),
+        h("p", { class: "muted" }, "You only see the parts your account gives access to. If you need something that is not here, ask your administrator."),
+      ],
+    },
+    {
+      id: "home", title: "The home page", show: simple,
+      body: () => [
+        h("p", null, `It lists the ${f.simplified && f.simplified.recent_count ? f.simplified.recent_count : ""} most recent studies, ${f.simplified && f.simplified.recent_order === "study_date" ? "the newest examination dates" : "the last ones received by the archive"} first. `,
+          helpButton("refresh", "Refresh"), " updates the list."),
+        can("read") ? h("p", null, "Each study has the same buttons as on the Search page (see below). The small arrow ▸ at the start of a row shows the series of the study.") : null,
+        can("upload") ? h("p", null, "At the bottom, drag files or a whole folder onto the upload area to add them to the archive (see Uploading images).") : null,
+      ],
+    },
+    {
+      id: "search", title: "Finding a study", show: can("read"),
+      body: () => [
+        h("p", null, "Fill in one or more boxes, then press ", h("b", null, "Search studies"), ". Leave a box empty to ignore it."),
+        ul(
+          [h("b", null, "Patient name"), ": part of the name is enough (DOE finds DOE, JOHN). A star works as a wildcard: SMI* finds every name starting with SMI."],
+          [h("b", null, "Patient ID"), " and ", h("b", null, "Study description"), ": also a part is enough."],
+          [h("b", null, "Modality"), ": click the buttons (CT, MR, US...) to show only those examinations; you can choose several. Click again to remove one. Other codes can be typed in the box next to them."],
+          [h("b", null, "Study date from / to"), ": a period; fill in only one of the two for \"since\" or \"until\"."],
+        ),
+        h("p", null, "The results show the newest studies first, 25 per page (", h("b", null, "Previous"), " / ", h("b", null, "Next"), " at the bottom). ",
+          h("b", null, "Clear filters"), " empties every box."),
+        ul(
+          "Click the small arrow ▸ at the start of a row to see the series of the study (each set of images) and how many images each has.",
+          f.thumbnails && can("visualize") ? "The small picture is a preview of the study or series: it appears after a moment." : null,
+          "Rest the mouse on a modality tag (CT, MR...) to see its full name.",
+          simple ? null : [h("b", null, "Series"), " tab: the same search, one row per series, with a ", h("b", null, "Body part"), " box (CHEST, KNEE...)."],
+        ),
+      ],
+    },
+    {
+      id: "view", title: "Looking at the images", show: can("visualize"),
+      body: () => [
+        hasOhif() || hasWeasis() ? h("p", null, "Each study has a button for each viewer:") : h("p", null, "No image viewer is switched on in this portal at the moment: ask your administrator."),
+        ul(
+          hasOhif() ? [helpButton("ohif", "OHIF"), ": opens the study in a new tab of your browser. Nothing to install; works on any computer of the practice."] : null,
+          hasWeasis() ? [helpButton("weasis", "Weasis"), ": opens the study in the Weasis program, which must be installed on your computer. The first time, your browser asks whether it may open Weasis: allow it."] : null,
+        ),
+      ],
+    },
+    {
+      id: "download", title: "Downloading a study", show: can("download"),
+      body: () => [
+        h("p", null, helpButton("download", "Download"), " (on a study, or on one series) offers two kinds of ZIP file:"),
+        ul(
+          [h("b", null, "ZIP"), ": the image files in folders. Choose this one in most cases."],
+          [h("b", null, "ZIP with DICOMDIR"), ": the same with an index, like the CD or DVD of a scanner; some programs need it."],
+        ),
+        h("p", null, "Large studies take a while: your browser shows the download as it goes."),
+        h("p", { class: "muted" }, "Downloaded files contain patient data: keep them in a safe place and delete them when you no longer need them."),
+      ],
+    },
+    {
+      id: "send", title: "Sending a study to another system", show: can("send"),
+      body: () => [
+        h("p", null, helpButton("send", "Send to..."), " sends a whole study to another DICOM system the practice works with (a workstation, another archive...). Choose the destination in the list and confirm."),
+        h("p", null, "The transfer continues on its own, even if you leave the page. ",
+          simple
+            ? (f.interface_switch ? "To follow it, switch to the normal view (see Switching view) and open the Transfers tab." : "Your administrator can tell you whether it arrived.")
+            : ["Follow it in the ", h("b", null, "Transfers"), " tab: it shows when it is finished, or why it failed."]),
+      ],
+    },
+    {
+      id: "share", title: "Sharing a study with someone outside", show: can("share"),
+      body: () => (!share.configured
+        ? [h("p", null, "Sharing is not set up in this portal yet: ask your administrator.")]
+        : [
+          h("p", null, "You can let a person outside the practice (a referring vet or doctor, a specialist, an owner or patient) look at ONE study, without giving them an account. They get a link and a password; with them they can see the study in their browser and, if you allow it, download it."),
+          h("p", null, h("b", null, "To share a study:")),
+          h("ol", null,
+            h("li", null, "Find the study and press ", helpButton("share", "Share..."), "."),
+            h("li", null, `Choose how long the link works (in days, hours and minutes, at most ${durationWords((share.max_hours || 0) * 60)}) and how many times the study may be downloaded (0 = online viewing only). Add a note for yourself if you like (for example "Dr. Smith, second opinion"): the person does not see it.`),
+            share.email ? h("li", null, "If you want, tick ", h("b", null, "Send the invitation by email"), " and type their email address and a message.") : null,
+            h("li", null, "Press ", h("b", null, "Create link and password"), ". Copy the link and the password with the copy buttons.")),
+          h("p", null, h("b", null, "Give the password by a different way than the link"), ": for example, email the link and say the password on the phone or send it by text message. ",
+            share.email ? "The email invitation leaves the password out unless you tick \"Include the password in the email\"." : null),
+          h("p", null, "The person can look at the study until the link expires, even when the downloads are used up."),
+          h("p", null, h("b", null, "The Shares page"), " lists your links: the time left, the downloads left, when it was opened, and its state (active, expired, revoked). On each link:"),
+          ul(
+            [helpButton("link", "Copy link"), ": copies the link again."],
+            [helpButton("key", "Password"), ": shows the password again, if your administrator allows it (only while the link works; it is recorded)."],
+            [helpButton("edit", "Edit..."), ": gives the link more time (this also brings back an expired link), more downloads, a new note or a new password", share.email ? ", and can email the update." : "."],
+            [helpButton("revoke", "Revoke"), ": stops the link at once, for example if it was sent to the wrong person. This cannot be undone: create a new link if needed."],
+          ),
+        ]),
+    },
+    {
+      id: "upload", title: "Uploading images", show: can("upload"),
+      body: () => [
+        h("p", null, "To add images to the archive (from a CD, a USB stick, another program...):"),
+        ul(
+          [simple ? "Drag the files, or a whole folder, onto the upload area of the Home page or of " : "Drag the files, or a whole folder, onto the upload area of ", h("b", null, "Uploads"), "."],
+          ["Or press ", h("b", null, "Choose files"), " / ", h("b", null, "Choose folder"), " to pick them on your computer."],
+        ),
+        h("p", null, "DICOM image files and ZIP archives are accepted. Images that are already in the archive are not copied twice (they are counted as \"already stored\")."),
+        h("p", null, "The ", h("b", null, "Uploads"), " page shows each upload with its progress, speed and time left, then how many images were new, already stored or failed. ",
+          simple ? "While images are being sent, the Uploads icon shows the percentage, so you can do something else in the meantime." : "While images are being sent, the Uploads tab shows the percentage, so you can do something else in the meantime."),
+        h("p", { class: "muted" }, "Do not close or reload the page while an upload is running: it would stop. When it is finished, the new studies appear in the search and on the home page."),
+      ],
+    },
+    {
+      id: "switch", title: "Switching view", show: !!f.interface_switch,
+      body: () => [
+        h("p", null, "The portal has two looks: the simplified view (icons on the left, recent studies on the home page) and the normal view (tabs at the top, more tools). ",
+          simple ? [helpButton("swap", "Normal view"), " switches to the normal view."] : ["The ", h("b", null, "Simplified view"), " button at the top right switches to the simplified view."],
+          " Your choice is remembered on this computer."),
+      ],
+    },
+    {
+      id: "session", title: "Signing out and good habits", show: true,
+      body: () => [
+        ul(
+          [simple ? [helpButton("logout", "Log out")] : h("b", null, "Sign out"), " when you leave a shared computer: the portal shows patient data."],
+          "After a while without signing in again, the portal asks for your password again. This is normal.",
+          "After several wrong passwords in a row, the account is blocked for a few minutes: wait, then try again (or ask your administrator).",
+          "Never give your password to anyone, including colleagues: ask your administrator to create an account for them.",
+        ),
+      ],
+    },
+    {
+      id: "more", title: "Need more help?", show: true,
+      body: () => [
+        h("p", null, "Ask your administrator. They can give your account access to more parts of the portal, set up email or sharing, and help when a study cannot be found."),
+        can("admin") ? h("p", { class: "muted" }, "As an administrator you also have Configuration (Settings), which is not described here: see the portal's README for setting it up.") : null,
+      ],
+    },
+  ].filter((section) => section.show);
+}
+
+/** The Help page: a list of the sections this user sees, then the sections themselves. */
+function buildHelpView() {
+  const sections = helpSections();
+  const blocks = sections.map((s) => h("section", { class: "panel help-section", id: `help-${s.id}` }, h("h2", null, s.title), s.body()));
+  const toc = h("nav", { class: "help-toc", "aria-label": "Help topics" },
+    sections.map((s) => h("button", {
+      type: "button", class: "btn small",
+      onclick: () => document.getElementById(`help-${s.id}`).scrollIntoView({ behavior: "smooth", block: "start" }),
+    }, s.title)));
+  return h("div", { class: "view help" },
+    h("div", { class: "page-head" }, h("h1", null, "Help")),
+    h("p", { class: "muted" }, `How to use ${state.brand.name}. This page describes what your account can do.`),
+    toc, blocks);
+}
+
+/* ====================================================================
    9b. SETTINGS AND DICOM NODES
    Only administrators on the intranet see these tabs: the server does not even
    register their routes on the internet-facing port.
@@ -2848,7 +3038,7 @@ function buildSettingsView() {
       section("viewers", "Viewers and uploads", null, SETTINGS_FIELDS.viewers.map(field)),
       section("theme", "Colours", "Match the portal to your practice's colours. Changes are previewed on this page at once and kept when you save. The logo, the portal name and the window title are in the General tab.",
         themeFields),
-      section("simplified", "Simplified view", "A reduced layout for staff who mostly look at recent studies and upload new ones: the logo, the practice name and the total of studies at the top, a column of icons (Home, Search, Shares, Uploads, Configuration, Log out) on the left, and a home page with the most recent studies and an area to drop files into. Choose which roles use it in Security & roles > Roles.",
+      section("simplified", "Simplified view", "A reduced layout for staff who mostly look at recent studies and upload new ones: the logo, the practice name and the total of studies at the top, a column of icons (Home, Search, Shares, Uploads, Help, Configuration, Log out) on the left, and a home page with the most recent studies and an area to drop files into. Choose which roles use it in Security & roles > Roles.",
         SETTINGS_FIELDS.simplified.map(field)),
       section("orthanc", "Orthanc connection", "The PACS this portal works with. Saved changes apply immediately, without restarting.",
         urlField, modeField, userField, passwordField,

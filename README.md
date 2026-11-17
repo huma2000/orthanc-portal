@@ -270,7 +270,7 @@ the **simplified view**:
 
 * The **header** shows the logo and the portal name (*General > Branding*) and the **total number of studies**
   in Orthanc.
-* The **column of icons** leads to **Home**, **Search**, **Shares**, **Uploads**, **Configuration** (administrators)
+* The **column of icons** leads to **Home**, **Search**, **Shares**, **Uploads**, **Help**, **Configuration** (administrators)
   and **Log out**. Each icon names itself when the mouse rests on it (or always, under the icon, if you tick
   *Write the name under each icon*). An icon is shown only to users with the matching permission. On a phone
   the column becomes a bar at the bottom of the screen.
@@ -280,6 +280,11 @@ the **simplified view**:
   and whether "recent" means *last received by the PACS* or *newest study date*, are settings. Below them, files
   and whole folders can be **dropped** to upload them; the list and the total refresh when the upload ends.
 * Search, Shares, Uploads and Configuration are the same pages as in the normal view.
+* **Help** (also a tab in the normal view) explains how to use the portal, in plain words for staff who are not
+  administrators. It is written for the person reading it: only the parts their account can use (no word about
+  uploading for someone who cannot upload), only the features switched on (Weasis, OHIF, thumbnails, email
+  invitations...), with the limits of this installation (longest link, number of recent studies), and in the words
+  of their view (the icons, drawn in the text, in the simplified view; the tabs in the normal one).
 * **Uploads** lists every upload of the browser session (newest first) with a progress bar, speed, time left,
   files done, new / already stored / failed and the studies touched. While files are being sent, the Uploads
   icon (and the Uploads tab of the normal view) shows the percentage, so the upload can be followed from any page.

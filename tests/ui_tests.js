@@ -95,7 +95,7 @@ async function newLink(admin, body) {
   const admin = await makeDom(STAFF);
   await admin.login("admin", "SuperSecret123");
   await sleep(1200);
-  check("all tabs are there, including Shares", admin.tabs().join() === "Studies,Series,Uploads,Transfers,Shares,Settings", admin.tabs().join());
+  check("all tabs are there, including Shares", admin.tabs().join() === "Studies,Series,Uploads,Transfers,Shares,Settings,Help", admin.tabs().join());
 
   console.log("--- Settings is organised in tabs (users, DICOM nodes and the audit log live there)");
   await admin.tab("Settings");
@@ -375,7 +375,7 @@ async function newLink(admin, body) {
   const sharer = await makeDom(STAFF);
   await sharer.login("sharer", "SharerPass123");
   await sleep(1200);
-  check("sharer: Studies, Series and Shares only", sharer.tabs().join() === "Studies,Series,Shares", sharer.tabs().join());
+  check("sharer: Studies, Series and Shares only", sharer.tabs().join() === "Studies,Series,Shares,Help", sharer.tabs().join());
   const srow = sharer.$("tr.study");
   check("sharer: Share... and the viewers, but no Send or Download", /Share\.\.\./.test(srow.textContent) && /Weasis/.test(srow.textContent) && /OHIF/.test(srow.textContent) && !/Send to/.test(srow.textContent) && !/Download/.test(srow.textContent), srow.textContent);
   await sharer.tab("Shares");
@@ -384,7 +384,7 @@ async function newLink(admin, body) {
   const viewer = await makeDom(STAFF);
   await viewer.login("viewer1", "ViewerPass123");
   await sleep(1200);
-  check("viewer: Studies and Series, no Share button, no Shares tab", viewer.tabs().join() === "Studies,Series" && !/Share\.\.\./.test(viewer.$("tr.study").textContent));
+  check("viewer: Studies and Series, no Share button, no Shares tab", viewer.tabs().join() === "Studies,Series,Help" && !/Share\.\.\./.test(viewer.$("tr.study").textContent));
   await admin.call("POST", "/api/admin/users", { username: "reader", password: "ReaderPass123", permissions: ["read"] });
   const reader = await makeDom(STAFF);
   await reader.login("reader", "ReaderPass123");
