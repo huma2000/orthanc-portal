@@ -6,6 +6,7 @@
 //! * `GET /api/studies?patient_name=&patient_id=&accession_number=&description=&modality=&date_from=&date_to=&limit=&offset=`
 //! * `GET /api/studies/{id}/series`   series of one study
 //! * `GET /api/series?...`            search directly at series level
+//! * `GET /api/stats`                 number of studies in the PACS
 //!
 //! Searching is delegated to Orthanc's `POST /tools/find` (recent "extended find"
 //! API). The `Query` object uses DICOM matching rules: `*` / `?` wildcards, date
@@ -42,6 +43,9 @@ pub struct SearchParams {
     /// Study date range, `YYYY-MM-DD` (either side may be omitted).
     pub date_from: Option<String>,
     pub date_to: Option<String>,
+    /// Studies only: `received` = most recently received by Orthanc first (the home page of
+    /// the simplified view); anything else = newest study date first.
+    pub order: Option<String>,
     /// Page size (1-100, default 25) and number of results to skip.
     pub limit: Option<usize>,
     pub offset: Option<usize>,
@@ -137,17 +141,23 @@ pub async fn search_studies(
         query.insert("StudyDate".into(), json!(range));
     }
 
+    // Newest studies first. The database sorts, so paging stays consistent.
+    let order = if p.order.as_deref() == Some("received") {
+        // "LastUpdate" is the metadata Orthanc updates whenever an instance of the study arrives.
+        json!([{ "Type": "Metadata", "Key": "LastUpdate", "Direction": "DESC" }])
+    } else {
+        json!([
+            { "Type": "DicomTag", "Key": "StudyDate", "Direction": "DESC" },
+            { "Type": "DicomTag", "Key": "StudyTime", "Direction": "DESC" }
+        ])
+    };
     let body = json!({
         "Level": "Study",
         "Query": query,
         "Expand": true,
         // Computed tags that are not part of the expanded study itself.
         "RequestedTags": ["ModalitiesInStudy", "NumberOfStudyRelatedInstances", "NumberOfStudyRelatedSeries"],
-        // Newest studies first. The database sorts, so paging stays consistent.
-        "OrderBy": [
-            { "Type": "DicomTag", "Key": "StudyDate", "Direction": "DESC" },
-            { "Type": "DicomTag", "Key": "StudyTime", "Direction": "DESC" }
-        ],
+        "OrderBy": order,
         "Limit": limit + 1, // ask for one extra row to know whether another page exists
         "Since": offset,
     });
@@ -158,6 +168,13 @@ pub async fn search_studies(
 
     let items = found.iter().map(StudySummary::from_orthanc).collect();
     Ok(Json(Page { items, has_more, offset, limit }))
+}
+
+/// `GET /api/stats`: how many studies the PACS holds (header of the simplified view).
+pub async fn statistics(State(state): State<AppState>, AuthUser(user): AuthUser) -> AppResult<Json<Value>> {
+    user.require(Permission::Read)?;
+    let stats = state.orthanc.get_json("/statistics").await?;
+    Ok(Json(json!({ "studies": stats["CountStudies"].as_u64() })))
 }
 
 /// Series of one study, ordered by series number.

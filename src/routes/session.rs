@@ -10,7 +10,8 @@
 use crate::auth::{self, AuthUser, SESSION_COOKIE};
 use crate::db::User;
 use crate::error::{AppError, AppResult};
-use crate::settings::ModalityButton;
+use crate::permissions::Permission;
+use crate::settings::{CardSize, Interface, ModalityButton, RecentLayout, RecentOrder};
 use crate::state::AppState;
 use axum::{
     extract::{ConnectInfo, State},
@@ -33,6 +34,19 @@ pub struct ShareFeature {
     max_downloads: u64,
 }
 
+/// Options of the simplified view (Settings > Appearance).
+#[derive(Serialize)]
+pub struct SimplifiedFeature {
+    recent_count: u64,
+    recent_order: RecentOrder,
+    recent_layout: RecentLayout,
+    card_size: CardSize,
+    show_total: bool,
+    show_labels: bool,
+    recent_title: String,
+    upload_text: String,
+}
+
 /// Optional capabilities of the installation, shown or hidden by the UI.
 #[derive(Serialize)]
 pub struct Features {
@@ -46,6 +60,12 @@ pub struct Features {
     modality_buttons: Vec<ModalityButton>,
     /// Sharing with people outside (invitation links).
     share: ShareFeature,
+    /// The view this user gets: decided by their role (Settings > Appearance).
+    interface: Interface,
+    /// The user may switch between the two views: the `switch_view` permission, while the
+    /// simplified view is switched on (their choice is kept in their browser).
+    interface_switch: bool,
+    simplified: SimplifiedFeature,
 }
 
 /// Answer of `/api/login` and `/api/me`: the user fields (id, username,
@@ -67,6 +87,18 @@ async fn me_response(state: &AppState, user: User) -> Me {
         default_downloads: settings.share_default_downloads,
         max_downloads: settings.share_max_downloads,
     };
+    let interface = settings.interface_for(&user.role, &user.permissions);
+    let interface_switch = settings.simplified_enabled && user.permissions.contains(Permission::SwitchView);
+    let simplified = SimplifiedFeature {
+        recent_count: settings.simplified_recent_count,
+        recent_order: settings.simplified_recent_order,
+        recent_layout: settings.simplified_recent_layout,
+        card_size: settings.simplified_card_size,
+        show_total: settings.simplified_show_total,
+        show_labels: settings.simplified_show_labels,
+        recent_title: settings.simplified_recent_title.clone(),
+        upload_text: settings.simplified_upload_text.clone(),
+    };
     Me {
         user,
         features: Features {
@@ -75,6 +107,10 @@ async fn me_response(state: &AppState, user: User) -> Me {
             thumbnails: settings.thumbnails_enabled,
             modality_buttons: settings.visible_modality_buttons(),
             share,
+            interface,
+            // Only meaningful while the simplified view is switched on.
+            interface_switch,
+            simplified,
         },
     }
 }

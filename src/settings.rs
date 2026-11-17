@@ -68,6 +68,61 @@ impl fmt::Debug for Secret {
     }
 }
 
+/// The two looks of the staff portal.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Interface {
+    /// The full portal: top bar with tabs, search tables, every tool.
+    #[default]
+    Normal,
+    /// A reduced, icon-driven layout: header, icon column, home page with the recent
+    /// studies and a drop zone (Settings > Appearance).
+    Simplified,
+}
+
+/// Light / dark colours of the portal.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeMode {
+    /// Follow the operating system's preference.
+    #[default]
+    Auto,
+    Light,
+    Dark,
+}
+
+/// Size of the study cards on the home page of the simplified view.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CardSize {
+    Small,
+    #[default]
+    Medium,
+    Large,
+}
+
+/// How the recent studies of the simplified view's home page are shown.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RecentLayout {
+    /// The same table as the Studies page: same columns, same buttons.
+    #[default]
+    Table,
+    /// A grid of cards with a big preview; a click opens the study's details.
+    Cards,
+}
+
+/// Which studies count as "recent" on the home page of the simplified view.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecentOrder {
+    /// Newest study date first (when the examination was done).
+    StudyDate,
+    /// Most recently received by Orthanc first (uploads, modalities sending in).
+    #[default]
+    Received,
+}
+
 /// A named bundle of permissions, offered as a shortcut when editing a user.
 /// The list of roles is itself a setting: administrators can add, change and remove them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +132,9 @@ pub struct Role {
     /// Name shown in the user form.
     pub label: String,
     pub permissions: Vec<Permission>,
+    /// The look users of this role get when the simplified view is switched on.
+    #[serde(default)]
+    pub interface: Interface,
 }
 
 /// Value of a switch missing from an older stored copy of the settings.
@@ -127,6 +185,7 @@ pub fn default_roles() -> Vec<Role> {
         key: key.into(),
         label: label.into(),
         permissions: permissions.to_vec(),
+        interface: Interface::Normal,
     };
     vec![
         role("viewer", "Viewer (search + view)", &[Permission::Read, Permission::Visualize]),
@@ -236,6 +295,66 @@ pub struct Settings {
 
     // ---- Roles ------------------------------------------------------------------
     pub roles: Vec<Role>,
+
+    // ---- Appearance: colours (both views, the login page and the invitation page) ----
+    #[serde(default)]
+    pub theme_mode: ThemeMode,
+    /// `#rrggbb`, or empty for the built-in colour.
+    #[serde(default)]
+    pub color_accent: String,
+    /// Top bar / header.
+    #[serde(default)]
+    pub color_header: String,
+    /// Icon column of the simplified view.
+    #[serde(default)]
+    pub color_sidebar: String,
+    /// Page background.
+    #[serde(default)]
+    pub color_background: String,
+
+    // ---- Appearance: the simplified view ------------------------------------------
+    /// Master switch. Off = everybody gets the normal view, whatever their role says.
+    #[serde(default)]
+    pub simplified_enabled: bool,
+    /// The view of users whose role is unknown (custom permissions, or a deleted role).
+    #[serde(default)]
+    pub default_interface: Interface,
+    /// Number of studies in the "recent studies" grid of the home page.
+    #[serde(default = "default_recent_count")]
+    pub simplified_recent_count: u64,
+    #[serde(default)]
+    pub simplified_recent_order: RecentOrder,
+    #[serde(default)]
+    pub simplified_recent_layout: RecentLayout,
+    #[serde(default)]
+    pub simplified_card_size: CardSize,
+    /// Show "Total studies: N" in the header.
+    #[serde(default = "default_true")]
+    pub simplified_show_total: bool,
+    /// Show the name under each icon of the column (otherwise only when hovering).
+    #[serde(default)]
+    pub simplified_show_labels: bool,
+    /// Titles of the two areas of the home page.
+    #[serde(default = "default_recent_title")]
+    pub simplified_recent_title: String,
+    #[serde(default = "default_upload_text")]
+    pub simplified_upload_text: String,
+}
+
+fn default_recent_count() -> u64 {
+    12
+}
+fn default_recent_title() -> String {
+    "Recent studies".into()
+}
+fn default_upload_text() -> String {
+    "Drag a file to upload it".into()
+}
+
+/// `#rrggbb` (or empty = the built-in colour).
+fn valid_color(value: &str) -> bool {
+    value.is_empty()
+        || (value.len() == 7 && value.starts_with('#') && value[1..].chars().all(|c| c.is_ascii_hexdigit()))
 }
 
 impl Settings {
@@ -271,6 +390,21 @@ impl Settings {
             thumbnails_enabled: true,
             thumbnail_cache_mb: 64,
             roles: default_roles(),
+            theme_mode: ThemeMode::Auto,
+            color_accent: String::new(),
+            color_header: String::new(),
+            color_sidebar: String::new(),
+            color_background: String::new(),
+            simplified_enabled: false,
+            default_interface: Interface::Normal,
+            simplified_recent_count: default_recent_count(),
+            simplified_recent_order: RecentOrder::Received,
+            simplified_recent_layout: RecentLayout::Table,
+            simplified_card_size: CardSize::Medium,
+            simplified_show_total: true,
+            simplified_show_labels: false,
+            simplified_recent_title: default_recent_title(),
+            simplified_upload_text: default_upload_text(),
         }
     }
 
@@ -398,6 +532,13 @@ impl Settings {
             }
             button.codes = codes;
         }
+        for color in
+            [&mut self.color_accent, &mut self.color_header, &mut self.color_sidebar, &mut self.color_background]
+        {
+            *color = color.trim().to_lowercase();
+        }
+        self.simplified_recent_title = self.simplified_recent_title.trim().to_string();
+        self.simplified_upload_text = self.simplified_upload_text.trim().to_string();
         for role in &mut self.roles {
             role.key = role.key.trim().to_string();
             role.label = role.label.trim().to_string();
@@ -556,6 +697,25 @@ impl Settings {
             }
             PermissionSet::from_slice(&role.permissions).validate()?;
         }
+
+        // --- appearance
+        for (name, color) in [
+            ("accent", &self.color_accent),
+            ("header", &self.color_header),
+            ("icon column", &self.color_sidebar),
+            ("background", &self.color_background),
+        ] {
+            if !valid_color(color) {
+                return bad(format!("The {name} colour must look like #1a2b3c (or be empty for the default)"));
+            }
+        }
+        range("Recent studies on the home page", self.simplified_recent_count, 1, 100)?;
+        if self.simplified_recent_title.chars().count() > 60 || has_control(&self.simplified_recent_title) {
+            return bad("The title of the recent studies can have at most 60 characters".into());
+        }
+        if self.simplified_upload_text.chars().count() > 120 || has_control(&self.simplified_upload_text) {
+            return bad("The text of the upload area can have at most 120 characters".into());
+        }
         Ok(())
     }
 
@@ -639,6 +799,36 @@ impl Settings {
     pub fn thumbnail_cache_bytes(&self) -> usize {
         (self.thumbnail_cache_mb as usize).saturating_mul(1024 * 1024)
     }
+    /// The role of a user: the one stored with the account when it still exists, otherwise
+    /// (accounts made before roles were remembered, or a deleted role) the first role whose
+    /// permissions are exactly the user's. `None` = custom permissions.
+    pub fn role_of(&self, stored: &str, permissions: &PermissionSet) -> Option<&Role> {
+        self.roles
+            .iter()
+            .find(|r| !stored.is_empty() && r.key == stored)
+            .or_else(|| self.roles.iter().find(|r| &PermissionSet::from_slice(&r.permissions) == permissions))
+    }
+
+    /// The view a user gets: always the normal one while the simplified view is switched
+    /// off, otherwise the one of their role (or the default one without a role).
+    pub fn interface_for(&self, stored_role: &str, permissions: &PermissionSet) -> Interface {
+        if !self.simplified_enabled {
+            return Interface::Normal;
+        }
+        self.role_of(stored_role, permissions).map(|r| r.interface).unwrap_or(self.default_interface)
+    }
+
+    /// The colours, as sent to every page (login and invitation pages included).
+    pub fn theme(&self) -> Value {
+        json!({
+            "mode": self.theme_mode,
+            "accent": self.color_accent,
+            "header": self.color_header,
+            "sidebar": self.color_sidebar,
+            "background": self.color_background,
+        })
+    }
+
     /// The modality buttons offered on the search pages, in order (hidden ones left out).
     pub fn visible_modality_buttons(&self) -> Vec<ModalityButton> {
         self.modality_buttons.iter().filter(|b| b.visible).cloned().collect()
@@ -698,5 +888,43 @@ mod tests {
         assert!(refused(json!([{ "label": "", "codes": ["CT"] }])), "no label");
         // Every button may be hidden: the "Other codes" box is always there.
         assert!(!refused(json!([{ "label": "CT", "codes": ["CT"], "visible": false }])));
+    }
+
+    /// The view follows the master switch, then the role, then the default.
+    #[test]
+    fn the_interface_follows_the_role() {
+        let viewer = PermissionSet::from_slice(&[Permission::Read, Permission::Visualize]);
+        let custom = PermissionSet::from_slice(&[Permission::Read, Permission::Upload, Permission::Send]);
+        let mut roles = default_roles();
+        roles[0].interface = Interface::Simplified; // viewer
+        let s = Settings::defaults().with_patch(&json!({ "roles": roles })).unwrap();
+        assert_eq!(s.interface_for("viewer", &viewer), Interface::Normal, "switched off: everybody normal");
+
+        let s = s.with_patch(&json!({ "simplified_enabled": true, "default_interface": "simplified" })).unwrap();
+        assert_eq!(s.interface_for("viewer", &viewer), Interface::Simplified);
+        assert_eq!(s.interface_for("", &viewer), Interface::Simplified, "no stored role: found by its permissions");
+        assert_eq!(s.interface_for("administrator", &viewer), Interface::Normal, "the stored role wins");
+        assert_eq!(s.interface_for("gone", &custom), Interface::Simplified, "unknown role: the default");
+        assert_eq!(s.role_of("gone", &custom).map(|r| r.key.as_str()), None);
+    }
+
+    /// Colours and texts of the appearance tab are checked.
+    #[test]
+    fn appearance_values_are_checked() {
+        let base = Settings::defaults();
+        let ok = |patch: Value| base.with_patch(&patch).is_ok();
+        assert!(ok(json!({ "color_accent": " #1A2B3C ", "color_header": "" })));
+        assert_eq!(base.with_patch(&json!({ "color_accent": "#1A2B3C" })).unwrap().color_accent, "#1a2b3c");
+        assert!(!ok(json!({ "color_accent": "red" })));
+        assert!(!ok(json!({ "color_header": "#12345" })));
+        assert!(!ok(json!({ "color_background": "url(x)" })));
+        assert!(!ok(json!({ "simplified_recent_count": 0 })));
+        assert!(!ok(json!({ "simplified_recent_count": 101 })));
+        assert!(!ok(json!({ "theme_mode": "neon" })));
+        assert!(!ok(json!({ "simplified_recent_layout": "list" })));
+        assert!(ok(json!({ "simplified_recent_order": "study_date" })));
+        assert!(ok(
+            json!({ "theme_mode": "dark", "simplified_card_size": "large", "simplified_recent_layout": "cards" })
+        ));
     }
 }

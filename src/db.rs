@@ -29,6 +29,10 @@ pub struct User {
     #[serde(skip)]
     pub password_hash: String,
     pub permissions: PermissionSet,
+    /// Key of the role chosen for this account in the user form ("" = custom permissions).
+    /// Roles are shortcuts: the permissions above are what counts for access; the role
+    /// decides which view (normal or simplified) the user gets (Settings > Appearance).
+    pub role: String,
     /// Disabled accounts cannot log in and their sessions stop working immediately.
     pub active: bool,
     pub created_at: i64,
@@ -172,7 +176,7 @@ pub struct Db {
 }
 
 /// Columns read for a user, always in this order (see [`row_to_user`]).
-const USER_COLUMNS: &str = "id, username, password_hash, permissions, active, created_at, last_login";
+const USER_COLUMNS: &str = "id, username, password_hash, permissions, active, created_at, last_login, role";
 
 /// Converts one SQL row into a [`User`].
 fn row_to_user(row: &Row) -> rusqlite::Result<User> {
@@ -184,6 +188,7 @@ fn row_to_user(row: &Row) -> rusqlite::Result<User> {
         active: row.get::<_, i64>(4)? != 0,
         created_at: row.get(5)?,
         last_login: row.get(6)?,
+        role: row.get(7)?,
     })
 }
 
@@ -216,7 +221,8 @@ impl Db {
                  permissions   TEXT    NOT NULL,                       -- e.g. 'read,visualize'
                  active        INTEGER NOT NULL DEFAULT 1,
                  created_at    INTEGER NOT NULL,                       -- unix seconds
-                 last_login    INTEGER
+                 last_login    INTEGER,
+                 role          TEXT    NOT NULL DEFAULT ''                -- role key chosen in the user form
              );
 
              CREATE TABLE IF NOT EXISTS audit_log (
@@ -284,6 +290,12 @@ impl Db {
             }
         }
 
+        // Databases created by older versions do not remember the role of each user.
+        let has_role = conn.prepare("SELECT 1 FROM pragma_table_info('users') WHERE name = 'role'")?.exists([])?;
+        if !has_role {
+            conn.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT ''", [])?;
+        }
+
         // Room for every statement of this file in the prepared-statement cache (see `lock`).
         conn.set_prepared_statement_cache_capacity(64);
 
@@ -318,15 +330,16 @@ impl Db {
         username: &str,
         password_hash: &str,
         permissions: &PermissionSet,
+        role: &str,
     ) -> Result<User, AppError> {
         let id = {
             let conn = self.lock();
             let result = conn
                 .prepare_cached(
-                    "INSERT INTO users (username, password_hash, permissions, active, created_at)
-                 VALUES (?1, ?2, ?3, 1, ?4)",
+                    "INSERT INTO users (username, password_hash, permissions, active, created_at, role)
+                 VALUES (?1, ?2, ?3, 1, ?4, ?5)",
                 )?
-                .execute(params![username, password_hash, permissions.to_db_string(), now_unix()]);
+                .execute(params![username, password_hash, permissions.to_db_string(), now_unix(), role]);
             match result {
                 Ok(_) => conn.last_insert_rowid(),
                 Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == rusqlite::ErrorCode::ConstraintViolation => {
@@ -368,9 +381,13 @@ impl Db {
         permissions: Option<&PermissionSet>,
         active: Option<bool>,
         password_hash: Option<&str>,
+        role: Option<&str>,
     ) -> Result<(), AppError> {
         let conn = self.lock();
         let tx = conn.unchecked_transaction()?;
+        if let Some(r) = role {
+            tx.execute("UPDATE users SET role = ?1 WHERE id = ?2", params![r, id])?;
+        }
         if let Some(p) = permissions {
             tx.execute("UPDATE users SET permissions = ?1 WHERE id = ?2", params![p.to_db_string(), id])?;
         }

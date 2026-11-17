@@ -16,7 +16,8 @@ A web front-end for an **Orthanc PACS** (recent releases), written in Rust. One 
 | **Preview thumbnails** next to every study and series | yes | no |
 | **Share a study**: link + password, valid 48 hours by default, 1 download by default (both adjustable) | yes (`share`) | - |
 | Download as ZIP | yes (`download`) | only the shared study, **as many times as the link allows** |
-| **Your own branding**: browser window title, website icon (favicon), logo, portal name | set by admins | shown on the invitation page |
+| **Your own branding**: browser window title, website icon (favicon), logo, portal name, **colours**, light / dark | set by admins | shown on the invitation page |
+| **Two looks**: the normal view, or a **simplified view** (icons, recent studies, drag & drop upload) chosen **per role** | set by admins | - |
 | Upload DICOM files / ZIPs | yes | no |
 | **Send a study to a remote DICOM node** and follow the transfer | yes | no |
 | User management, audit log | yes | no |
@@ -200,7 +201,7 @@ Sign in as an **administrator on the intranet** and open **Settings**. Everythin
 without restarting. These screens do not exist on the internet-facing port, and every route behind them
 requires the `admin` permission.
 
-Settings is organised in **tabs**. The first four are one form, saved together with **Save settings** (values
+Settings is organised in **tabs**. The first five are one form, saved together with **Save settings** (values
 typed in one tab are kept while you visit another, until you leave Settings). The last three are separate
 screens whose changes apply at once.
 
@@ -208,12 +209,14 @@ screens whose changes apply at once.
 |---|---|
 | **General > Branding** | **Browser window title**, **website icon**, **logo**, portal name, whether the name is shown next to the logo, notice shown on the login page (see below) |
 | **General > Modality buttons** | The quick modality filters of the Studies and Series pages: order, shown / hidden, label, DICOM codes, description; add, remove, restore defaults (the *Other codes* box is always shown) |
+| **Appearance > Colours** | Light / dark / automatic, and the **accent**, **header**, **icon column** and **page background** colours (each can go back to the built-in one). Previewed at once, kept when saved (see [The simplified view and the colours](#the-simplified-view-and-the-colours)) |
+| **Appearance > Simplified view** | Switch it on, the view of users without a role, how many recent studies the home page shows, which ones (last received / newest study date) and how (the Studies table, or cards with big previews), card size, the two texts of the home page, the total of studies in the header, names under the icons |
 | **General > Viewers and uploads** | Show the **Weasis** button (on / off), show the **OHIF** button (automatic / always / never), largest uploaded file, preview thumbnails on/off and their cache size |
 | **Orthanc > Orthanc connection** | Address; **with an account** (user name + password, write-only: never sent back to the browser) **or without an account** (for an Orthanc that only accepts a list of allowed computers); **Test connection** (mode used, version, DICOMweb/OHIF plugins, number of DICOM nodes; works on values you have typed but not yet saved) |
 | **Network & sharing > Network** | Intranet address, enable/disable the internet listener (invitation links only) and its address, optional fixed public address for Weasis |
 | **Network & sharing > Share links** | **The public address of the share links** (your Cloudflare hostname; sharing stays off until it is set), the default and maximum validity (hours) and the default and maximum number of ZIP downloads |
 | **Security & roles > Sessions and sign-in security** | Session length, Weasis link validity, failed sign-ins before lockout, lockout length, secure-cookie mode, how long to keep the audit log (0 = forever) |
-| **Security & roles > Roles** | The role shortcuts offered in the user form (add, rename, change permissions, restore defaults) |
+| **Security & roles > Roles** | The role shortcuts offered in the user form (add, rename, change permissions, restore defaults) and the **view** (normal or simplified) of each role |
 | **Users** | Accounts, permissions, enable/disable, password reset |
 | **DICOM nodes** | Remote DICOM systems Orthanc sends studies to: add, edit, delete, **Test** (DICOM ping) |
 | **Audit log** | Every change above is recorded (setting names only, never values or passwords) |
@@ -244,6 +247,52 @@ the address changes with every upload, but if a tab still shows the old icon, re
 its name or what the browser claims). An **SVG** is refused if it contains scripts, event handlers
 (`onload=`...), `javascript:` links, `<foreignObject>`, embedded pages or entities. Images are also served with a
 `sandbox` Content-Security-Policy, so even a file that slipped through cannot run anything if opened directly.
+
+### The simplified view and the colours
+
+Some staff only need to see what came in recently and to add studies. For them the portal has a second look,
+the **simplified view**:
+
+```
++------------------------------------------------------+
+| logo + practice name                Total studies: N |
++----+-------------------------------------------------+
+| ⌂  |  Recent studies: a grid of cards (preview,      |
+| ⌕  |  patient, date, description, modalities)        |
+| <  |                                                 |
+| ☁  |-------------------------------------------------|
+|    |  Drag a file to upload it                       |
+| ⚙  |                                                 |
+| ⇥  |                                                 |
++----+-------------------------------------------------+
+```
+
+* The **header** shows the logo and the portal name (*General > Branding*) and the **total number of studies**
+  in Orthanc.
+* The **column of icons** leads to **Home**, **Search**, **Share**, **Upload**, **Configuration** (administrators)
+  and **Log out**. Each icon names itself when the mouse rests on it (or always, under the icon, if you tick
+  *Write the name under each icon*). An icon is shown only to users with the matching permission. On a phone
+  the column becomes a bar at the bottom of the screen.
+* **Home** shows the most recent studies in the same table as the Studies page: same columns, same buttons
+  (Weasis, OHIF, Send to..., Share..., Download, the arrow that opens the series). Cards with big previews can be
+  chosen instead (a click on a card opens the study with the same buttons and its series). How many studies,
+  and whether "recent" means *last received by the PACS* or *newest study date*, are settings. Below them, files
+  and whole folders can be **dropped** to upload them; the list and the total refresh when the upload ends.
+* Search, Share, Upload and Configuration are the same pages as in the normal view.
+
+**Who gets which view.** Every role (*Security & roles > Roles*) has a **view**: normal or simplified. The
+role is saved with each account (the *Role* list of the user form; *Custom* = no role). Accounts created before
+this existed are matched to the role with exactly their permissions. Users without a role get the *View of
+users without a role*. Nothing changes until **Switch on the simplified view** is ticked: switched off,
+everybody has the normal view. A user's role only chooses the look; **what they may do is still decided by
+their permissions**, checked by the server on every request. Users with the **`switch_view` permission** get a
+switch button in both views to change view themselves; their choice is kept in their own browser. Without that
+permission, users always see the view of their role.
+
+**Colours.** *Appearance > Colours* forces light or dark (or follows each computer), and replaces the accent,
+header, icon column and page background colours. Text on the header and the icon column switches between dark
+and white by itself so it stays readable. The colours apply to both views, the login page and the invitation
+page that guests see.
 
 What the internet listener serves (**invitation links only**) is deliberately *not* a setting: nothing an
 administrator can type into the web interface can open search, upload, send or administration to the internet.
@@ -310,6 +359,7 @@ with an invitation have no account and no permissions, only their link (section 
 | `send` | Send studies to remote DICOM nodes, see transfers |
 | `share` | **Invite somebody outside to look at a study** (create links), see and revoke their own links |
 | `admin` | Manage users, settings, DICOM nodes, branding, read the audit log; see and revoke **everyone's** links |
+| `switch_view` | Switch between the normal and the simplified view oneself (only while the simplified view is switched on; see section 4) |
 
 Rules: `visualize`, `download`, `send` and `share` require `read`. The last active administrator cannot be
 removed or disabled, and nobody can delete or demote their own account.
@@ -587,8 +637,9 @@ All JSON. State-changing calls need the header `X-Requested-With: portal`.
 
 | Method & path | Permission | Purpose |
 |---|---|---|
-| `POST /api/login`, `POST /api/logout`, `GET /api/me` | none / session | Session (`/me` returns the permissions and `features`: `ohif`, `thumbnails`, `share`) |
-| `GET /api/studies?patient_name=&patient_id=&accession_number=&description=&modality=&date_from=&date_to=&limit=&offset=` | read | Search studies (`modality=ct,rx`) |
+| `POST /api/login`, `POST /api/logout`, `GET /api/me` | none / session | Session (`/me` returns the permissions, the `role` and `features`: `ohif`, `thumbnails`, `share`, `interface` (`normal` / `simplified`), `interface_switch`, `simplified` (home page options)) |
+| `GET /api/studies?patient_name=&patient_id=&accession_number=&description=&modality=&date_from=&date_to=&order=&limit=&offset=` | read | Search studies (`modality=ct,rx`; `order=received` = last received first, otherwise newest study date) |
+| `GET /api/stats` | read | `{ "studies": N }`: number of studies in Orthanc |
 | `GET /api/studies/{id}/series` | read | Series of a study |
 | `GET /api/series?...&body_part=` | read | Search series |
 | `GET /api/studies/{id}/thumbnail`, `GET /api/series/{id}/thumbnail` (`?size=64\|128\|256`) | visualize | Preview JPEG (404 = nothing to show) |
@@ -603,7 +654,7 @@ All JSON. State-changing calls need the header `X-Requested-With: portal`.
 | `POST /api/studies/{id}/share` `{ "hours": 48, "downloads": 1, "note": "" }` | share | Create an invitation: answers `{ id, url, password, expires_at, hours, max_downloads, label }`; **the only time the password is returned** |
 | `GET /api/shares` | share | The caller's invitations (admins: everyone's) with status, downloads used, openings |
 | `POST /api/shares/{id}/revoke` | share (creator) or admin | Revoke an invitation at once |
-| `GET/POST /api/admin/users`, `PUT/DELETE /api/admin/users/{id}`, `GET /api/admin/audit` | admin | Users and audit log |
+| `GET/POST /api/admin/users`, `PUT/DELETE /api/admin/users/{id}`, `GET /api/admin/audit` | admin | Users (with `role`; the list adds `effective_role` and `interface`) and audit log |
 | `PUT/DELETE /api/admin/branding/{logo\|favicon}` (raw file body) | admin | Upload / remove the logo or the website icon |
 | `GET/PUT /api/admin/settings` | admin | Read / save the settings (partial update; Orthanc password write-only) |
 | `POST /api/admin/orthanc/test` | admin | "Test connection" (saved or typed values) |
@@ -625,7 +676,7 @@ All JSON. State-changing calls need the header `X-Requested-With: portal`.
 
 | Method & path | Permission | Purpose |
 |---|---|---|
-| `GET /api/public` | none | Branding: name, window title, logo, icon, login notice |
+| `GET /api/public` | none | Branding: name, window title, logo, icon, login notice, `theme` (colours) |
 | `GET /branding/logo`, `GET /branding/favicon` | none | The uploaded logo / website icon (or the built-in mark) |
 | `GET /healthz` | none | Liveness probe |
 
@@ -645,7 +696,7 @@ src/config.rs         the few bootstrap values from the environment
 src/settings.rs       every web-editable setting: defaults, validation, saved copy, roles
 src/server.rs         runs / re-opens the two listeners while the program runs
 src/error.rs          AppError -> HTTP status + JSON
-src/permissions.rs    the seven permissions and the rules between them
+src/permissions.rs    the eight permissions and the rules between them
 src/db.rs             SQLite: users, audit log, transfers, share links, saved settings
 src/auth.rs           passwords, sessions, tokens, Cloudflare detection, request guards (staff and guest)
 src/sharing.rs        invitation rules: password and link generation, what a guest may read (with unit tests)

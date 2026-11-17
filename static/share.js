@@ -242,12 +242,36 @@ async function closeSession() {
   location.reload();
 }
 
+/* ---------------------------------------------------------------- colours */
+
+/**
+ * The light/dark mode, accent and background chosen in the portal's Settings > Appearance
+ * (a smaller copy of applyTheme in app.js: this page has no header or icon column).
+ */
+function applyTheme(theme) {
+  const t = theme || {};
+  const html = document.documentElement;
+  const isColor = (v) => /^#[0-9a-f]{6}$/i.test(v || "");
+  if (t.mode === "light" || t.mode === "dark") html.dataset.theme = t.mode;
+  if (isColor(t.accent)) {
+    const rgb = [1, 3, 5].map((i) => parseInt(t.accent.slice(i, i + 2), 16) / 255)
+      .map((c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+    const light = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2] > 0.179;
+    html.classList.add("custom-accent");
+    html.style.setProperty("--accent", t.accent);
+    html.style.setProperty("--accent-hover", t.accent);
+    html.style.setProperty("--on-accent", light ? "#15212c" : "#ffffff");
+  }
+  if (isColor(t.background)) html.style.setProperty("--paper", t.background);
+}
+
 /* ---------------------------------------------------------------- start */
 
 (async function start() {
   try {
     const info = await api("GET", "/api/public");
     state.brand = { name: info.name, show_name: info.show_name, logo: info.logo };
+    applyTheme(info.theme);
   } catch { /* the page still works without branding */ }
   if (!TOKEN) return message("Open your invitation link", "This address only serves studies that were shared with you. Use the link you were sent.");
   let status;

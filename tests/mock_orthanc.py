@@ -44,6 +44,95 @@ job_polls = {"n": 0}
 MODE = {"auth": os.environ.get("MOCK_AUTH", "basic")}   # see the docstring
 
 
+# ---- demo mode (MOCK_DEMO=1) -------------------------------------------------------------------
+# For trying the portal by hand (tests/dev_env.sh), not for the automated tests: a dozen studies with
+# real (generated) preview images, simple searching and sorting, and uploads that create new studies.
+# Nothing below runs unless MOCK_DEMO=1, so the automated tests see exactly the fixture above.
+DEMO = os.environ.get("MOCK_DEMO") == "1"
+DEMO_STUDIES, DEMO_SERIES = {}, {}
+
+
+def demo_png(width, seed):
+    """A grey PNG that looks vaguely like a scan: a bright disc on black, different for each seed."""
+    import zlib, struct, math
+    w = h = max(32, min(int(width or 128), 512))
+    cx, cy, r = w * (0.45 + (seed % 5) * 0.025), h * (0.5 - (seed % 3) * 0.03), w * (0.30 + (seed % 4) * 0.03)
+    rows = []
+    for y in range(h):
+        row = bytearray(b"\x00")
+        for x in range(w):
+            d = math.hypot(x - cx, (y - cy) * 1.15) / r
+            v = 0 if d > 1 else int(200 * (1 - d * d) ** 0.4 * (0.75 + 0.25 * math.sin(x * 0.21 + seed) * math.cos(y * 0.17)))
+            row += bytes((max(0, v),) * 3)
+        rows.append(bytes(row))
+    def chunk(t, d): return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(b"".join(rows))) + chunk(b"IEND", b""))
+
+
+def demo_add_study(n, name, pid, date, desc, modality, body, images, received):
+    # Hex digits and dashes only, like real Orthanc ids (the portal refuses anything else).
+    sid, ser = f"{n:08x}-0000-0000-0000-00000000000a", f"{n:08x}-0000-0000-0000-00000000000b"
+    DEMO_SERIES[ser] = {"ID": ser, "ParentStudy": sid, "Instances": [f"demo{n:04d}-i{k}" for k in range(images)],
+                        "MainDicomTags": {"SeriesInstanceUID": f"1.2.999.{n}.1", "Modality": modality,
+                                          "SeriesDescription": desc, "SeriesNumber": "1", "BodyPartExamined": body}}
+    DEMO_STUDIES[sid] = {"ID": sid, "Type": "Study", "Series": [ser], "LastUpdate": received,
+                         "MainDicomTags": {"StudyInstanceUID": f"1.2.999.{n}", "StudyDate": date, "StudyTime": "101500",
+                                           "StudyDescription": desc, "AccessionNumber": f"ACC{n:04d}"},
+                         "PatientMainDicomTags": {"PatientName": name, "PatientID": pid, "PatientBirthDate": "19750101", "PatientSex": "F" if n % 2 else "M"},
+                         "RequestedTags": {"ModalitiesInStudy": modality, "NumberOfStudyRelatedInstances": str(images)}}
+    return sid
+
+
+if DEMO:
+    for i, (name, mod, desc, body) in enumerate([
+            ("GARCIA^MARIA", "CT", "CT HEAD WITHOUT CONTRAST", "HEAD"), ("SMITH^JOHN", "MR", "MRI LUMBAR SPINE", "LSPINE"),
+            ("NGUYEN^LINH", "US", "ABDOMEN ULTRASOUND", "ABDOMEN"), ("MULLER^HANS", "DX", "CHEST PA AND LATERAL", "CHEST"),
+            ("ROSSI^GIULIA", "MG", "SCREENING MAMMOGRAPHY", "BREAST"), ("KOWALSKI^PIOTR", "CT", "CT CHEST WITH CONTRAST", "CHEST"),
+            ("DUBOIS^CLAIRE", "MR", "MRI RIGHT KNEE", "KNEE"), ("OKAFOR^EMEKA", "CR", "LEFT WRIST 3 VIEWS", "HAND"),
+            ("SATO^YUKI", "US", "THYROID ULTRASOUND", "NECK"), ("BROWN^EMMA", "CT", "CT ABDOMEN PELVIS", "ABDOMEN"),
+            ("SILVA^RAFAEL", "XA", "CORONARY ANGIOGRAPHY", "HEART"), ("JOHANSSON^ANNA", "MR", "MRI BRAIN", "HEAD"),
+            ("PATEL^RAVI", "DX", "PELVIS AP", "PELVIS"), ("WILLIAMS^OLIVIA", "NM", "BONE SCAN WHOLE BODY", "WHOLEBODY")]):
+        demo_add_study(i + 1, name, f"P-{1000 + i}", f"202611{17 - i:02d}", desc, mod, body, 3 + i % 4, f"202611{17 - i:02d}T09{i:02d}00")
+
+
+def demo_find(q):
+    """Enough of /tools/find for the demo: patient / description filters, modalities, dates, sorting, paging."""
+    query = q.get("Query", {})
+    def like(value, pattern):
+        p = (pattern or "").strip("*").lower()
+        return not p or p in (value or "").lower()
+    if q["Level"] == "Study":
+        items = list(DEMO_STUDIES.values())
+        items = [s for s in items if like(s["PatientMainDicomTags"]["PatientName"], query.get("PatientName"))
+                 and like(s["PatientMainDicomTags"]["PatientID"], query.get("PatientID"))
+                 and like(s["MainDicomTags"]["StudyDescription"], query.get("StudyDescription"))]
+        if query.get("ModalitiesInStudy"):
+            wanted = set(query["ModalitiesInStudy"].split("\\"))
+            items = [s for s in items if set(s["RequestedTags"]["ModalitiesInStudy"].split("\\")) & wanted]
+        if query.get("StudyDate"):
+            lo, _, hi = query["StudyDate"].partition("-")
+            items = [s for s in items if (not lo or s["MainDicomTags"]["StudyDate"] >= lo) and (not hi or s["MainDicomTags"]["StudyDate"] <= hi)]
+        by_received = any(o.get("Key") == "LastUpdate" for o in q.get("OrderBy", []))
+        items.sort(key=(lambda s: s["LastUpdate"]) if by_received else (lambda s: s["MainDicomTags"]["StudyDate"]), reverse=True)
+    else:
+        items = list(DEMO_SERIES.values())
+        if query.get("Modality"):
+            wanted = set(query["Modality"].split("\\"))
+            items = [s for s in items if s["MainDicomTags"]["Modality"] in wanted]
+        items = [s for s in items if like(s["MainDicomTags"]["SeriesDescription"], query.get("SeriesDescription"))]
+    since = q.get("Since", 0)
+    return items[since:since + q.get("Limit", 100)]
+
+
+def demo_upload():
+    """Each uploaded file becomes a new study, received now (so it appears first on the home page)."""
+    import time
+    n = 100 + len(DEMO_STUDIES)
+    return demo_add_study(n, f"UPLOADED^FILE {n - 113}", f"U-{n}", time.strftime("%Y%m%d"), "UPLOADED FROM THE PORTAL",
+                          "OT", "", 1, time.strftime("%Y%m%dT%H%M%S"))
+
+
 def log(name, obj):
     with open(os.path.join(LOG_DIR, name + ".log"), "a") as f:
         f.write(json.dumps(obj) + "\n")
@@ -78,6 +167,18 @@ class H(BaseHTTPRequestHandler):
         p = self.path.split("?")[0]
         if p == "/system": return self._json({"Version": VERSION, "Capabilities": ["HasExtendedFind", "HasExtendedChanges"]})
         if p == "/plugins": return self._json(["dicom-web", "ohif", "explorer.html"])
+        if DEMO:
+            if p == "/statistics": return self._json({"CountStudies": len(DEMO_STUDIES), "CountSeries": len(DEMO_SERIES)})
+            m = re.match(r"^/studies/([^/]+)(/series)?$", p)
+            if m and m.group(1) in DEMO_STUDIES:
+                study = DEMO_STUDIES[m.group(1)]
+                return self._json([DEMO_SERIES[s] for s in study["Series"]] if m.group(2) else study)
+            if p.startswith("/series/") and p[8:] in DEMO_SERIES: return self._json(DEMO_SERIES[p[8:]])
+            m = re.match(r"^/instances/(demo(\d+)-i\d+)/rendered$", p)
+            if m:
+                width = re.search(r"width=(\d+)", self.path)
+                return self._send(demo_png(width.group(1) if width else 128, int(m.group(2))), "image/png")
+        if p == "/statistics": return self._json({"CountPatients": 1, "CountStudies": 1, "CountSeries": 2, "CountInstances": 8})
         if p == "/modalities": return self._json(MODALITIES)
         if p == f"/jobs/{JOB_ID}":
             log("jobs", {"path": p}); job_polls["n"] += 1
@@ -120,7 +221,11 @@ class H(BaseHTTPRequestHandler):
             return self._json({"Message": "Error in the network protocol"}, 500) if alias == "down" else self._json({})
         if self.path == "/tools/find":
             q = json.loads(body); log("find", q)
+            if DEMO: return self._json(demo_find(q))
             return self._json([STUDY] if q["Level"] == "Study" else [SERIES])
+        if DEMO and self.path == "/instances":
+            if body[:4] == b"BAD!": return self._json({"error": "bad"}, 400)
+            return self._json({"ID": "x", "Status": "Success", "ParentStudy": demo_upload()})
         if self.path == "/modalities/ris/store":
             log("store", json.loads(body)); return self._json({"ID": JOB_ID, "Path": f"/jobs/{JOB_ID}"})
         if self.path == "/instances":

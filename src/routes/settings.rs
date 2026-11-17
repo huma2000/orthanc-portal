@@ -45,6 +45,8 @@ pub async fn public_info(State(state): State<AppState>) -> Json<Value> {
         "login_notice": settings.login_notice,
         "logo": branding["logo"],
         "favicon": branding["favicon"],
+        // Colours chosen in Settings > Appearance (the login and invitation pages use them too).
+        "theme": settings.theme(),
     }))
 }
 

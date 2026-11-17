@@ -25,6 +25,7 @@
 //! /static/app.js|css       UI assets
 //! /api/login|logout|me     session endpoints
 //! /api/studies, /series    consult / search               (permission: read)
+//! /api/stats               number of studies in the PACS  (permission: read)
 //! /api/*/thumbnail         preview image                  (permission: visualize)
 //! /api/weasis/link         build a weasis:// URI          (permission: visualize)
 //! /dicom-web/*, /wado      read-only DICOMweb proxy       (Weasis and OHIF)
@@ -122,6 +123,7 @@ fn staff_router(state: AppState) -> Router {
         .route("/studies", get(studies::search_studies))
         .route("/studies/{id}/series", get(studies::study_series))
         .route("/series", get(studies::search_series))
+        .route("/stats", get(studies::statistics))
         // --- preview thumbnails (they need `visualize`; see routes/thumbnails.rs) ---
         .route("/studies/{id}/thumbnail", get(thumbnails::study_thumbnail))
         .route("/series/{id}/thumbnail", get(thumbnails::series_thumbnail))

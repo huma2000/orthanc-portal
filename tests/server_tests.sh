@@ -44,7 +44,7 @@ newlink() {
 
 echo "== two doors: the staff portal (intranet) and the internet listener (invitation links only)"
 ME=$(body $F $A /api/me)
-ok "intranet admin has all seven permissions" "$(echo $ME | py "','.join(d['permissions'])")" "read,visualize,upload,download,send,share,admin"
+ok "intranet admin has all eight permissions" "$(echo $ME | py "','.join(d['permissions'])")" "read,visualize,upload,download,send,share,admin,switch_view"
 hasnt "accounts no longer have a remote/full 'scope'" "$ME" '"scope"'
 ok "share is a permission that needs 'read' (400 without it)" "$(code $F $A POST /api/admin/users -H "$J" -d '{"username":"badshare","password":"BadSharePass123","permissions":["share"]}')" "400"
 ok "the Exporter and Clinical roles include share" "$(body $F $A /api/admin/settings | py "[ 'share' in r['permissions'] for r in d['settings']['roles'] if r['key'] in ('exporter','clinical')]")" "[True, True]"
@@ -80,6 +80,46 @@ put $A '{"modality_buttons":[{"label":"US","codes":["us"],"title":"Ultrasound"},
 ok "order and hiding reach every user (codes upper-cased)" "$(body $F $V /api/me | py "','.join(b['label']+':'+'+'.join(b['codes']) for b in d['features']['modality_buttons'])")" "US:US"
 put $A "{\"modality_buttons\":$(body $F $A /api/admin/settings | py "json.dumps(d['defaults']['modality_buttons'])")}" > /dev/null
 ok "...and the defaults can be restored" "$(body $F $V /api/me | py "len(d['features']['modality_buttons'])")" "9"
+
+echo "== appearance: colours, the simplified view and the view of each role"
+ok "the colours are public (login and invitation pages)" "$(curl -s $G/api/public | py "sorted(d['theme'])")" "['accent', 'background', 'header', 'mode', 'sidebar']"
+ok "a colour that is not #rrggbb is refused (400)" "$(put $A '{"color_accent":"red"}' | tail -1)" "400"
+ok "the number of recent studies is limited (400)" "$(put $A '{"simplified_recent_count":500}' | tail -1)" "400"
+put $A '{"color_accent":"#AA3311","theme_mode":"dark"}' > /dev/null
+ok "saved colours reach the public page (lower-cased)" "$(curl -s $F/api/public | py "d['theme']['accent']+' '+d['theme']['mode']")" "#aa3311 dark"
+ok "simplified view switched off: everybody gets the normal view" "$(body $F $V /api/me | py "d['features']['interface']")" "normal"
+ROLES=$(body $F $A /api/admin/settings | py "json.dumps([dict(r, interface='simplified' if r['key']=='viewer' else 'normal') for r in d['settings']['roles']])")
+put $A "{\"roles\":$ROLES,\"simplified_enabled\":true,\"simplified_recent_count\":8,\"simplified_upload_text\":\"Drop here\"}" > /dev/null
+ok "switched on: the viewer role (found by its permissions) gets the simplified view" "$(body $F $V /api/me | py "d['features']['interface']")" "simplified"
+ok "...with the home page options" "$(body $F $V /api/me | py "str(d['features']['simplified']['recent_count'])+' '+d['features']['simplified']['upload_text']")" "8 Drop here"
+ok "the administrator role keeps the normal view" "$(body $F $A /api/me | py "d['features']['interface']")" "normal"
+ok "custom permissions (no role): the default view" "$(body $F $RD /api/me | py "d['features']['interface']")" "normal"
+put $A '{"default_interface":"simplified"}' > /dev/null
+ok "...which administrators can change" "$(body $F $RD /api/me | py "d['features']['interface']")" "simplified"
+VID=$(body $F $A /api/admin/users | py "[u['id'] for u in d['users'] if u['username']=='viewer1'][0]")
+ok "the users list shows each user's role and view" "$(body $F $A /api/admin/users | py "[(u['effective_role'], u['interface']) for u in d['users'] if u['username']=='viewer1'][0]")" "('viewer', 'simplified')"
+ok "an unknown role is refused (400)" "$(code $F $A PUT /api/admin/users/$VID -H "$J" -d '{"role":"nope"}')" "400"
+code $F $A PUT /api/admin/users/$VID -H "$J" -d '{"role":"contributor"}' > /dev/null
+ok "the role saved with the account wins over the permissions" "$(body $F $V /api/me | py "d['features']['interface']")" "normal"
+code $F $A PUT /api/admin/users/$VID -H "$J" -d '{"role":""}' > /dev/null
+ok "switching views needs the switch_view permission" "$(body $F $V /api/me | py "d['features']['interface_switch']")" "False"
+code $F $A PUT /api/admin/users/$VID -H "$J" -d '{"permissions":["read","visualize","switch_view"]}' > /dev/null
+ok "...with it, the user may switch" "$(body $F $V /api/me | py "d['features']['interface_switch']")" "True"
+put $A '{"simplified_enabled":false}' > /dev/null
+ok "...but not while the simplified view is switched off" "$(body $F $V /api/me | py "d['features']['interface_switch']")" "False"
+put $A '{"simplified_enabled":true}' > /dev/null
+code $F $A PUT /api/admin/users/$VID -H "$J" -d '{"permissions":["read","visualize"]}' > /dev/null
+ok "the old switch-for-everyone setting is gone (400)" "$(put $A '{"interface_switch":true}' | tail -1)" "400"
+mkuser uponly UploadOnlyPass123 '"upload"'
+UP=$(login $F uponly UploadOnlyPass123)
+ok "total number of studies (from Orthanc's statistics)" "$(body $F $V /api/stats | py "d['studies']")" "1"
+ok "...needs the read permission (403)" "$(code $F $UP GET /api/stats)" "403"
+body $F $V "/api/studies?limit=8&order=received" > /dev/null
+has "recent studies: the last ones received first (Orthanc's LastUpdate)" "$(tail -1 $WORK/find.log)" '"Key": "LastUpdate"'
+body $F $V "/api/studies?limit=8" > /dev/null
+has "...the search keeps the newest study dates first" "$(tail -1 $WORK/find.log)" '"Key": "StudyDate"'
+put $A "{\"roles\":$(body $F $A /api/admin/settings | py "json.dumps(d['defaults']['roles'])"),\"simplified_enabled\":false,\"default_interface\":\"normal\",\"color_accent\":\"\",\"theme_mode\":\"auto\"}" > /dev/null
+ok "...and everything goes back to the normal view" "$(body $F $V /api/me | py "d['features']['interface']")" "normal"
 T=$(tok $V)
 ok "a Weasis token works on the intranet" "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $T" $F/dicom-web/studies)" "200"
 ok "...and is useless on the internet listener (401)" "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $T" $G/dicom-web/studies)" "401"

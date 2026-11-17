@@ -457,7 +457,7 @@ pub async fn ensure_initial_admin(db: &Db, boot: &Bootstrap) -> AppResult<()> {
     }
     validate_password(&password)?;
     let hash = hash_password(password.clone()).await?;
-    db.create_user(&boot.admin_username, &hash, &PermissionSet::from_slice(&Permission::ALL))?;
+    db.create_user(&boot.admin_username, &hash, &PermissionSet::from_slice(&Permission::ALL), "administrator")?;
     if generated {
         tracing::warn!("==========================================================");
         tracing::warn!(" First start: administrator account created");

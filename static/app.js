@@ -10,7 +10,8 @@
     2. Tiny DOM helper `h()`        (builds elements safely, never uses innerHTML)
     3. API helper `api()`           (adds the CSRF header, handles errors / expired sessions)
     4. Formatting helpers           (DICOM names, dates)
-    5. Shell: login, navigation, sign out
+    5. Shell: login, navigation, sign out, colours (theme)
+   5b. Simplified view               (header, icon column, home page with recent studies)
     6. Studies and Series search    (shared builder, modality picker, two tables)
    6b. Preview thumbnails           (lazy loading, small in-memory cache)
     7. Viewers (Weasis / OHIF), downloads and sending to DICOM nodes
@@ -46,11 +47,13 @@ const modalityButtons = () => (state.user && state.user.features && state.user.f
 const state = {
   user: null,     // { id, username, permissions: ["read", ...], features: { ohif, thumbnails, share: {...} } }
   view: null,     // id of the visible tab ("studies", "series", "upload", "settings"...)
+  simpleView: "home", // id of the visible page of the simplified view (see SIMPLE_PAGES)
   settingsTab: "general", // id of the visible tab inside Settings (see SETTINGS_TABS)
   notice: "",     // message shown on the login form (e.g. "Your session expired")
   // Identity of this installation (Settings > Branding). Filled from /api/public.
   brand: { name: "Orthanc Portal", title: "Orthanc Portal", show_name: true, login_notice: "", logo: null,
-           favicon: { url: "/favicon.svg", type: "image/svg+xml", custom: false } },
+           favicon: { url: "/favicon.svg", type: "image/svg+xml", custom: false },
+           theme: { mode: "auto", accent: "", header: "", sidebar: "", background: "" } },
   orthancProblem: "",     // administrators: why the Orthanc connection is not healthy ("" = fine)
   orthancCheckedAt: 0,    // when it was last checked (ms), to test at most once a minute
 };
@@ -236,15 +239,61 @@ const VIEWS = [
 /** Opens Settings on one of its tabs (e.g. "orthanc" from the Orthanc notice). */
 function openSettings(tab) {
   state.view = "settings";
+  state.simpleView = "settings";
   state.settingsTab = tab;
+  renderApp();
+}
+
+/** Opens the list of studies, in whichever view the user has. */
+function openStudies() {
+  if (!can("read")) return;
+  state.view = "studies";
+  state.simpleView = "search";
+  renderApp();
+}
+
+/* ---- Normal or simplified view ----
+   The server decides from the user's role (Settings > Appearance and Security & roles).
+   Users with the switch_view permission may switch themselves; that choice is kept in this
+   browser only (localStorage), per user name. */
+
+const interfaceKey = () => `portal.interface.${state.user ? state.user.username : ""}`;
+
+function readInterfaceChoice() {
+  try { return localStorage.getItem(interfaceKey()) || ""; } catch { return ""; }
+}
+
+/** "normal" or "simplified": what this user sees now. */
+function currentInterface() {
+  const features = state.user && state.user.features;
+  if (!features) return "normal";
+  if (features.interface_switch) {
+    const choice = readInterfaceChoice();
+    if (choice === "normal" || choice === "simplified") return choice;
+  }
+  return features.interface === "simplified" ? "simplified" : "normal";
+}
+
+/** The "switch view" button (only for users with the switch_view permission). */
+function switchInterface() {
+  const next = currentInterface() === "simplified" ? "normal" : "simplified";
+  try { localStorage.setItem(interfaceKey(), next); } catch { /* this browser cannot remember it: still switch now */ }
+  if (next === "simplified" && state.view === "settings") state.simpleView = "settings";
+  if (next === "normal" && state.simpleView === "settings") state.view = "settings";
   renderApp();
 }
 
 /** Draws the whole page: login form when signed out, otherwise top bar + current tab. */
 function renderApp() {
   root.replaceChildren();
+  // Colours as saved (a preview in Settings > Appearance ends when the user leaves the page).
+  applyTheme(state.brand.theme);
   if (!state.user) {
     root.append(buildLogin());
+    return;
+  }
+  if (currentInterface() === "simplified") {
+    renderSimplified();
     return;
   }
 
@@ -265,6 +314,9 @@ function renderApp() {
     nav,
     h("div", { class: "userbox" },
       h("span", null, state.user.username),
+      state.user.features.interface_switch
+        ? h("button", { class: "btn small", type: "button", onclick: switchInterface, title: "Switch to the simplified view (remembered in this browser)" }, "Simplified view")
+        : null,
       h("button", { class: "btn small", type: "button", onclick: signOut }, "Sign out")));
 
   const page = h("main", { class: current && current.wide ? "page wide" : "page" },
@@ -290,8 +342,67 @@ function brandContent(size, asHeading) {
   return [mark, name];
 }
 
+/* ---- Colours (Settings > Appearance) ----
+   The stylesheet defines every colour as a CSS variable (app.css, sections 1 and 2). The colours
+   an administrator picks are set on <html> through the DOM (allowed by the Content-Security-
+   Policy, unlike inline style attributes), together with readable text colours computed here. */
+
+/** Every variable applyTheme may set, so a colour put back to "default" is removed again. */
+const THEME_VARS = ["--accent", "--accent-hover", "--on-accent", "--bar", "--bar-ink", "--bar-ink-strong", "--bar-line",
+  "--bar-hover", "--header", "--header-ink", "--header-line", "--side", "--side-ink", "--side-ink-strong", "--side-hover",
+  "--side-line", "--paper"];
+
+const isColor = (value) => /^#[0-9a-f]{6}$/i.test(value || "");
+const rgbOf = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+
+/** Mixes two #rrggbb colours: `amount` 0 = `a`, 1 = `b`. */
+function mixColors(a, b, amount) {
+  const [x, y] = [rgbOf(a), rgbOf(b)];
+  return "#" + x.map((v, i) => Math.round(v + (y[i] - v) * amount).toString(16).padStart(2, "0")).join("");
+}
+
+/** WCAG relative luminance (0 = black, 1 = white). */
+function luminance(hex) {
+  const [r, g, b] = rgbOf(hex).map((v) => { const c = v / 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+/** Dark or white text, whichever reads better on `background`. */
+const inkOn = (background) => (luminance(background) > 0.179 ? "#15212c" : "#ffffff");
+
+/** Applies the light/dark mode and the custom colours. `theme` = { mode, accent, header, sidebar, background }. */
+function applyTheme(theme) {
+  const html = document.documentElement;
+  const t = theme || {};
+  if (t.mode === "light" || t.mode === "dark") html.dataset.theme = t.mode; else delete html.dataset.theme;
+  THEME_VARS.forEach((name) => html.style.removeProperty(name));
+  const set = (name, value) => html.style.setProperty(name, value);
+
+  html.classList.toggle("custom-accent", isColor(t.accent));
+  if (isColor(t.accent)) {
+    set("--accent", t.accent);
+    // Hover: a little darker, or lighter when the colour is already very dark.
+    set("--accent-hover", mixColors(t.accent, luminance(t.accent) < 0.04 ? "#ffffff" : "#000000", 0.18));
+    set("--on-accent", inkOn(t.accent));
+  }
+  if (isColor(t.header)) {
+    const ink = inkOn(t.header);
+    set("--bar", t.header); set("--header", t.header);
+    set("--bar-ink", mixColors(ink, t.header, 0.15)); set("--bar-ink-strong", ink); set("--header-ink", ink);
+    set("--bar-line", mixColors(t.header, ink, 0.35)); set("--header-line", mixColors(t.header, ink, 0.35));
+    set("--bar-hover", mixColors(t.header, ink, 0.12));
+  }
+  if (isColor(t.sidebar)) {
+    const ink = inkOn(t.sidebar);
+    set("--side", t.sidebar); set("--side-ink", mixColors(ink, t.sidebar, 0.25)); set("--side-ink-strong", ink);
+    set("--side-hover", mixColors(t.sidebar, ink, 0.1)); set("--side-line", mixColors(t.sidebar, ink, 0.3));
+  }
+  if (isColor(t.background)) set("--paper", t.background);
+}
+
 /** Applies the identity everywhere it shows: browser tab title, website icon, logo and name. */
 function applyBrand() {
+  applyTheme(state.brand.theme);
   document.title = state.brand.title;
   let icon = document.querySelector('link[rel="icon"]');
   if (!icon) {
@@ -351,7 +462,283 @@ async function signOut() {
   try { await api("POST", "/api/logout"); } catch { /* leaving anyway */ }
   state.user = null;
   state.notice = "";
+  state.simpleView = "home";
   renderApp();
+}
+
+/* ====================================================================
+   5b. SIMPLIFIED VIEW
+   A reduced layout for the roles an administrator chooses (Settings > Appearance and
+   Security & roles):
+
+     +------------------------------------------------------+
+     | logo + practice name                Total studies: N |
+     +----+-------------------------------------------------+
+     | ⌂  |  Home: recent studies (grid of cards)           |
+     | ⌕  |                                                 |
+     | <  |                                                 |
+     | ☁  |  ---------------------------------------------- |
+     |    |  Drop zone: drag files here to upload them      |
+     | ⚙  |                                                 |
+     | ⇥  |                                                 |
+     +----+-------------------------------------------------+
+
+   Every icon names itself when the mouse rests on it (or under it, if an administrator
+   chose so). The pages behind the icons are the same builders as the normal view's tabs.
+   On phones the icon column becomes a bar at the bottom of the screen (app.css).
+   ==================================================================== */
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/** A gear outline (8 teeth) around (12, 12), computed once. */
+const GEAR_PATH = (() => {
+  const teeth = 8, outer = 10.4, inner = 7.9, base = 0.27, tip = 0.15;
+  const point = (angle, r) => `${(12 + r * Math.cos(angle)).toFixed(2)} ${(12 + r * Math.sin(angle)).toFixed(2)}`;
+  let d = "";
+  for (let i = 0; i < teeth; i++) {
+    const a = (i * 2 * Math.PI) / teeth;
+    const next = ((i + 1) * 2 * Math.PI) / teeth;
+    d += `${i === 0 ? "M" : "L"}${point(a - base, inner)} L${point(a - tip, outer)} L${point(a + tip, outer)} L${point(a + base, inner)} `;
+    d += `A${inner} ${inner} 0 0 1 ${point(next - base, inner)} `;
+  }
+  return d + "Z";
+})();
+
+/** Line icons on a 24 x 24 grid: path data, or `{ c: [cx, cy, r] }` for a circle. */
+const ICONS = {
+  home: ["M3 11.5 12 4l9 7.5", "M5.5 9.8V20h13V9.8", "M10 20v-5.5h4V20"],
+  search: [{ c: [10.5, 10.5, 6.5] }, "M15.4 15.4 21 21"],
+  share: [{ c: [18, 5.5, 2.5] }, { c: [6, 12, 2.5] }, { c: [18, 18.5, 2.5] }, "M8.2 10.8l7.6-4.1", "M8.2 13.2l7.6 4.1"],
+  upload: ["M7 18.5H6.5a4.5 4.5 0 0 1-.4-8.98 6 6 0 0 1 11.6-1.2A4.5 4.5 0 0 1 17.5 18.5H17", "M12 21v-8.5", "M8.8 15.5 12 12.3l3.2 3.2"],
+  settings: [GEAR_PATH, { c: [12, 12, 3.2] }],
+  logout: ["M13 3.5h6v17h-6", "M3.5 12h11", "M11 8.5l3.5 3.5-3.5 3.5"],
+  swap: ["M4 8h14", "M15 5l3 3-3 3", "M20 16H6", "M9 13l-3 3 3 3"],
+  // Buttons of a study (simplified view)
+  weasis: ["M3 4.5h18v11.5H3z", "M8.5 20.5h7", "M12 16v4.5"],                       // a desktop screen
+  ohif: ["M3 5h18v14H3z", "M3 9h18", { c: [5.5, 7, 0.4] }, { c: [7.5, 7, 0.4] }, "M8 14.5s1.6-2.5 4-2.5 4 2.5 4 2.5-1.6 2.5-4 2.5-4-2.5-4-2.5z"], // a browser window with an eye
+  send: ["M21 3 10.5 13.5", "M21 3l-6.5 18-4-7.5L3 9.5z"],                          // a paper plane
+  download: ["M12 3.5v11.5", "M7.5 10.5 12 15l4.5-4.5", "M4 17v3.5h16V17"],
+  refresh: ["M19.5 12a7.5 7.5 0 1 1-2.2-5.3", "M19.5 4v4.5H15"],
+};
+
+/**
+ * Should the buttons of a study be icons? Yes in the simplified view (each one names itself in a
+ * tooltip), text in the normal view.
+ */
+const iconButtons = () => !!state.user && currentInterface() === "simplified";
+
+/**
+ * Turns the properties of a text button into those of an icon button: the label becomes the
+ * tooltip (see the tooltip code below) and the accessible name.
+ */
+const asIcon = (props, label) => ({ ...props, class: `${props.class || ""} icon-btn`.trim(), "data-tip": label, "aria-label": label, title: null });
+
+/**
+ * A study button: text in the normal view, an icon with a tooltip in the simplified view.
+ * `tag` is "button" or "a"; `tip` is the (longer) description shown on hover.
+ */
+function actionButton(tag, iconName, text, tip, props) {
+  return iconButtons()
+    ? h(tag, asIcon(props, tip), icon(iconName))
+    : h(tag, { ...props, title: props.title || null }, text);
+}
+
+/* ---- Tooltips of the icon buttons ----
+   One floating box, placed above the hovered or focused button (below it near the top of the
+   window) and kept inside the window. It lives outside the tables, so their scroll boxes never
+   clip it; inside a dialog it moves into the dialog, which is drawn above everything else. */
+const tipBox = h("div", { class: "tooltip", role: "tooltip", hidden: true });
+
+function showTip(target) {
+  const host = target.closest("dialog") || document.body;
+  if (tipBox.parentNode !== host) host.append(tipBox);
+  tipBox.textContent = target.dataset.tip;
+  tipBox.hidden = false;
+  const r = target.getBoundingClientRect();
+  const t = tipBox.getBoundingClientRect();
+  let top = r.top - t.height - 6;
+  if (top < 4) top = r.bottom + 6;
+  const left = Math.min(Math.max(4, r.left + r.width / 2 - t.width / 2), window.innerWidth - t.width - 4);
+  tipBox.style.top = `${Math.round(top)}px`;
+  tipBox.style.left = `${Math.round(left)}px`;
+}
+const hideTip = () => { tipBox.hidden = true; };
+const tipTarget = (event) => (event.target instanceof Element ? event.target.closest(".icon-btn[data-tip]") : null);
+document.addEventListener("mouseover", (event) => { const t = tipTarget(event); if (t) showTip(t); else hideTip(); });
+document.addEventListener("focusin", (event) => { const t = tipTarget(event); if (t && t.matches(":focus-visible")) showTip(t); else hideTip(); });
+document.addEventListener("focusout", hideTip);
+document.addEventListener("click", hideTip);
+document.addEventListener("scroll", hideTip, true);
+
+/** An <svg> icon from ICONS (decorative: the button around it carries the name). */
+function icon(name) {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  for (const part of ICONS[name]) {
+    const el = document.createElementNS(SVG_NS, typeof part === "string" ? "path" : "circle");
+    if (typeof part === "string") el.setAttribute("d", part);
+    else ["cx", "cy", "r"].forEach((attr, i) => el.setAttribute(attr, part.c[i]));
+    svg.append(el);
+  }
+  return svg;
+}
+
+/**
+ * The pages of the simplified view, top to bottom. `needs` = permission required to see the
+ * icon (null = everyone). `bottom` pages sit at the foot of the column, above "Log out".
+ */
+const SIMPLE_PAGES = [
+  { id: "home", label: "Home", icon: "home", needs: null, build: buildHomeView },
+  { id: "search", label: "Search", icon: "search", needs: "read", build: () => buildSearchView(STUDY_SEARCH) },
+  { id: "shares", label: "Share", icon: "share", needs: "share", build: buildSharesView },
+  { id: "upload", label: "Upload", icon: "upload", needs: "upload", build: buildUploadView },
+  { id: "settings", label: "Configuration", icon: "settings", needs: "admin", bottom: true, build: buildSettingsView },
+];
+
+/** Options of the simplified view sent by the server (Settings > Appearance). */
+const simpleOptions = () => (state.user && state.user.features && state.user.features.simplified) || {};
+
+/** Draws the simplified view: header, icon column and the current page. */
+function renderSimplified() {
+  const options = simpleOptions();
+  const pages = SIMPLE_PAGES.filter((p) => !p.needs || can(p.needs));
+  if (!pages.some((p) => p.id === state.simpleView)) state.simpleView = "home";
+  const current = pages.find((p) => p.id === state.simpleView);
+
+  /** One icon of the column. `data-tip` is the description that pops up on hover (app.css). */
+  const sideButton = (label, iconName, onclick, isCurrent = false) => h("button", {
+    type: "button", class: "side-btn", "data-tip": label, "aria-label": label,
+    "aria-current": isCurrent ? "page" : null, onclick,
+  }, icon(iconName), h("span", { class: "side-label", "aria-hidden": "true" }, label));
+  const pageButton = (p) => sideButton(p.label, p.icon, () => { state.simpleView = p.id; renderApp(); }, p.id === current.id);
+
+  const side = h("nav", { class: "simple-side", "aria-label": "Main" },
+    h("div", { class: "side-group" }, pages.filter((p) => !p.bottom).map(pageButton)),
+    h("div", { class: "side-group" },
+      state.user.features.interface_switch ? sideButton("Normal view", "swap", switchInterface) : null,
+      pages.filter((p) => p.bottom).map(pageButton),
+      sideButton(`Log out (${state.user.username})`, "logout", signOut)));
+
+  const showTotal = options.show_total !== false && can("read");
+  const head = h("header", { class: "simple-head" },
+    h("div", { class: "brand brand-slot", "data-size": "40" }, ...brandContent(40, false)),
+    showTotal ? h("div", { class: "simple-total" }, "Total studies: ", h("b", { id: "total-studies" }, "...")) : null);
+
+  // Red notice (administrators only) when Orthanc is unreachable or too old.
+  const banner = h("div", { id: "orthanc-banner", class: "banner", role: "alert", hidden: true });
+  const main = h("main", { class: "simple-main" }, banner, current.build());
+
+  root.append(h("div", { class: options.show_labels ? "simple labels" : "simple" }, head, side, main));
+  paintOrthancBanner();
+  refreshOrthancStatus();
+  if (showTotal) refreshTotalStudies();
+}
+
+/** Fills in "Total studies: N" in the header of the simplified view. */
+async function refreshTotalStudies() {
+  const slot = document.getElementById("total-studies");
+  if (!slot) return;
+  try {
+    const stats = await api("GET", "/api/stats");
+    slot.textContent = typeof stats.studies === "number" ? stats.studies.toLocaleString() : "?";
+  } catch {
+    slot.textContent = "?"; // Orthanc unreachable: the administrators' red notice explains it
+  }
+}
+
+/** Reloads the recent studies of the home page, if it is on screen (set by buildHomeView). */
+let reloadRecentStudies = null;
+
+/** Home page of the simplified view: the most recent studies, and a drop zone to upload. */
+function buildHomeView() {
+  const options = simpleOptions();
+  const parts = [];
+
+  if (can("read")) {
+    const body = h("div", { class: "recent-body" }, h("div", { class: "loading" }, "Loading..."));
+    let latest = 0; // answers can arrive out of order: only the newest request may draw
+
+    async function load() {
+      const thisLoad = ++latest;
+      const params = new URLSearchParams({ limit: options.recent_count || 12, offset: 0 });
+      if (options.recent_order === "received") params.set("order", "received");
+      try {
+        const page = await api("GET", `/api/studies?${params}`);
+        if (thisLoad !== latest) return;
+        if (!page.items.length) body.replaceChildren(h("div", { class: "empty" }, "No study in the PACS yet."));
+        // The same table as the Studies page (same columns, same buttons), or cards (Settings > Appearance).
+        else if (options.recent_layout === "cards") body.replaceChildren(h("div", { class: "study-grid", "data-size": options.card_size || "medium" }, page.items.map(studyCard)));
+        else body.replaceChildren(renderStudiesTable(page.items));
+      } catch (e) {
+        if (thisLoad !== latest) return;
+        body.replaceChildren(h("div", { class: "empty" }, e.message));
+        toastError(e);
+      }
+    }
+
+    const section = h("section", { class: "recent", "aria-labelledby": "recent-title" },
+      h("div", { class: "recent-head" },
+        h("h2", { id: "recent-title" }, options.recent_title || "Recent studies"),
+        actionButton("button", "refresh", "Refresh", "Refresh the recent studies", { class: "btn small", type: "button", onclick: load })),
+      body);
+    reloadRecentStudies = () => { if (section.isConnected) load(); };
+    load();
+    parts.push(section);
+  }
+
+  if (can("upload")) {
+    const dropzone = buildDropzone({ title: options.upload_text || "Drag a file to upload it", home: true });
+    parts.push(dropzone, buildUploadProgress());
+  }
+
+  if (!parts.length) parts.push(h("div", { class: "panel empty" }, "Your account has no permissions yet. Ask an administrator to grant you access."));
+  return h("div", { class: "home" }, parts);
+}
+
+/** One study of the home page: a card that opens the study's details. */
+function studyCard(study) {
+  const name = formatName(study.patient_name);
+  const date = formatDicomDate(study.study_date);
+  const open = () => openStudyDialog(study);
+  return h("div", {
+    class: "study-card", role: "button", tabindex: "0",
+    "aria-label": [name, date, study.study_description].filter(Boolean).join(", "),
+    onclick: open,
+    onkeydown: (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); } },
+  },
+    showThumbs() ? thumb("studies", study.id, study.modalities[0], false, 256) : null,
+    h("div", { class: "card-title", title: name }, name),
+    h("div", { class: "card-sub" }, [date, study.patient_id].filter(Boolean).join("  ·  ") || "-"),
+    study.study_description ? h("div", { class: "card-sub", title: study.study_description }, study.study_description) : null,
+    study.modalities.length ? h("div", { class: "card-chips" }, study.modalities.map(chip)) : null);
+}
+
+/** Details of one study (opened from a card): who, when, what, the actions and the series. */
+function openStudyDialog(study) {
+  const seriesSlot = h("div", null, h("div", { class: "loading" }, "Loading series..."));
+  const demographics = [study.patient_sex, formatDicomDate(study.patient_birth_date)].filter(Boolean).join(", ");
+  const detail = (label, value) => (value ? [h("dt", null, label), h("dd", null, value)] : null);
+  const dialog = h("dialog", { class: "study-dialog" }, h("div", { class: "dialog-form" },
+    h("h2", null, formatName(study.patient_name)),
+    h("dl", { class: "share-details" },
+      detail("Patient ID", study.patient_id),
+      detail("Sex, birth date", demographics),
+      detail("Study date", formatDicomDate(study.study_date)),
+      detail("Description", study.study_description),
+      detail("Modalities", study.modalities.length ? h("span", null, study.modalities.map(chip)) : null),
+      detail("Content", `${study.series_count ?? "?"} series${study.instances_count != null ? `, ${study.instances_count} images` : ""}`)),
+    h("div", { class: "actions" }, studyActions(study)),
+    seriesSlot,
+    h("div", { class: "dialog-actions" }, h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Close"))));
+  dialog.addEventListener("close", () => dialog.remove());
+  document.body.append(dialog);
+  dialog.showModal();
+
+  api("GET", `/api/studies/${study.id}/series`)
+    .then((list) => seriesSlot.replaceChildren(renderSeriesBox(list)))
+    .catch((e) => seriesSlot.replaceChildren(h("div", { class: "series-empty muted" }, e.message)));
 }
 
 /* ====================================================================
@@ -453,11 +840,12 @@ function clearThumbnails() {
 /**
  * A thumbnail box. `kind` is "studies" or "series" and `id` the Orthanc id.
  * Until the picture arrives (or if there is none) the box shows the modality code.
+ * `size` asks the server for a bigger picture (the cards of the simplified view).
  */
-function thumb(kind, id, modality, small = false) {
+function thumb(kind, id, modality, small = false, size = 0) {
   const box = h("div", { class: small ? "thumb small loading" : "thumb loading", "aria-hidden": "true" },
     h("span", { class: "thumb-label" }, modality || ""));
-  box.thumbUrl = `/api/${kind}/${id}/thumbnail`;
+  box.thumbUrl = `/api/${kind}/${id}/thumbnail${size ? `?size=${size}` : ""}`;
   if (thumbObserver) thumbObserver.observe(box); else queueThumb(box);
   return box;
 }
@@ -692,8 +1080,8 @@ function studyRows(study) {
 function studyActions(study) {
   return [
     can("visualize") ? viewButtons(study) : null,
-    can("send") ? h("button", { class: "btn small", type: "button", onclick: () => openSendDialog(study) }, "Send to...") : null,
-    can("share") ? h("button", { class: "btn small", type: "button", onclick: () => openShareDialog(study) }, "Share...") : null,
+    can("send") ? actionButton("button", "send", "Send to...", "Send to a DICOM node", { class: "btn small", type: "button", onclick: () => openSendDialog(study) }) : null,
+    can("share") ? actionButton("button", "share", "Share...", "Share with somebody outside (link + password)", { class: "btn small", type: "button", onclick: () => openShareDialog(study) }) : null,
     can("download") ? downloadMenu("studies", study.id) : null,
   ];
 }
@@ -779,15 +1167,16 @@ const ohifUrl = (studyUid) => `/ohif/viewer?StudyInstanceUIDs=${encodeURICompone
 function viewButtons(study) {
   const buttons = [];
   if (hasWeasis()) {
-    const weasis = h("button", { class: "btn small", type: "button", title: "Open in Weasis (desktop viewer, must be installed on this computer)" }, "Weasis");
+    const weasis = actionButton("button", "weasis", "Weasis", "Open in Weasis (desktop viewer, must be installed on this computer)",
+      { class: "btn small", type: "button", title: "Open in Weasis (desktop viewer, must be installed on this computer)" });
     weasis.addEventListener("click", () => openInWeasis(study.study_instance_uid, weasis));
     buttons.push(weasis);
   }
   if (hasOhif()) {
-    buttons.push(h("a", {
+    buttons.push(actionButton("a", "ohif", "OHIF", "Open in the browser viewer (OHIF): new tab, nothing to install", {
       class: "btn small", href: ohifUrl(study.study_instance_uid), target: "_blank", rel: "noopener",
       title: "Open in the browser viewer (OHIF): new tab, nothing to install",
-    }, "OHIF"));
+    }));
   }
   return buttons;
 }
@@ -799,7 +1188,7 @@ function viewButtons(study) {
  */
 function downloadMenu(kind, id) {
   return h("details", { class: "menu" },
-    h("summary", { class: "btn small" }, "Download"),
+    actionButton("summary", "download", "Download", kind === "series" ? "Download this series (ZIP)" : "Download the study (ZIP)", { class: "btn small" }),
     h("div", { class: "menu-list" },
       h("a", { class: "menu-item", href: `/api/${kind}/${id}/download`, onclick: closeMenu }, "ZIP", h("small", null, "DICOM files in folders")),
       h("a", { class: "menu-item", href: `/api/${kind}/${id}/download?dicomdir=true`, onclick: closeMenu }, "ZIP with DICOMDIR", h("small", null, "Adds an index, like a CD/DVD"))));
@@ -914,6 +1303,11 @@ function pump() {
   if (upload.next >= upload.pending.length && !upload.inFlight.size && upload.total > 0 && !upload.finished) {
     upload.finished = true;
     updateUploadUi();
+    // Simplified view: the new studies appear on the home page and in the total at once.
+    if (upload.uploaded > 0) {
+      if (reloadRecentStudies) reloadRecentStudies();
+      refreshTotalStudies();
+    }
     toast(`Upload finished: ${upload.uploaded} new, ${upload.duplicates} already stored, ${upload.failed} failed.`,
       upload.failed ? "error" : "info", 8000);
   }
@@ -978,6 +1372,7 @@ function updateUploadUi() {
   ui.statDup.textContent = upload.duplicates;
   ui.statFail.textContent = upload.failed;
   ui.statStudies.textContent = upload.studyIds.size;
+  ui.root.hidden = upload.total === 0;
   ui.stats.hidden = upload.total === 0;
   ui.barWrap.hidden = upload.total === 0;
 
@@ -1023,18 +1418,21 @@ async function filesFromDrop(dataTransfer) {
   return files;
 }
 
-/** The "Upload" tab. */
-function buildUploadView() {
+/**
+ * An area that accepts dropped files and folders, with buttons to pick them instead.
+ * `home` = the compact version of the simplified view's home page.
+ */
+function buildDropzone({ title, hint = "", home = false }) {
   const onPicked = (event) => { enqueueFiles(event.target.files); event.target.value = ""; };
   const fileInput = h("input", { type: "file", multiple: true, hidden: true, onchange: onPicked });
   const folderInput = h("input", { type: "file", multiple: true, webkitdirectory: true, hidden: true, onchange: onPicked });
 
-  const dropzone = h("div", { class: "dropzone" },
-    h("h2", null, "Drop DICOM files or a whole study folder here"),
-    h("p", { class: "muted" }, "DICOM files (.dcm or without extension) and ZIP archives are accepted. Each file is sent separately."),
+  const dropzone = h("div", { class: home ? "dropzone home-drop" : "dropzone" },
+    h("h2", null, title),
+    hint ? h("p", { class: "muted" }, hint) : null,
     h("div", { class: "buttons" },
-      h("button", { class: "btn primary", type: "button", onclick: () => fileInput.click() }, "Choose files"),
-      h("button", { class: "btn", type: "button", onclick: () => folderInput.click() }, "Choose folder")),
+      h("button", { class: home ? "btn small" : "btn primary", type: "button", onclick: () => fileInput.click() }, home ? "or choose files" : "Choose files"),
+      h("button", { class: home ? "btn small" : "btn", type: "button", onclick: () => folderInput.click() }, home ? "or a folder" : "Choose folder")),
     fileInput, folderInput);
 
   dropzone.addEventListener("dragover", (e) => { e.preventDefault(); dropzone.classList.add("over"); });
@@ -1044,7 +1442,23 @@ function buildUploadView() {
     dropzone.classList.remove("over");
     enqueueFiles(await filesFromDrop(e.dataTransfer));
   });
+  return dropzone;
+}
 
+/** The "Upload" tab. */
+function buildUploadView() {
+  const dropzone = buildDropzone({
+    title: "Drop DICOM files or a whole study folder here",
+    hint: "DICOM files (.dcm or without extension) and ZIP archives are accepted. Each file is sent separately.",
+  });
+  return h("div", { class: "view" }, h("div", { class: "page-head" }, h("h1", null, "Upload")), dropzone, buildUploadProgress());
+}
+
+/**
+ * The progress panel of the uploads (bar, counters, files being sent, errors). It registers
+ * itself as THE panel updateUploadUi() draws into; only one is on screen at a time.
+ */
+function buildUploadProgress() {
   // Progress area (hidden until a file is queued).
   const bar = h("span");
   const barWrap = h("div", { class: "progress", hidden: true }, bar);
@@ -1059,16 +1473,13 @@ function buildUploadView() {
   const errors = h("div", { class: "upload-errors" });
   const viewButton = h("button", {
     class: "btn primary", type: "button", hidden: true,
-    onclick: () => { if (can("read")) { state.view = "studies"; renderApp(); } },
+    onclick: openStudies,
   }, "Browse studies");
 
-  const progressPanel = h("section", { class: "panel" }, barWrap, stats, active, errors, h("div", { class: "upload-errors" }, viewButton));
-  const rootNode = h("div", { class: "view" },
-    h("div", { class: "page-head" }, h("h1", null, "Upload")), dropzone, progressPanel);
-
-  upload.ui = { root: rootNode, bar, barWrap, stats, statDone, statNew, statDup, statFail, statStudies, active, errors, viewButton };
+  const panel = h("section", { class: "panel", hidden: true }, barWrap, stats, active, errors, h("div", { class: "upload-errors" }, viewButton));
+  upload.ui = { root: panel, bar, barWrap, stats, statDone, statNew, statDup, statFail, statStudies, active, errors, viewButton };
   updateUploadUi();
-  return rootNode;
+  return panel;
 }
 
 /* ====================================================================
@@ -1137,12 +1548,19 @@ function buildUsersView() {
     }
   }
 
+  /** Name of a role key ("Custom" = permissions ticked by hand). */
+  const roleLabel = (key) => {
+    const role = key && meta.presets.find((p) => p.key === key);
+    return role ? role.label : h("span", { class: "muted" }, "Custom");
+  };
+
   function renderUsersTable() {
     return h("div", { class: "table-wrap" },
       h("table", { class: "data" },
-        h("thead", null, h("tr", null, ["User", "Access", "Status", "Last sign-in", "Actions"].map((t) => h("th", { class: t === "Actions" ? "num" : null }, t)))),
+        h("thead", null, h("tr", null, ["User", "Role", "Access", "Status", "Last sign-in", "Actions"].map((t) => h("th", { class: t === "Actions" ? "num" : null }, t)))),
         h("tbody", null, meta.users.map((u) => h("tr", null,
           h("td", null, h("span", { class: "patient" }, u.username), u.id === state.user.id ? h("span", { class: "sub" }, " (you)") : null),
+          h("td", null, roleLabel(u.effective_role), u.interface === "simplified" ? h("div", { class: "sub" }, "simplified view") : null),
           h("td", null, u.permissions.length ? u.permissions.map((p) => h("span", { class: "chip perm" }, p)) : h("span", { class: "muted" }, "no access")),
           h("td", null, h("span", { class: `chip ${u.active ? "status-on" : "status-off"}` }, u.active ? "Active" : "Disabled")),
           h("td", null, formatTimestamp(u.last_login)),
@@ -1187,12 +1605,16 @@ function openUserDialog(user, meta, reload) {
     return h("label", null, box, h("span", null, p.key, h("small", null, p.description)));
   });
 
+  // The role is saved with the account: it decides the user's view (normal or simplified) while
+  // the simplified view is switched on. Choosing one also ticks its permissions.
+  const initialRole = user ? user.effective_role || "" : (meta.presets.some((p) => p.key === "viewer") ? "viewer" : "");
   const preset = h("select", {
     onchange: (event) => {
       const chosen = meta.presets.find((p) => p.key === event.target.value);
       if (chosen) for (const key of Object.keys(checks)) checks[key].checked = chosen.permissions.includes(key);
     },
-  }, h("option", { value: "" }, "Custom"), meta.presets.map((p) => h("option", { value: p.key }, p.label)));
+  }, h("option", { value: "", selected: !initialRole }, "Custom (no role)"),
+  meta.presets.map((p) => h("option", { value: p.key, selected: p.key === initialRole }, p.interface === "simplified" ? `${p.label}  [simplified view]` : p.label)));
 
   const active = h("input", { type: "checkbox", checked: user ? user.active : true });
 
@@ -1203,9 +1625,9 @@ function openUserDialog(user, meta, reload) {
       const permissions = Object.keys(checks).filter((key) => checks[key].checked);
       try {
         if (isNew) {
-          await api("POST", "/api/admin/users", { username: username.value.trim(), password: password.value, permissions });
+          await api("POST", "/api/admin/users", { username: username.value.trim(), password: password.value, permissions, role: preset.value });
         } else {
-          const body = { permissions, active: active.checked };
+          const body = { permissions, active: active.checked, role: preset.value };
           if (password.value) body.password = password.value;
           await api("PUT", `/api/admin/users/${user.id}`, body);
         }
@@ -1227,7 +1649,8 @@ function openUserDialog(user, meta, reload) {
     error,
     h("label", null, "Username", username),
     h("label", null, isNew ? "Password" : "New password (optional)", password),
-    h("label", null, "Start from a role", preset),
+    h("label", null, "Role", preset),
+    h("p", { class: "hint" }, "Choosing a role ticks its permissions (you can still change them). The role also sets the user's view, normal or simplified, while the simplified view is switched on in Settings > Appearance."),
     h("fieldset", { class: "perm-list" }, h("legend", null, "Permissions"), permissionBoxes),
     isNew ? null : h("label", { class: "perm-list" }, h("span", null, active, " Account is active")),
     h("div", { class: "dialog-actions" },
@@ -1504,7 +1927,31 @@ const SETTINGS_FIELDS = {
     { key: "thumbnails_enabled", label: "Show preview thumbnails next to studies and series", type: "checkbox", wide: true, hint: "Only staff with the visualize permission see them (guests with an invitation never do). Each one makes Orthanc decode one image." },
     { key: "thumbnail_cache_mb", label: "Thumbnail cache (MB)", type: "number", min: 0, max: 1024, hint: "Memory used to remember generated thumbnails. 0 = no cache." },
   ],
+  simplified: [
+    { key: "simplified_enabled", label: "Switch on the simplified view", type: "checkbox", wide: true,
+      hint: "Off: everybody uses the normal view. On: each role uses the view chosen for it in Security & roles > Roles; users with custom permissions (no role) get the view below. Users with the switch_view permission get a button to change view themselves (their choice is remembered in their browser)." },
+    { key: "default_interface", label: "View of users without a role", type: "select", options: [["normal", "Normal view"], ["simplified", "Simplified view"]], hint: "Users whose permissions were ticked by hand (\"Custom\" in the user form)." },
+    { key: "simplified_recent_count", label: "Recent studies on the home page", type: "number", min: 1, max: 100 },
+    { key: "simplified_recent_order", label: "Which studies are the most recent", type: "select", options: [["received", "The last ones received by the PACS"], ["study_date", "The newest study dates"]] },
+    { key: "simplified_recent_layout", label: "How the recent studies are shown", type: "select", options: [["table", "Table, like the Studies page (same columns and buttons)"], ["cards", "Cards with big previews"]] },
+    { key: "simplified_card_size", label: "Size of the study cards", type: "select", options: [["small", "Small (more per row)"], ["medium", "Medium"], ["large", "Large (bigger previews)"]], hint: "Only for the cards." },
+    { key: "simplified_recent_title", label: "Title of the recent studies", placeholder: "Recent studies", maxlength: 60 },
+    { key: "simplified_upload_text", label: "Text of the upload area", placeholder: "Drag a file to upload it", maxlength: 120 },
+    { key: "simplified_show_total", label: "Show the total number of studies in the header", type: "checkbox", wide: true },
+    { key: "simplified_show_labels", label: "Write the name under each icon", type: "checkbox", wide: true, hint: "Otherwise the name pops up when the mouse rests on an icon." },
+  ],
 };
+
+/**
+ * The colours of Settings > Appearance: key, label, hint and the colour the picker shows
+ * while "Default" is ticked (the built-in light-theme colour).
+ */
+const COLOR_FIELDS = [
+  { key: "color_accent", label: "Accent", fallback: "#2547c8", hint: "Main buttons, selected tabs and filters, links." },
+  { key: "color_header", label: "Header", fallback: "#101a24", hint: "Top bar of the normal view and header of the simplified view. The text colour adapts itself." },
+  { key: "color_sidebar", label: "Icon column", fallback: "#ffffff", hint: "Left column of the simplified view." },
+  { key: "color_background", label: "Page background", fallback: "#f1f4f7", hint: "Behind the cards and tables. Pick a light colour for the light theme and a dark one for the dark theme." },
+];
 
 /**
  * Picker for one branding image (`kind` = "logo" or "favicon"): shows the current
@@ -1563,7 +2010,7 @@ function buildBrandImagePicker(kind, title, hint, accept) {
  * form). `get()` returns the roles as the server expects them.
  */
 function buildRolesEditor(roles, defaults, permissions) {
-  const clone = (list) => list.map((r) => ({ key: r.key, label: r.label, permissions: [...r.permissions] }));
+  const clone = (list) => list.map((r) => ({ key: r.key, label: r.label, permissions: [...r.permissions], interface: r.interface || "normal" }));
   let rows = clone(roles);
   const list = h("div", { class: "roles" });
 
@@ -1575,15 +2022,19 @@ function buildRolesEditor(roles, defaults, permissions) {
         type: "checkbox", checked: role.permissions.includes(p.key),
         onchange: (e) => { role.permissions = e.target.checked ? [...new Set([...role.permissions, p.key])] : role.permissions.filter((k) => k !== p.key); },
       }), p.key))),
+    // The look of this role's users while the simplified view is switched on (Appearance tab).
+    h("select", { class: "role-interface", "aria-label": "View", title: "View used by this role when the simplified view is switched on (Appearance tab)", onchange: (e) => { role.interface = e.target.value; } },
+      h("option", { value: "normal", selected: role.interface !== "simplified" }, "Normal view"),
+      h("option", { value: "simplified", selected: role.interface === "simplified" }, "Simplified view")),
     h("button", { class: "btn small danger", type: "button", onclick: () => { rows.splice(index, 1); draw(); } }, "Remove"))));
   draw();
 
   const node = h("div", { class: "wide" }, list,
     h("div", { class: "filter-actions" },
-      h("button", { class: "btn small", type: "button", onclick: () => { rows.push({ key: "", label: "", permissions: ["read", "visualize"] }); draw(); } }, "Add role"),
+      h("button", { class: "btn small", type: "button", onclick: () => { rows.push({ key: "", label: "", permissions: ["read", "visualize"], interface: "normal" }); draw(); } }, "Add role"),
       h("button", { class: "btn small", type: "button", onclick: () => { rows = clone(defaults); draw(); } }, "Restore default roles")));
 
-  return { node, get: () => rows.map((r) => ({ key: r.key.trim(), label: r.label.trim(), permissions: r.permissions })) };
+  return { node, get: () => rows.map((r) => ({ key: r.key.trim(), label: r.label.trim(), permissions: r.permissions, interface: r.interface })) };
 }
 
 /**
@@ -1655,6 +2106,7 @@ function buildModalityButtonsEditor(buttons, defaults) {
  */
 const SETTINGS_TABS = [
   { id: "general", label: "General", sections: ["branding", "search", "viewers"] },
+  { id: "appearance", label: "Appearance", sections: ["theme", "simplified"] },
   { id: "orthanc", label: "Orthanc", sections: ["orthanc"] },
   { id: "network", label: "Network & sharing", sections: ["network", "sharing"] },
   { id: "security", label: "Security & roles", sections: ["security", "roles"] },
@@ -1755,7 +2207,7 @@ function buildSettingsView() {
       } else if (def.type === "checkbox") {
         input = h("input", { type: "checkbox", checked: !!value });
       } else {
-        input = h("input", { type: def.type || "text", value: value ?? "", min: def.min, max: def.max, placeholder: def.placeholder });
+        input = h("input", { type: def.type || "text", value: value ?? "", min: def.min, max: def.max, maxlength: def.maxlength, placeholder: def.placeholder });
       }
       inputs[def.key] = input;
       const control = def.type === "checkbox" ? h("label", { class: "check" }, input, def.label) : h("label", null, def.label, input);
@@ -1816,6 +2268,38 @@ function buildSettingsView() {
     });
 
     const rolesEditor = buildRolesEditor(s.roles, doc.defaults.roles, doc.permissions);
+
+    // ---- Appearance: light / dark and the colours. Every change is previewed at once on this
+    // page; it is kept only when saved (leaving the page without saving puts the saved colours back).
+    const themeMode = h("select", null,
+      [["auto", "Automatic (follows each computer's light or dark setting)"], ["light", "Always light"], ["dark", "Always dark"]]
+        .map(([v, text]) => h("option", { value: v, selected: v === s.theme_mode }, text)));
+    inputs.theme_mode = themeMode;
+    const colorFields = COLOR_FIELDS.map((def) => {
+      const saved = s[def.key] || "";
+      const picker = h("input", { type: "color", value: saved || def.fallback, disabled: !saved, "aria-label": `${def.label} colour` });
+      const useDefault = h("input", { type: "checkbox", checked: !saved });
+      useDefault.addEventListener("change", () => { picker.disabled = useDefault.checked; previewTheme(); });
+      picker.addEventListener("input", previewTheme);
+      // Read like the other inputs when the form is saved: "" = the built-in colour.
+      inputs[def.key] = { type: "color", get value() { return useDefault.checked ? "" : picker.value; } };
+      return h("div", { class: "setting" },
+        h("span", { class: "field-label" }, def.label),
+        h("div", { class: "color-setting" }, picker, h("label", { class: "check" }, useDefault, "Default")),
+        h("p", { class: "hint" }, def.hint));
+    });
+    function previewTheme() {
+      applyTheme({
+        mode: themeMode.value, accent: inputs.color_accent.value, header: inputs.color_header.value,
+        sidebar: inputs.color_sidebar.value, background: inputs.color_background.value,
+      });
+    }
+    themeMode.addEventListener("change", previewTheme);
+    const themeFields = [
+      h("div", { class: "setting wide" }, h("label", null, "Light or dark", themeMode),
+        h("p", { class: "hint" }, "The colours below replace the built-in ones in both themes, on the login page and on the invitation page too.")),
+      ...colorFields,
+    ];
     const modalityEditor = buildModalityButtonsEditor(s.modality_buttons, doc.defaults.modality_buttons);
 
     // Docker (LISTENERS_FROM_ENV): the addresses must match the published ports, so they are
@@ -1852,6 +2336,7 @@ function buildSettingsView() {
           return;
         }
         save.disabled = true;
+        const shownInterface = currentInterface();
         // Collect the values of every control into the object the server expects.
         const body = {};
         for (const [key, input] of Object.entries(inputs)) {
@@ -1876,6 +2361,9 @@ function buildSettingsView() {
           try { state.user.features = (await api("GET", "/api/me")).features; } catch { /* keep the old ones */ }
           refreshOrthancStatus(true);
           toast("Settings saved.");
+          // The administrator's own view may have changed (simplified view switched on or off,
+          // or the view of their role): redraw the whole page, staying on Settings.
+          if (currentInterface() !== shownInterface) { renderApp(); return; }
           draw(doc.messages || []);
         } catch (e) {
           toastError(e);
@@ -1890,16 +2378,20 @@ function buildSettingsView() {
       section("search", "Modality buttons", "The quick filters above the Studies and Series lists. Put them in the order your staff use them and hide the ones nobody needs. Each button searches for one or more DICOM modality codes (RX = CR + DX). The \"Other codes\" box is always shown, so any code can still be searched.",
         modalityEditor.node),
       section("viewers", "Viewers and uploads", null, SETTINGS_FIELDS.viewers.map(field)),
+      section("theme", "Colours", "Match the portal to your practice's colours. Changes are previewed on this page at once and kept when you save. The logo, the portal name and the window title are in the General tab.",
+        themeFields),
+      section("simplified", "Simplified view", "A reduced layout for staff who mostly look at recent studies and upload new ones: the logo, the practice name and the total of studies at the top, a column of icons (Home, Search, Share, Upload, Configuration, Log out) on the left, and a home page with the most recent studies and an area to drop files into. Choose which roles use it in Security & roles > Roles.",
+        SETTINGS_FIELDS.simplified.map(field)),
       section("orthanc", "Orthanc connection", "The PACS this portal works with. Saved changes apply immediately, without restarting.",
         urlField, modeField, userField, passwordField,
         h("div", { class: "setting wide" }, testButton, testBox)),
       section("network", "Network", networkIntro, networkFields, listenerInfo),
       section("sharing", "Share links (invitations for people outside)", "A staff member with the share permission can invite somebody outside: a link plus a generated password that opens ONE study, to look at online and to download a limited number of times, until the link expires. These are the defaults offered when creating a link, and the limits nobody can exceed.", SETTINGS_FIELDS.sharing.map(field)),
       section("security", "Sessions and sign-in security", null, SETTINGS_FIELDS.security.map(field)),
-      section("roles", "Roles", "Shortcuts that pre-tick permissions when you create or edit a user (Users tab). Users keep their own permissions: changing a role does not change existing users.", rolesEditor.node),
+      section("roles", "Roles", "Shortcuts that pre-tick permissions when you create or edit a user (Users tab), and the view (normal or simplified) of the users who have that role, used while the simplified view is switched on (Appearance tab). Users keep their own permissions: changing a role's permissions does not change existing users, but changing its view applies to them at their next page load.", rolesEditor.node),
       h("div", { class: "settings-actions" },
         save,
-        h("span", { class: "muted" }, "Saves the General, Orthanc, Network & sharing and Security & roles tabs together.")));
+        h("span", { class: "muted" }, "Saves the General, Appearance, Orthanc, Network & sharing and Security & roles tabs together.")));
 
     formHost.replaceChildren(form);
     showNotices(notices);

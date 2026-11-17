@@ -34,13 +34,39 @@ fn validate_username(name: &str) -> AppResult<()> {
     }
 }
 
+/// A role key sent by the user form: empty (custom permissions) or one of the roles of
+/// Settings > Security & roles.
+fn validate_role(state: &AppState, role: &str) -> AppResult<String> {
+    let role = role.trim();
+    if role.is_empty() || state.settings.get().roles.iter().any(|r| r.key == role) {
+        Ok(role.to_string())
+    } else {
+        Err(AppError::BadRequest(format!("Unknown role '{role}'")))
+    }
+}
+
 /// Lists all users together with the metadata the admin form needs.
 pub async fn list_users(State(state): State<AppState>, AuthUser(admin): AuthUser) -> AppResult<Json<Value>> {
     admin.require(Permission::Admin)?;
     let permissions: Vec<Value> =
         Permission::ALL.iter().map(|p| json!({ "key": p.as_str(), "description": p.description() })).collect();
+    // Each user with the role it is treated as and the view that gives (Settings > Appearance).
+    let settings = state.settings.get();
+    let users: Vec<Value> = state
+        .db
+        .list_users()?
+        .into_iter()
+        .map(|u| {
+            let role = settings.role_of(&u.role, &u.permissions).map(|r| r.key.clone());
+            let interface = settings.interface_for(&u.role, &u.permissions);
+            let mut value = serde_json::to_value(&u).unwrap_or_default();
+            value["effective_role"] = json!(role);
+            value["interface"] = json!(interface);
+            value
+        })
+        .collect();
     Ok(Json(json!({
-        "users": state.db.list_users()?,
+        "users": users,
         "permissions": permissions,
         // Roles are a setting: edited in Settings > Roles.
         "presets": state.settings.get().roles,
@@ -53,6 +79,9 @@ pub struct CreateUser {
     password: String,
     /// Permission names, e.g. `["read", "visualize"]`.
     permissions: Vec<String>,
+    /// Key of the role picked in the form (empty or absent = custom).
+    #[serde(default)]
+    role: String,
 }
 
 pub async fn create_user(
@@ -66,10 +95,20 @@ pub async fn create_user(
     validate_username(&username)?;
     auth::validate_password(&req.password)?;
     let permissions = PermissionSet::parse_list(&req.permissions)?;
+    let role = validate_role(&state, &req.role)?;
 
     let hash = auth::hash_password(req.password).await?;
-    let user = state.db.create_user(&username, &hash, &permissions)?;
-    state.db.audit(&admin.username, "user_created", &format!("{} [{}]", user.username, permissions.to_db_string()));
+    let user = state.db.create_user(&username, &hash, &permissions, &role)?;
+    state.db.audit(
+        &admin.username,
+        "user_created",
+        &format!(
+            "{} [{}] role={}",
+            user.username,
+            permissions.to_db_string(),
+            if role.is_empty() { "custom" } else { &role }
+        ),
+    );
     Ok(Json(user))
 }
 
@@ -80,6 +119,8 @@ pub struct UpdateUser {
     active: Option<bool>,
     /// New password (reset). Leave out to keep the current one.
     password: Option<String>,
+    /// Role key ("" = custom). Leave out to keep the current one.
+    role: Option<String>,
 }
 
 pub async fn update_user(
@@ -95,6 +136,7 @@ pub async fn update_user(
     let target = state.db.get_user(id)?.ok_or(AppError::NotFound)?;
 
     let new_permissions = req.permissions.as_deref().map(PermissionSet::parse_list).transpose()?;
+    let role = req.role.as_deref().map(|r| validate_role(&state, r)).transpose()?;
     let password = req.password.filter(|p| !p.is_empty());
     if let Some(p) = &password {
         auth::validate_password(p)?;
@@ -120,7 +162,7 @@ pub async fn update_user(
         Some(p) => Some(auth::hash_password(p).await?),
         None => None,
     };
-    state.db.update_user(id, new_permissions.as_ref(), req.active, hash.as_deref())?;
+    state.db.update_user(id, new_permissions.as_ref(), req.active, hash.as_deref(), role.as_deref())?;
 
     // A new password (or a disabled account) ends every session and Weasis link of that user.
     // An administrator changing their OWN password keeps only the session they are using now:
@@ -140,9 +182,10 @@ pub async fn update_user(
         &admin.username,
         "user_updated",
         &format!(
-            "{} [{}] active={}{}",
+            "{} [{}] role={} active={}{}",
             updated.username,
             updated.permissions.to_db_string(),
+            if updated.role.is_empty() { "custom" } else { &updated.role },
             updated.active,
             if hash.is_some() { " password reset" } else { "" }
         ),

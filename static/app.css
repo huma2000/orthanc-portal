@@ -7,7 +7,10 @@
   scanned at a glance. System fonts only (the portal runs on intranets).
 
   All colours are CSS variables defined in the first two blocks; the dark theme
-  simply redefines them (it follows the operating-system preference).
+  simply redefines them. It follows the operating-system preference unless an
+  administrator forces light or dark (Settings > Appearance), which app.js / share.js
+  record as data-theme="light" | "dark" on <html>. The colours an administrator picks
+  there are applied by JavaScript on top of these tokens (applyTheme in app.js).
 */
 
 /* ---------- 1. Design tokens (light) ---------- */
@@ -31,14 +34,29 @@
   --warn: #8a5300;
   --warn-soft: #fdf1da;
   --shadow: 0 1px 2px rgba(16, 26, 36, 0.06), 0 8px 24px rgba(16, 26, 36, 0.08);
+  --on-accent: #fff;       /* text on an accent-coloured button */
+  --bar-ink-strong: #fff;  /* brand and selected tab in the top bar */
+  --bar-line: #44546a;     /* outlines of buttons in the top bar */
+  --bar-hover: #1b2735;
+  --side: var(--panel);    /* icon column of the simplified view */
+  --side-ink: var(--ink-soft);
+  --side-ink-strong: var(--ink);
+  --side-hover: var(--panel-alt);
+  --side-line: var(--line-strong);
+  --header: var(--panel);  /* header of the simplified view */
+  --header-ink: var(--ink);
+  --header-line: var(--line-strong);
+  --card-min: 190px;       /* width of a study card on the home page */
 
   --font: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, "Cascadia Mono", "SF Mono", Consolas, "Liberation Mono", monospace;
 }
 
-/* ---------- 2. Dark theme: same tokens, different values ---------- */
+/* ---------- 2. Dark theme: same tokens, different values ----------
+   Twice, identical: when the operating system prefers dark (unless light is forced),
+   and when dark is forced. Keep the two blocks in step. */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --ink: #e4eaf0;
     --ink-soft: #97a6b5;
     --paper: #0d141b;
@@ -58,8 +76,38 @@
     --warn: #f0b85a;
     --warn-soft: #33270f;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.35);
+    --on-accent: #0d141b;
+    color-scheme: dark;
   }
 }
+:root[data-theme="dark"] {
+  --ink: #e4eaf0;
+  --ink-soft: #97a6b5;
+  --paper: #0d141b;
+  --panel: #151e27;
+  --panel-alt: #19242e;
+  --line: #26323e;
+  --line-strong: #3a4957;
+  --accent: #7f9bff;
+  --accent-hover: #a2b6ff;
+  --accent-soft: #1c2745;
+  --bar: #090f15;
+  --bar-ink: #c4cfda;
+  --danger: #ff8a80;
+  --danger-soft: #3a1f1d;
+  --ok: #62d49b;
+  --ok-soft: #14301f;
+  --warn: #f0b85a;
+  --warn-soft: #33270f;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.35);
+  --on-accent: #0d141b;
+  color-scheme: dark;
+}
+:root[data-theme="light"] { color-scheme: light; }
+
+/* An accent colour chosen in Settings > Appearance: app.js sets --accent, --accent-hover and
+   --on-accent, the soft tint is derived here so it suits both the light and the dark theme. */
+:root.custom-accent { --accent-soft: color-mix(in srgb, var(--accent) 16%, var(--panel)); }
 
 /* ---------- 3. Base ---------- */
 * { box-sizing: border-box; }
@@ -98,7 +146,7 @@ a { color: var(--accent); }
   background: var(--bar);
   color: var(--bar-ink);
 }
-.brand { display: flex; align-items: center; gap: 0.6rem; font-weight: 600; color: #fff; padding: 0.7rem 0; }
+.brand { display: flex; align-items: center; gap: 0.6rem; font-weight: 600; color: var(--bar-ink-strong); padding: 0.7rem 0; }
 .brand svg { width: 24px; height: 24px; }
 .nav { display: flex; gap: 0.25rem; flex: 1; overflow-x: auto; }
 .nav button {
@@ -110,11 +158,11 @@ a { color: var(--accent); }
   padding: 1rem 0.8rem 0.8rem;
   cursor: pointer;
 }
-.nav button:hover { color: #fff; }
-.nav button[aria-current="page"] { color: #fff; border-bottom-color: #9fb4ff; font-weight: 600; }
+.nav button:hover { color: var(--bar-ink-strong); }
+.nav button[aria-current="page"] { color: var(--bar-ink-strong); border-bottom-color: currentColor; font-weight: 600; }
 .userbox { display: flex; align-items: center; gap: 0.75rem; white-space: nowrap; }
-.userbox .btn { background: transparent; color: var(--bar-ink); border-color: #44546a; }
-.userbox .btn:hover { background: #1b2735; }
+.userbox .btn { background: transparent; color: var(--bar-ink); border-color: var(--bar-line); }
+.userbox .btn:hover { background: var(--bar-hover); }
 
 .page { max-width: 1320px; margin: 0 auto; padding: 1.25rem; display: grid; gap: 1rem; }
 /* Table pages (Studies, Series, Transfers, Shares) use the whole window: more room for the
@@ -140,9 +188,8 @@ a { color: var(--accent); }
 }
 .btn:hover { background: var(--panel-alt); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
 .btn.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
-@media (prefers-color-scheme: dark) { .btn.primary { color: #0d141b; } }
 .btn.danger { color: var(--danger); border-color: var(--danger); }
 .btn.danger:hover { background: var(--danger-soft); }
 .btn.small { padding: 0.25rem 0.55rem; font-size: 0.92em; }
@@ -218,14 +265,19 @@ tr.series-row > td { padding: 0; background: var(--panel-alt); }
 .chip[data-m="NM"], .chip[data-m="PT"] { background: #fbe4ea; border-color: #f2bfcc; color: #8d1f40; }
 .chip[data-m="XA"], .chip[data-m="OT"], .chip[data-m="SR"] { background: #e8ecef; border-color: #ced6dc; color: #3b4854; }
 @media (prefers-color-scheme: dark) {
-  .chip[data-m="CT"] { background: #1a2a4d; border-color: #2c4377; color: #a9c1ff; }
-  .chip[data-m="MR"] { background: #2b1f45; border-color: #46346e; color: #cdb5f5; }
-  .chip[data-m="US"] { background: #12342f; border-color: #1f5a51; color: #8fe0d3; }
-  .chip[data-m="CR"], .chip[data-m="DX"], .chip[data-m="XR"], .chip[data-m="RF"], .chip[data-m="MG"]
-                     { background: #3a2c10; border-color: #5e4818; color: #f0c878; }
-  .chip[data-m="NM"], .chip[data-m="PT"] { background: #3d1827; border-color: #66283f; color: #f5a6bd; }
-  .chip[data-m="XA"], .chip[data-m="OT"], .chip[data-m="SR"] { background: #232d36; border-color: #364350; color: #b6c3cf; }
+  :root:not([data-theme="light"]) .chip[data-m="CT"] { background: #1a2a4d; border-color: #2c4377; color: #a9c1ff; }
+  :root:not([data-theme="light"]) .chip[data-m="MR"] { background: #2b1f45; border-color: #46346e; color: #cdb5f5; }
+  :root:not([data-theme="light"]) .chip[data-m="US"] { background: #12342f; border-color: #1f5a51; color: #8fe0d3; }
+  :root:not([data-theme="light"]) .chip[data-m="CR"], :root:not([data-theme="light"]) .chip[data-m="DX"], :root:not([data-theme="light"]) .chip[data-m="XR"], :root:not([data-theme="light"]) .chip[data-m="RF"], :root:not([data-theme="light"]) .chip[data-m="MG"] { background: #3a2c10; border-color: #5e4818; color: #f0c878; }
+  :root:not([data-theme="light"]) .chip[data-m="NM"], :root:not([data-theme="light"]) .chip[data-m="PT"] { background: #3d1827; border-color: #66283f; color: #f5a6bd; }
+  :root:not([data-theme="light"]) .chip[data-m="XA"], :root:not([data-theme="light"]) .chip[data-m="OT"], :root:not([data-theme="light"]) .chip[data-m="SR"] { background: #232d36; border-color: #364350; color: #b6c3cf; }
 }
+:root[data-theme="dark"] .chip[data-m="CT"] { background: #1a2a4d; border-color: #2c4377; color: #a9c1ff; }
+:root[data-theme="dark"] .chip[data-m="MR"] { background: #2b1f45; border-color: #46346e; color: #cdb5f5; }
+:root[data-theme="dark"] .chip[data-m="US"] { background: #12342f; border-color: #1f5a51; color: #8fe0d3; }
+:root[data-theme="dark"] .chip[data-m="CR"], :root[data-theme="dark"] .chip[data-m="DX"], :root[data-theme="dark"] .chip[data-m="XR"], :root[data-theme="dark"] .chip[data-m="RF"], :root[data-theme="dark"] .chip[data-m="MG"] { background: #3a2c10; border-color: #5e4818; color: #f0c878; }
+:root[data-theme="dark"] .chip[data-m="NM"], :root[data-theme="dark"] .chip[data-m="PT"] { background: #3d1827; border-color: #66283f; color: #f5a6bd; }
+:root[data-theme="dark"] .chip[data-m="XA"], :root[data-theme="dark"] .chip[data-m="OT"], :root[data-theme="dark"] .chip[data-m="SR"] { background: #232d36; border-color: #364350; color: #b6c3cf; }
 .chip.perm { background: var(--accent-soft); border-color: transparent; color: var(--accent); }
 .chip.status-on { background: var(--ok-soft); border-color: transparent; color: var(--ok); }
 .chip.status-off { background: var(--danger-soft); border-color: transparent; color: var(--danger); }
@@ -282,9 +334,10 @@ dialog form, dialog .dialog-form { display: grid; gap: 0.9rem; padding: 1.3rem; 
 
 /* ---------- 10. Toasts ---------- */
 #toasts { position: fixed; right: 1rem; bottom: 1rem; display: grid; gap: 0.5rem; z-index: 50; max-width: min(420px, calc(100vw - 2rem)); }
-.toast { padding: 0.7rem 0.9rem; border-radius: 8px; background: var(--bar); color: #fff; box-shadow: var(--shadow); }
+.toast { padding: 0.7rem 0.9rem; border-radius: 8px; background: var(--bar); color: var(--bar-ink-strong); box-shadow: var(--shadow); }
 .toast.error { background: var(--danger); color: #fff; }
-@media (prefers-color-scheme: dark) { .toast.error { color: #1b0a09; } }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .toast.error { color: #1b0a09; } }
+:root[data-theme="dark"] .toast.error { color: #1b0a09; }
 
 /* ---------- 11. Small screens and reduced motion ---------- */
 @media (max-width: 720px) {
@@ -322,8 +375,7 @@ dialog form, dialog .dialog-form { display: grid; gap: 0.9rem; padding: 1.3rem; 
   cursor: pointer;
 }
 .chip-toggle:hover { background: var(--panel-alt); }
-.chip-toggle[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
-@media (prefers-color-scheme: dark) { .chip-toggle[aria-pressed="true"] { color: #0d141b; } }
+.chip-toggle[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 .mod-other { width: 12rem; }
 
 /* Items of the View / Download drop-down menus (links or buttons, same look) */
@@ -366,7 +418,7 @@ label.check { display: flex; align-items: center; gap: 0.5rem; color: var(--ink)
 .settings-actions .muted { font-size: 0.85rem; }
 
 /* Tabs inside Settings: underlined like the top bar, but on the page surface. */
-.subtabs { display: flex; align-items: stretch; gap: 0.15rem; border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: thin; }
+.subtabs { display: flex; align-items: stretch; gap: 0.15rem; border-bottom: 1px solid var(--line); overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
 .subtabs button {
   background: none;
   border: 0;
@@ -391,7 +443,7 @@ label.check { display: flex; align-items: center; gap: 0.5rem; color: var(--ink)
 
 /* Roles editor */
 .roles { display: grid; gap: 0.6rem; }
-.role-row { display: grid; grid-template-columns: 9rem minmax(10rem, 1fr) auto auto; gap: 0.6rem; align-items: center; padding: 0.5rem; border: 1px solid var(--line); border-radius: 8px; }
+.role-row { display: grid; grid-template-columns: 9rem minmax(10rem, 1fr) auto 10rem auto; gap: 0.6rem; align-items: center; padding: 0.5rem; border: 1px solid var(--line); border-radius: 8px; }
 .role-perms { display: flex; flex-wrap: wrap; gap: 0.2rem 0.9rem; }
 @media (max-width: 900px) { .role-row { grid-template-columns: 1fr; } }
 
@@ -502,3 +554,186 @@ dl.share-details dd { margin: 0; font-weight: 600; }
 .secret-box { display: flex; gap: 0.5rem; align-items: center; }
 .secret-box input { font-family: var(--mono); flex: 1; min-width: 0; }
 .secret-box .password { font-family: var(--mono); font-size: 1.4rem; font-weight: 700; letter-spacing: 0.08em; padding: 0.5rem 0.8rem; border: 2px dashed var(--accent); border-radius: 8px; user-select: all; }
+
+/* ---------- 18. Simplified view ----------
+   Header (logo, practice name, total of studies) across the top, a column of icons on the
+   left, and the main area. On phones the icon column becomes a bar at the bottom. The
+   colours come from the --header*, --side* and --card-min tokens (Settings > Appearance). */
+.simple {
+  height: 100vh;
+  height: 100dvh;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-areas: "head head" "side main";
+}
+.simple-head {
+  grid-area: head;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.55rem 1.25rem;
+  background: var(--header);
+  color: var(--header-ink);
+  border-bottom: 2px solid var(--header-line);
+}
+.simple-head .brand { color: inherit; padding: 0; font-size: clamp(1.25rem, 2.6vw, 2rem); font-weight: 500; min-width: 0; }
+.simple-head .brand-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.simple-head .brand-logo { height: clamp(36px, 6vw, 56px); max-width: min(320px, 50vw); }
+.simple-head .brand > img:not(.brand-logo) { width: clamp(30px, 5vw, 44px); height: auto; }
+.simple-total { white-space: nowrap; font-size: 0.95rem; opacity: 0.9; padding-bottom: 0.15rem; }
+.simple-total b { font-weight: 600; }
+
+.simple-side {
+  grid-area: side;
+  position: relative;
+  z-index: 5;                         /* the tooltips float over the main area */
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.8rem 0.45rem;
+  background: var(--side);
+  border-right: 2px solid var(--side-line);
+  overflow: visible;
+}
+.side-group { display: flex; flex-direction: column; align-items: center; gap: 0.4rem; }
+.side-btn {
+  position: relative;
+  display: grid;
+  place-items: center;
+  gap: 0.15rem;
+  width: 3.4rem;
+  min-height: 3.4rem;
+  padding: 0.3rem;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  color: var(--side-ink);
+  font: inherit;
+  cursor: pointer;
+}
+.side-btn svg { width: 30px; height: 30px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.side-btn:hover { background: var(--side-hover); color: var(--side-ink-strong); }
+.side-btn[aria-current="page"] { background: var(--side-hover); color: var(--side-ink-strong); box-shadow: inset 3px 0 0 var(--accent); }
+.side-label { display: none; font-size: 0.72rem; line-height: 1.15; text-align: center; }
+.simple.labels .side-btn { width: 5.2rem; }
+.simple.labels .side-label { display: block; }
+
+/* The description that pops up next to an icon (hover or keyboard focus). */
+.side-btn::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: calc(100% + 10px);
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 0.3rem 0.6rem;
+  border-radius: 6px;
+  background: var(--ink);
+  color: var(--paper);
+  font-size: 0.85rem;
+  font-weight: 500;
+  white-space: nowrap;
+  box-shadow: var(--shadow);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease 0.15s;
+}
+.side-btn:hover::after, .side-btn:focus-visible::after { opacity: 1; }
+.simple.labels .side-btn::after { display: none; }   /* the name is already written under the icon */
+
+/* A column: each page keeps its natural height, except the home page, which grows to fill the
+   window (its "recent studies" box then reaches the drop zone at the bottom, or the bottom itself). */
+.simple-main { grid-area: main; overflow: auto; padding: 1.25rem; display: flex; flex-direction: column; gap: 1rem; }
+.simple-main > * { flex: none; min-width: 0; }
+/* The home page takes exactly the height of the window: its drop zone stays at the bottom and the
+   recent studies scroll inside their own box (see .home below). */
+.simple-main > .home { flex: 1 1 0; min-height: 0; }
+/* Like .page.wide: a wide table scrolls inside its own box instead of widening the page. */
+.simple-main .view { grid-template-columns: minmax(0, 1fr); }
+.simple-main > .banner { margin: -1.25rem -1.25rem 0; }
+
+/* Home: recent studies on top, the drop zone below */
+/* Recent studies: whatever height is left (at least 180px; on a very short window the page scrolls
+   instead), then the drop zone and the upload progress at their natural height. */
+.home { display: grid; gap: 1rem; grid-template-rows: minmax(180px, 1fr) auto auto; }
+.recent { border: 2px solid var(--line-strong); border-radius: 10px; background: var(--panel); display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; }
+.recent-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; padding: 1rem 1.2rem 0.9rem; }
+/* The scrolling part. The table's column titles stay visible while it scrolls. */
+.recent-body { overflow: auto; min-height: 0; }
+.recent-body > .study-grid, .recent-body > .empty, .recent-body > .loading { margin: 0 1.2rem 1.2rem; }
+.recent-body > .table-wrap { overflow: visible; border-top: 1px solid var(--line); }
+.recent-body thead th { position: sticky; top: 0; z-index: 1; background: var(--panel); }
+.recent-head h2 { font-size: clamp(1.3rem, 2.6vw, 2rem); font-weight: 500; }
+/* The table version sits flush with the box, like the results panel of the Studies page. */
+.study-grid { display: grid; gap: 0.9rem; grid-template-columns: repeat(auto-fill, minmax(min(var(--card-min), 100%), 1fr)); }
+.study-grid[data-size="small"] { --card-min: 145px; }
+.study-grid[data-size="large"] { --card-min: 260px; }
+.study-card {
+  display: grid;
+  gap: 0.35rem;
+  align-content: start;
+  padding: 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  min-width: 0;
+}
+.study-card:hover { border-color: var(--accent); background: var(--panel-alt); }
+.study-card .thumb { width: 100%; height: auto; aspect-ratio: 4 / 3; font-size: 1rem; }
+.card-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card-sub { color: var(--ink-soft); font-size: 0.86em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card-chips { display: flex; flex-wrap: wrap; gap: 0.2rem; }
+.card-chips .chip { margin: 0; }
+
+.dropzone.home-drop { padding: 1.4rem 1rem; border-width: 2px; border-style: dashed; }
+.home-drop h2 { font-size: clamp(1.3rem, 3vw, 2.3rem); font-weight: 500; }
+.home-progress { display: grid; gap: 0.5rem; width: min(520px, 100%); }
+.home-progress .muted { font-size: 0.9em; }
+
+/* Study details opened from a card */
+dialog.study-dialog { width: min(760px, calc(100vw - 2rem)); }
+.study-dialog .series-box { margin-left: 0; }
+.study-dialog .actions { justify-content: flex-start; }
+
+/* Icon buttons of the studies (simplified view) and their tooltip */
+.btn.icon-btn { padding: 0.3rem; min-width: 2.1rem; justify-content: center; }
+.actions:has(> .icon-btn, > details > .icon-btn) { flex-wrap: nowrap; }   /* a row of icons stays on one line */
+.btn.icon-btn svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.tooltip {
+  position: fixed;
+  z-index: 100;
+  max-width: min(320px, calc(100vw - 8px));
+  padding: 0.3rem 0.6rem;
+  border-radius: 6px;
+  background: var(--ink);
+  color: var(--paper);
+  font-size: 0.85rem;
+  line-height: 1.3;
+  box-shadow: var(--shadow);
+  pointer-events: none;
+}
+
+/* Settings > Appearance: colour pickers */
+.color-setting { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.color-setting input[type="color"] { width: 3.2rem; height: 2.2rem; padding: 2px; cursor: pointer; }
+.color-setting input[type="color"]:disabled { opacity: 0.35; cursor: default; }
+
+/* Phones: the icon column becomes a bar along the bottom of the screen */
+@media (max-width: 640px) {
+  .simple { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto; grid-template-areas: "head" "main" "side"; }
+  .simple-head { padding: 0.5rem 0.75rem; align-items: center; }
+  .simple-side { flex-direction: row; padding: 0.3rem 0.4rem; border-right: 0; border-top: 2px solid var(--side-line); overflow-x: auto; gap: 0.4rem; }
+  .side-group { flex-direction: row; gap: 0.15rem; }
+  .side-btn, .simple.labels .side-btn { width: auto; min-width: 2.9rem; min-height: 2.9rem; }
+  .side-btn svg { width: 26px; height: 26px; }
+  .side-btn[aria-current="page"] { box-shadow: inset 0 3px 0 var(--accent); }
+  .side-btn::after { display: none; }   /* no hover on touch screens: aria-label still names each button */
+  .simple-main { padding: 0.75rem; }
+  .simple-main > .banner { margin: -0.75rem -0.75rem 0; }
+}
