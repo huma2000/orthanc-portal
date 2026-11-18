@@ -10,8 +10,8 @@
     2. Tiny DOM helper `h()`        (builds elements safely, never uses innerHTML)
     3. API helper `api()`           (adds the CSRF header, handles errors / expired sessions)
     4. Formatting helpers           (DICOM names, dates)
-    5. Shell: login, navigation, sign out, colours (theme)
-   5b. Simplified view               (header, icon column, home page with recent studies)
+    5. Shell: login, sign out, colours (theme)
+   5b. The portal's layout           (header, icon column, home page with recent studies)
     6. Studies and Series search    (shared builder, modality picker, two tables)
    6b. Preview thumbnails           (lazy loading, small in-memory cache)
     7. Viewers (Weasis / OHIF), downloads and sending to DICOM nodes
@@ -47,9 +47,8 @@ const modalityButtons = () => (state.user && state.user.features && state.user.f
 /** Global UI state. `user` is null while signed out. */
 const state = {
   user: null,     // { id, username, permissions: ["read", ...], features: { ohif, thumbnails, share: {...} } }
-  view: null,     // id of the visible tab ("studies", "series", "upload", "settings"...)
-  simpleView: "home", // id of the visible page of the simplified view (see SIMPLE_PAGES)
-  simpleSearch: "studies", // simplified Search page: "studies" or "series"
+  simpleView: "home", // id of the visible page (see SIMPLE_PAGES)
+  simpleSearch: "studies", // which search the Search page shows: "studies" or "series"
   settingsTab: "general", // id of the visible tab inside Settings (see SETTINGS_TABS)
   notice: "",     // message shown on the login form (e.g. "Your session expired")
   // Identity of this installation (Settings > Branding). Filled from /api/public.
@@ -222,84 +221,22 @@ const dash = () => h("span", { class: "muted" }, "-");
    5. SHELL: LOGIN, NAVIGATION, SIGN OUT
    ==================================================================== */
 
-/**
- * The tabs. `needs` is the permission required to see the tab. Everything for
- * administrators (users, DICOM nodes, audit log...) lives in Settings, which has
- * its own tabs (SETTINGS_TABS).
- */
-const VIEWS = [
-  // `wide`: table pages use the whole width of the window; the others (forms, long
-  // explanations) keep a readable maximum width.
-  { id: "studies", label: "Studies", needs: "read", wide: true, build: () => buildSearchView(STUDY_SEARCH) },
-  { id: "series", label: "Series", needs: "read", wide: true, build: () => buildSearchView(SERIES_SEARCH) },
-  { id: "upload", label: "Uploads", needs: "upload", build: buildUploadView },
-  { id: "transfers", label: "Transfers", needs: "send", wide: true, build: buildTransfersView },
-  { id: "shares", label: "Shares", needs: "share", wide: true, build: buildSharesView },
-  { id: "settings", label: "Settings", needs: "admin", build: buildSettingsView },
-  { id: "help", label: "Help", needs: null, build: buildHelpView },
-];
-
-/** Opens Settings on one of its tabs (e.g. "orthanc" from the Orthanc notice). */
+/** Opens Settings (Configuration) on one of its tabs (e.g. "orthanc" from the Orthanc notice). */
 function openSettings(tab) {
-  state.view = "settings";
   state.simpleView = "settings";
   state.settingsTab = tab;
   renderApp();
 }
 
-/** Opens the list of studies, in whichever view the user has. */
+/** Opens the list of studies (Search > Studies). */
 function openStudies() {
   if (!can("read")) return;
-  state.view = "studies";
   state.simpleView = "search";
   state.simpleSearch = "studies";
   renderApp();
 }
 
-/* ---- Normal or simplified view ----
-   The server decides from the user's role (Settings > Appearance and Security & roles).
-   Users with the switch_view permission may switch themselves; that choice is kept in this
-   browser only (localStorage), per user name. */
-
-const interfaceKey = () => `portal.interface.${state.user ? state.user.username : ""}`;
-
-/**
- * The user's own choice of view, read from the browser's storage once and then kept in memory:
- * currentInterface() is asked by every study button while a table is drawn.
- */
-const interfaceChoice = { key: null, value: "" };
-function readInterfaceChoice() {
-  const key = interfaceKey();
-  if (interfaceChoice.key !== key) {
-    let value = "";
-    try { value = localStorage.getItem(key) || ""; } catch { /* storage blocked: no remembered choice */ }
-    Object.assign(interfaceChoice, { key, value });
-  }
-  return interfaceChoice.value;
-}
-
-/** "normal" or "simplified": what this user sees now. */
-function currentInterface() {
-  const features = state.user && state.user.features;
-  if (!features) return "normal";
-  if (features.interface_switch) {
-    const choice = readInterfaceChoice();
-    if (choice === "normal" || choice === "simplified") return choice;
-  }
-  return features.interface === "simplified" ? "simplified" : "normal";
-}
-
-/** The "switch view" button (only for users with the switch_view permission). */
-function switchInterface() {
-  const next = currentInterface() === "simplified" ? "normal" : "simplified";
-  Object.assign(interfaceChoice, { key: interfaceKey(), value: next });
-  try { localStorage.setItem(interfaceKey(), next); } catch { /* this browser cannot remember it: still switch now */ }
-  if (next === "simplified" && state.view === "settings") state.simpleView = "settings";
-  if (next === "normal" && state.simpleView === "settings") state.view = "settings";
-  renderApp();
-}
-
-/** Draws the whole page: login form when signed out, otherwise top bar + current tab. */
+/** Draws the whole page: the login form when signed out, otherwise the portal (section 5b). */
 function renderApp() {
   root.replaceChildren();
   // Colours as saved (a preview in Settings > Appearance ends when the user leaves the page).
@@ -308,46 +245,13 @@ function renderApp() {
     root.append(buildLogin());
     return;
   }
-  if (currentInterface() === "simplified") {
-    renderSimplified();
-    return;
-  }
-
-  // Only the tabs this user may use.
-  const views = VIEWS.filter((v) => !v.needs || can(v.needs));
-  if (!views.some((v) => v.id === state.view)) state.view = views.length ? views[0].id : null;
-  const current = views.find((v) => v.id === state.view);
-
-  const nav = h("nav", { class: "nav", "aria-label": "Main" },
-    views.map((v) => h("button", {
-      type: "button",
-      "aria-current": v.id === state.view ? "page" : null,
-      onclick: () => { state.view = v.id; renderApp(); },
-    }, v.label, v.id === "upload" ? uploadBadge() : null)));
-
-  const topbar = h("header", { class: "topbar" },
-    h("div", { class: "brand brand-slot", "data-size": "24" }, ...brandContent(24, false)),
-    nav,
-    h("div", { class: "userbox" },
-      h("span", null, state.user.username),
-      state.user.features.interface_switch
-        ? h("button", { class: "btn small", type: "button", onclick: switchInterface, title: "Switch to the simplified view (remembered in this browser)" }, "Simplified view")
-        : null,
-      h("button", { class: "btn small", type: "button", onclick: signOut }, "Sign out")));
-
-  const page = h("main", { class: current && current.wide ? "page wide" : "page" },
-    current ? current.build() : h("div", { class: "panel empty" }, "Your account has no permissions yet. Ask an administrator to grant you access."));
-  // Red notice (administrators only) when Orthanc is unreachable or too old.
-  const banner = h("div", { id: "orthanc-banner", class: "banner", role: "alert", hidden: true });
-  root.append(topbar, banner, page);
-  paintOrthancBanner();
-  refreshOrthancStatus();
+  renderSimplified();
 }
 
 /**
- * What identifies the practice in the top bar and on the login page: the uploaded
+ * What identifies the practice in the header and on the login page: the uploaded
  * logo (or the default mark) and, unless an administrator hid it, the portal name.
- * `asHeading` makes the name an <h1> (login page) instead of a <span> (top bar).
+ * `asHeading` makes the name an <h1> (login page) instead of a <span> (header).
  */
 function brandContent(size, asHeading) {
   const brand = state.brand;
@@ -483,9 +387,8 @@ async function signOut() {
 }
 
 /* ====================================================================
-   5b. SIMPLIFIED VIEW
-   A reduced layout for the roles an administrator chooses (Settings > Appearance and
-   Security & roles):
+   5b. THE PORTAL'S LAYOUT
+   Every staff member sees the same layout (only the icons their permissions allow):
 
      +------------------------------------------------------+
      | logo + practice name                Total studies: N |
@@ -500,7 +403,7 @@ async function signOut() {
      +----+-------------------------------------------------+
 
    Every icon names itself when the mouse rests on it (or under it, if an administrator
-   chose so). The pages behind the icons are the same builders as the normal view's tabs.
+   chose so).
    On phones the icon column becomes a bar at the bottom of the screen (app.css).
    ==================================================================== */
 
@@ -528,10 +431,9 @@ const ICONS = {
   upload: ["M7 18.5H6.5a4.5 4.5 0 0 1-.4-8.98 6 6 0 0 1 11.6-1.2A4.5 4.5 0 0 1 17.5 18.5H17", "M12 21v-8.5", "M8.8 15.5 12 12.3l3.2 3.2"],
   settings: [GEAR_PATH, { c: [12, 12, 3.2] }],
   logout: ["M13 3.5h6v17h-6", "M3.5 12h11", "M11 8.5l3.5 3.5-3.5 3.5"],
-  swap: ["M4 8h14", "M15 5l3 3-3 3", "M20 16H6", "M9 13l-3 3 3 3"],
   transfers: ["M3 12h10.5", "M10 8.5l3.5 3.5-3.5 3.5", "M16 4.5h5v15h-5z", "M18.5 8h.01", "M18.5 11h.01"], // an arrow into another system
   help: [{ c: [12, 12, 9] }, "M9.6 9.4a2.5 2.5 0 1 1 3.4 2.4c-.6.3-1 .8-1 1.5v.6", { c: [12, 16.9, 0.35] }],
-  // Buttons of a study (simplified view)
+  // Buttons of a study, of a link...
   weasis: ["M3 4.5h18v11.5H3z", "M8.5 20.5h7", "M12 16v4.5"],                       // a desktop screen
   ohif: ["M3 5h18v14H3z", "M3 9h18", { c: [5.5, 7, 0.4] }, { c: [7.5, 7, 0.4] }, "M8 14.5s1.6-2.5 4-2.5 4 2.5 4 2.5-1.6 2.5-4 2.5-4-2.5-4-2.5z"], // a browser window with an eye
   send: ["M21 3 10.5 13.5", "M21 3l-6.5 18-4-7.5L3 9.5z"],                          // a paper plane
@@ -544,25 +446,18 @@ const ICONS = {
 };
 
 /**
- * Should the buttons of a study be icons? Yes in the simplified view (each one names itself in a
- * tooltip), text in the normal view.
- */
-const iconButtons = () => !!state.user && currentInterface() === "simplified";
-
-/**
  * Turns the properties of a text button into those of an icon button: the label becomes the
  * tooltip (see the tooltip code below) and the accessible name.
  */
 const asIcon = (props, label) => ({ ...props, class: `${props.class || ""} icon-btn`.trim(), "data-tip": label, "aria-label": label, title: null });
 
 /**
- * A study button: text in the normal view, an icon with a tooltip in the simplified view.
- * `tag` is "button" or "a"; `tip` is the (longer) description shown on hover.
+ * A button that shows only an icon (the buttons of a study, of a link...). `tip` is the description
+ * shown on hover (and the accessible name); `text` is its short name, kept as `data-name`.
+ * `tag` is "button", "a" or "summary".
  */
 function actionButton(tag, iconName, text, tip, props) {
-  return iconButtons()
-    ? h(tag, asIcon(props, tip), icon(iconName))
-    : h(tag, { ...props, title: props.title || null }, text);
+  return h(tag, { ...asIcon(props, tip), "data-name": text }, icon(iconName));
 }
 
 /* ---- Tooltips of the icon buttons ----
@@ -612,7 +507,7 @@ function icon(name) {
 }
 
 /**
- * The pages of the simplified view, top to bottom. `needs` = permission required to see the
+ * The pages of the portal, top to bottom. `needs` = permission required to see the
  * icon (null = everyone). `bottom` pages sit at the foot of the column, above "Log out".
  */
 const SIMPLE_PAGES = [
@@ -626,8 +521,7 @@ const SIMPLE_PAGES = [
 ];
 
 /**
- * Search page of the simplified view: the Studies and the Series searches of the normal view
- * (its two tabs), behind two small tabs of their own.
+ * The Search page: the Studies and the Series searches, behind two small tabs.
  */
 function buildSimpleSearch() {
   const kinds = [["studies", "Studies", STUDY_SEARCH], ["series", "Series", SERIES_SEARCH]];
@@ -642,10 +536,10 @@ function buildSimpleSearch() {
   return view;
 }
 
-/** Options of the simplified view sent by the server (Settings > Appearance). */
+/** Options of the home page and the icons, sent by the server (Settings > Appearance). */
 const simpleOptions = () => (state.user && state.user.features && state.user.features.simplified) || {};
 
-/** Draws the simplified view: header, icon column and the current page. */
+/** Draws the portal: header, icon column and the current page. */
 function renderSimplified() {
   const options = simpleOptions();
   const pages = SIMPLE_PAGES.filter((p) => !p.needs || can(p.needs));
@@ -663,7 +557,6 @@ function renderSimplified() {
   const side = h("nav", { class: "simple-side", "aria-label": "Main" },
     h("div", { class: "side-group" }, pages.filter((p) => !p.bottom).map(pageButton)),
     h("div", { class: "side-group" },
-      state.user.features.interface_switch ? sideButton("Normal view", "swap", switchInterface) : null,
       pages.filter((p) => p.bottom).map(pageButton),
       sideButton(`Log out (${state.user.username})`, "logout", signOut)));
 
@@ -683,7 +576,7 @@ function renderSimplified() {
 }
 
 /**
- * Fills in "Total studies: N" in the header of the simplified view. The header is redrawn at every
+ * Fills in "Total studies: N" in the header. The header is redrawn at every
  * click on an icon, so the number is asked from Orthanc at most once a minute, unless `force`
  * (after an upload).
  */
@@ -706,7 +599,7 @@ async function refreshTotalStudies(force = false) {
 /** Reloads the recent studies of the home page, if it is on screen (set by buildHomeView). */
 let reloadRecentStudies = null;
 
-/** Home page of the simplified view: the most recent studies, and a drop zone to upload. */
+/** The home page: the most recent studies, and a drop zone to upload. */
 function buildHomeView() {
   const options = simpleOptions();
   const parts = [];
@@ -895,7 +788,7 @@ function clearThumbnails() {
 /**
  * A thumbnail box. `kind` is "studies" or "series" and `id` the Orthanc id.
  * Until the picture arrives (or if there is none) the box shows the modality code.
- * `size` asks the server for a bigger picture (the cards of the simplified view).
+ * `size` asks the server for a bigger picture (the cards of the home page).
  */
 function thumb(kind, id, modality, small = false, size = 0) {
   const box = h("div", { class: small ? "thumb small loading" : "thumb loading", "aria-hidden": "true" },
@@ -1276,7 +1169,7 @@ async function openSendDialog(study) {
       try {
         await api("POST", `/api/studies/${study.id}/send`, { target: target.value });
         dialog.close();
-        toast(`Transfer to ${target.value} started. Follow it in the Transfers tab.`, "info", 7000);
+        toast(`Transfer to ${target.value} started. Follow it on the Transfers page.`, "info", 7000);
       } catch (e) {
         error.textContent = e.message;
         error.hidden = false;
@@ -1387,7 +1280,7 @@ function pump() {
   if (upload.next >= upload.pending.length && !upload.inFlight.size && upload.total > 0 && !upload.finished) {
     upload.finished = true;
     updateUploadUi();
-    // Simplified view: the new studies appear on the home page and in the total at once.
+    // The new studies appear on the home page and in the total at once.
     if (upload.uploaded > 0) {
       if (reloadRecentStudies) reloadRecentStudies();
       refreshTotalStudies(true);
@@ -1600,7 +1493,7 @@ async function filesFromDrop(dataTransfer) {
 
 /**
  * An area that accepts dropped files and folders, with buttons to pick them instead.
- * `home` = the compact version of the simplified view's home page.
+ * `home` = the compact version of the home page.
  */
 function buildDropzone({ title, hint = "", home = false }) {
   const onPicked = (event) => { enqueueFiles(event.target.files); event.target.value = ""; };
@@ -1789,7 +1682,7 @@ function buildUsersView() {
         h("thead", null, h("tr", null, ["User", "Role", "Access", "Status", "Last sign-in", "Actions"].map((t) => h("th", { class: t === "Actions" ? "num" : null }, t)))),
         h("tbody", null, meta.users.map((u) => h("tr", null,
           h("td", null, h("span", { class: "patient" }, u.username), u.id === state.user.id ? h("span", { class: "sub" }, " (you)") : null),
-          h("td", null, roleLabel(u.effective_role), u.interface === "simplified" ? h("div", { class: "sub" }, "simplified view") : null),
+          h("td", null, roleLabel(u.effective_role)),
           h("td", null, u.permissions.length ? u.permissions.map((p) => h("span", { class: "chip perm" }, p)) : h("span", { class: "muted" }, "no access")),
           h("td", null, h("span", { class: `chip ${u.active ? "status-on" : "status-off"}` }, u.active ? "Active" : "Disabled")),
           h("td", null, formatTimestamp(u.last_login)),
@@ -1834,8 +1727,7 @@ function openUserDialog(user, meta, reload) {
     return h("label", null, box, h("span", null, p.key, h("small", null, p.description)));
   });
 
-  // The role is saved with the account: it decides the user's view (normal or simplified) while
-  // the simplified view is switched on. Choosing one also ticks its permissions.
+  // The role is saved with the account (shown in the users list). Choosing one ticks its permissions.
   const initialRole = user ? user.effective_role || "" : (meta.presets.some((p) => p.key === "viewer") ? "viewer" : "");
   const preset = h("select", {
     onchange: (event) => {
@@ -1843,7 +1735,7 @@ function openUserDialog(user, meta, reload) {
       if (chosen) for (const key of Object.keys(checks)) checks[key].checked = chosen.permissions.includes(key);
     },
   }, h("option", { value: "", selected: !initialRole }, "Custom (no role)"),
-  meta.presets.map((p) => h("option", { value: p.key, selected: p.key === initialRole }, p.interface === "simplified" ? `${p.label}  [simplified view]` : p.label)));
+  meta.presets.map((p) => h("option", { value: p.key, selected: p.key === initialRole }, p.label)));
 
   const active = h("input", { type: "checkbox", checked: user ? user.active : true });
 
@@ -1879,7 +1771,7 @@ function openUserDialog(user, meta, reload) {
     h("label", null, "Username", username),
     h("label", null, isNew ? "Password" : "New password (optional)", password),
     h("label", null, "Role", preset),
-    h("p", { class: "hint" }, "Choosing a role ticks its permissions (you can still change them). The role also sets the user's view, normal or simplified, while the simplified view is switched on in Settings > Appearance."),
+    h("p", { class: "hint" }, "Choosing a role ticks its permissions (you can still change them)."),
     h("fieldset", { class: "perm-list" }, h("legend", null, "Permissions"), permissionBoxes),
     isNew ? null : h("label", { class: "perm-list" }, h("span", null, active, " Account is active")),
     h("div", { class: "dialog-actions" },
@@ -1953,7 +1845,7 @@ function copyButton(label, getText, iconName = "") {
     class: "btn small", type: "button",
     onclick: async () => toast((await copyText(getText())) ? "Copied." : "Could not copy: select the text and copy it by hand.", "info", 2500),
   };
-  // An icon in the simplified view when the caller gives one (the Shares list); text everywhere else.
+  // An icon when the caller gives one (the Shares list); text everywhere else (dialogs).
   return iconName ? actionButton("button", iconName, label, label, props) : h("button", props, label);
 }
 
@@ -2339,15 +2231,15 @@ function buildSharesView() {
 /* ====================================================================
    9c. HELP
    Instructions for everyday users, written for people who are not administrators. The page is
-   built for the person reading it: only the parts their permissions give access to, only the
-   features switched on in this installation (Weasis, OHIF, email...), and in the words of the
-   view they use (icons in the simplified view, tabs in the normal one).
+   built for the person reading it: only the parts their permissions give access to, and only the
+   features switched on in this installation (Weasis, OHIF, email...). Buttons are shown in the
+   text as the icons they have on screen.
    ==================================================================== */
 
 /** A small inline copy of an icon, to show in the text which button is meant. */
 const helpIcon = (name) => h("span", { class: "help-icon", "aria-hidden": "true" }, icon(name));
-/** A button name as it appears on screen: the icon in the simplified view, the text in the normal one. */
-const helpButton = (iconName, text) => (iconButtons() ? [helpIcon(iconName), ` (${text})`] : h("b", null, text));
+/** A button as it appears on screen: its icon, then its name. */
+const helpButton = (iconName, text) => [helpIcon(iconName), ` (${text})`];
 /** A bullet list: one bullet per argument (an argument may be several pieces: text, icons...); null = left out. */
 const ul = (...items) => h("ul", null, items.filter(Boolean).map((item) => h("li", null, item)));
 
@@ -2356,31 +2248,27 @@ const ul = (...items) => h("ul", null, items.filter(Boolean).map((item) => h("li
  * Keep the wording plain: the readers are clinical and front-desk staff, not IT people.
  */
 function helpSections() {
-  const simple = currentInterface() === "simplified";
   const f = state.user.features;
   const share = f.share || {};
-  const where = (simpleName, normalName) => (simple ? h("b", null, simpleName) : h("b", null, normalName));
   return [
     {
       id: "around", title: "Getting around", show: true,
       body: () => [
-        simple
-          ? h("p", null, "The column of icons on the left takes you to each part of the portal (on a phone, the icons are along the bottom of the screen). Rest the mouse on an icon to see its name. Buttons that show only an icon work the same way: rest the mouse on one to see what it does.")
-          : h("p", null, "The tabs at the top of the page take you to each part of the portal."),
+        h("p", null, "The column of icons on the left takes you to each part of the portal (on a phone, the icons are along the bottom of the screen). Rest the mouse on an icon to see its name. Buttons that show only an icon work the same way: rest the mouse on one to see what it does."),
         h("p", null, "What you can use:"),
         ul(
-          simple ? [helpIcon("home"), " ", h("b", null, "Home"), ": the latest studies and an area to upload files."] : null,
-          can("read") ? [simple ? [helpIcon("search"), " "] : null, where("Search", "Studies and Series"), ": find a study or a series."] : null,
-          can("upload") ? [simple ? [helpIcon("upload"), " "] : null, h("b", null, "Uploads"), ": add images to the archive and follow the uploads."] : null,
-          can("send") ? [simple ? [helpIcon("transfers"), " "] : null, h("b", null, "Transfers"), ": follow the studies you sent to another system."] : null,
-          can("share") ? [simple ? [helpIcon("share"), " "] : null, h("b", null, "Shares"), ": the links you created to show a study to someone outside."] : null,
-          [simple ? [helpIcon("help"), " "] : null, h("b", null, "Help"), ": this page."],
+          [helpIcon("home"), " ", h("b", null, "Home"), ": the latest studies and an area to upload files."],
+          can("read") ? [helpIcon("search"), " ", h("b", null, "Search"), ": find a study or a series."] : null,
+          can("upload") ? [helpIcon("upload"), " ", h("b", null, "Uploads"), ": add images to the archive and follow the uploads."] : null,
+          can("send") ? [helpIcon("transfers"), " ", h("b", null, "Transfers"), ": follow the studies you sent to another system."] : null,
+          can("share") ? [helpIcon("share"), " ", h("b", null, "Shares"), ": the links you created to show a study to someone outside."] : null,
+          [helpIcon("help"), " ", h("b", null, "Help"), ": this page."],
         ),
         h("p", { class: "muted" }, "You only see the parts your account gives access to. If you need something that is not here, ask your administrator."),
       ],
     },
     {
-      id: "home", title: "The home page", show: simple,
+      id: "home", title: "The home page", show: true,
       body: () => [
         h("p", null, `It lists the ${f.simplified && f.simplified.recent_count ? f.simplified.recent_count : ""} most recent studies, ${f.simplified && f.simplified.recent_order === "study_date" ? "the newest examination dates" : "the last ones received by the archive"} first. `,
           helpButton("refresh", "Refresh"), " updates the list."),
@@ -2404,7 +2292,7 @@ function helpSections() {
           "Click the small arrow ▸ at the start of a row to see the series of the study (each set of images) and how many images each has.",
           f.thumbnails && can("visualize") ? "The small picture is a preview of the study or series: it appears after a moment." : null,
           "Rest the mouse on a modality tag (CT, MR...) to see its full name.",
-          [h("b", null, "Series"), simple ? " (the second tab of the Search page)" : " tab", ": the same search, one row per series, with a ", h("b", null, "Body part"), " box (CHEST, KNEE...)."],
+          [h("b", null, "Series"), " (the second tab of the Search page): the same search, one row per series, with a ", h("b", null, "Body part"), " box (CHEST, KNEE...)."],
         ),
       ],
     },
@@ -2435,7 +2323,7 @@ function helpSections() {
       body: () => [
         h("p", null, helpButton("send", "Send to..."), " sends a whole study to another DICOM system the practice works with (a workstation, another archive...). Choose the destination in the list and confirm."),
         h("p", null, "The transfer continues on its own, even if you leave the page. ",
-          "Follow it on the ", simple ? [helpIcon("transfers"), " "] : null, h("b", null, "Transfers"), simple ? " page" : " tab",
+          "Follow it on the ", helpIcon("transfers"), " ", h("b", null, "Transfers"), " page",
           ": while it runs it shows the percentage, how many images were sent, how long it has been running and about how long is left (the list updates itself); then how many images were sent, or why it failed."),
         h("p", null, "Rest the mouse on the name of a destination (for example \"ris\") to see what it is and where it is."),
       ],
@@ -2469,28 +2357,20 @@ function helpSections() {
       body: () => [
         h("p", null, "To add images to the archive (from a CD, a USB stick, another program...):"),
         ul(
-          [simple ? "Drag the files, or a whole folder, onto the upload area of the Home page or of " : "Drag the files, or a whole folder, onto the upload area of ", h("b", null, "Uploads"), "."],
+          ["Drag the files, or a whole folder, onto the upload area of the Home page or of ", h("b", null, "Uploads"), "."],
           ["Or press ", h("b", null, "Choose files"), " / ", h("b", null, "Choose folder"), " to pick them on your computer."],
         ),
         h("p", null, "DICOM image files and ZIP archives are accepted. Images that are already in the archive are not copied twice (they are counted as \"already stored\")."),
         h("p", null, "The ", h("b", null, "Uploads"), " page shows each upload with its progress, speed and time left, then how many images were new, already stored or failed. ",
-          simple ? "While images are being sent, the Uploads icon shows the percentage, so you can do something else in the meantime." : "While images are being sent, the Uploads tab shows the percentage, so you can do something else in the meantime."),
+          "While images are being sent, the Uploads icon shows the percentage, so you can do something else in the meantime."),
         h("p", { class: "muted" }, "Do not close or reload the page while an upload is running: it would stop. When it is finished, the new studies appear in the search and on the home page."),
-      ],
-    },
-    {
-      id: "switch", title: "Switching view", show: !!f.interface_switch,
-      body: () => [
-        h("p", null, "The portal has two looks: the simplified view (icons on the left, recent studies on the home page) and the normal view (tabs at the top, more tools). ",
-          simple ? [helpButton("swap", "Normal view"), " switches to the normal view."] : ["The ", h("b", null, "Simplified view"), " button at the top right switches to the simplified view."],
-          " Your choice is remembered on this computer."),
       ],
     },
     {
       id: "session", title: "Signing out and good habits", show: true,
       body: () => [
         ul(
-          [simple ? [helpButton("logout", "Log out")] : h("b", null, "Sign out"), " when you leave a shared computer: the portal shows patient data."],
+          [helpButton("logout", "Log out"), " when you leave a shared computer: the portal shows patient data."],
           "After a while without signing in again, the portal asks for your password again. This is normal.",
           "After several wrong passwords in a row, the account is blocked for a few minutes: wait, then try again (or ask your administrator).",
           "Never give your password to anyone, including colleagues: ask your administrator to create an account for them.",
@@ -2609,9 +2489,6 @@ const SETTINGS_FIELDS = {
     { key: "thumbnail_cache_mb", label: "Thumbnail cache (MB)", type: "number", min: 0, max: 1024, hint: "Memory used to remember generated thumbnails. 0 = no cache." },
   ],
   simplified: [
-    { key: "simplified_enabled", label: "Switch on the simplified view", type: "checkbox", wide: true,
-      hint: "Off: everybody uses the normal view. On: each role uses the view chosen for it in Security & roles > Roles; users with custom permissions (no role) get the view below. Users with the switch_view permission get a button to change view themselves (their choice is remembered in their browser)." },
-    { key: "default_interface", label: "View of users without a role", type: "select", options: [["normal", "Normal view"], ["simplified", "Simplified view"]], hint: "Users whose permissions were ticked by hand (\"Custom\" in the user form)." },
     { key: "simplified_recent_count", label: "Recent studies on the home page", type: "number", min: 1, max: 100 },
     { key: "simplified_recent_order", label: "Which studies are the most recent", type: "select", options: [["received", "The last ones received by the PACS"], ["study_date", "The newest study dates"]] },
     { key: "simplified_recent_layout", label: "How the recent studies are shown", type: "select", options: [["table", "Table, like the Studies page (same columns and buttons)"], ["cards", "Cards with big previews"]] },
@@ -2629,8 +2506,8 @@ const SETTINGS_FIELDS = {
  */
 const COLOR_FIELDS = [
   { key: "color_accent", label: "Accent", fallback: "#2547c8", hint: "Main buttons, selected tabs and filters, links." },
-  { key: "color_header", label: "Header", fallback: "#101a24", hint: "Top bar of the normal view and header of the simplified view. The text colour adapts itself." },
-  { key: "color_sidebar", label: "Icon column", fallback: "#ffffff", hint: "Left column of the simplified view." },
+  { key: "color_header", label: "Header", fallback: "#101a24", hint: "The band across the top (logo, name, total of studies). The text colour adapts itself." },
+  { key: "color_sidebar", label: "Icon column", fallback: "#ffffff", hint: "The column of icons on the left." },
   { key: "color_background", label: "Page background", fallback: "#f1f4f7", hint: "Behind the cards and tables. Pick a light colour for the light theme and a dark one for the dark theme." },
 ];
 
@@ -2691,7 +2568,7 @@ function buildBrandImagePicker(kind, title, hint, accept) {
  * form). `get()` returns the roles as the server expects them.
  */
 function buildRolesEditor(roles, defaults, permissions) {
-  const clone = (list) => list.map((r) => ({ key: r.key, label: r.label, permissions: [...r.permissions], interface: r.interface || "normal" }));
+  const clone = (list) => list.map((r) => ({ key: r.key, label: r.label, permissions: [...r.permissions] }));
   let rows = clone(roles);
   const list = h("div", { class: "roles" });
 
@@ -2703,19 +2580,15 @@ function buildRolesEditor(roles, defaults, permissions) {
         type: "checkbox", checked: role.permissions.includes(p.key),
         onchange: (e) => { role.permissions = e.target.checked ? [...new Set([...role.permissions, p.key])] : role.permissions.filter((k) => k !== p.key); },
       }), p.key))),
-    // The look of this role's users while the simplified view is switched on (Appearance tab).
-    h("select", { class: "role-interface", "aria-label": "View", title: "View used by this role when the simplified view is switched on (Appearance tab)", onchange: (e) => { role.interface = e.target.value; } },
-      h("option", { value: "normal", selected: role.interface !== "simplified" }, "Normal view"),
-      h("option", { value: "simplified", selected: role.interface === "simplified" }, "Simplified view")),
     h("button", { class: "btn small danger", type: "button", onclick: () => { rows.splice(index, 1); draw(); } }, "Remove"))));
   draw();
 
   const node = h("div", { class: "wide" }, list,
     h("div", { class: "filter-actions" },
-      h("button", { class: "btn small", type: "button", onclick: () => { rows.push({ key: "", label: "", permissions: ["read", "visualize"], interface: "normal" }); draw(); } }, "Add role"),
+      h("button", { class: "btn small", type: "button", onclick: () => { rows.push({ key: "", label: "", permissions: ["read", "visualize"] }); draw(); } }, "Add role"),
       h("button", { class: "btn small", type: "button", onclick: () => { rows = clone(defaults); draw(); } }, "Restore default roles")));
 
-  return { node, get: () => rows.map((r) => ({ key: r.key.trim(), label: r.label.trim(), permissions: r.permissions, interface: r.interface })) };
+  return { node, get: () => rows.map((r) => ({ key: r.key.trim(), label: r.label.trim(), permissions: r.permissions })) };
 }
 
 /**
@@ -3048,7 +2921,6 @@ function buildSettingsView() {
           return;
         }
         save.disabled = true;
-        const shownInterface = currentInterface();
         // Collect the values of every control into the object the server expects.
         const body = {};
         for (const [key, input] of Object.entries(inputs)) {
@@ -3075,9 +2947,6 @@ function buildSettingsView() {
           try { state.user.features = (await api("GET", "/api/me")).features; } catch { /* keep the old ones */ }
           refreshOrthancStatus(true);
           toast("Settings saved.");
-          // The administrator's own view may have changed (simplified view switched on or off,
-          // or the view of their role): redraw the whole page, staying on Settings.
-          if (currentInterface() !== shownInterface) { renderApp(); return; }
           draw(doc.messages || []);
         } catch (e) {
           toastError(e);
@@ -3094,7 +2963,7 @@ function buildSettingsView() {
       section("viewers", "Viewers and uploads", null, SETTINGS_FIELDS.viewers.map(field)),
       section("theme", "Colours", "Match the portal to your practice's colours. Changes are previewed on this page at once and kept when you save. The logo, the portal name and the window title are in the General tab.",
         themeFields),
-      section("simplified", "Simplified view", "A reduced layout for staff who mostly look at recent studies and upload new ones: the logo, the practice name and the total of studies at the top, a column of icons (Home, Search, Shares, Uploads, Transfers, Help, Configuration, Log out) on the left, and a home page with the most recent studies and an area to drop files into. Choose which roles use it in Security & roles > Roles.",
+      section("simplified", "Home page and icons", "The portal shows the logo, the practice name and the total of studies at the top, a column of icons (Home, Search, Shares, Uploads, Transfers, Help, Configuration, Log out) on the left, and a home page with the most recent studies and an area to drop files into. Each person sees only the icons their permissions allow.",
         SETTINGS_FIELDS.simplified.map(field)),
       section("orthanc", "Orthanc connection", "The PACS this portal works with. Saved changes apply immediately, without restarting.",
         urlField, modeField, userField, passwordField,
@@ -3104,7 +2973,7 @@ function buildSettingsView() {
       section("email", "Email (sending share invitations)", "The Share windows can send the invitation by email (optional, for each link) when a mail server is set here. The emails are plain text; the password is included only when the staff member ticks it.",
         emailFields, testMailField),
       section("security", "Sessions and sign-in security", null, SETTINGS_FIELDS.security.map(field)),
-      section("roles", "Roles", "Shortcuts that pre-tick permissions when you create or edit a user (Users tab), and the view (normal or simplified) of the users who have that role, used while the simplified view is switched on (Appearance tab). Users keep their own permissions: changing a role's permissions does not change existing users, but changing its view applies to them at their next page load.", rolesEditor.node),
+      section("roles", "Roles", "Shortcuts that pre-tick permissions when you create or edit a user (Users tab). Users keep their own permissions: changing a role does not change existing users.", rolesEditor.node),
       h("div", { class: "settings-actions" },
         save,
         h("span", { class: "muted" }, "Saves the General, Appearance, Orthanc, Network & sharing and Security & roles tabs together.")));

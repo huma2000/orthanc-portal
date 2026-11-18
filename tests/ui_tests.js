@@ -62,11 +62,24 @@ async function makeDom(base, pathname = "/", script = APP) {
       t.$("input[name=username]").value = user; t.$("input[name=password]").value = pass;
       t.submit(t.$(".login-card form")); await sleep(1500);
     },
-    tabs: () => t.$$(".nav button").map((b) => b.textContent),
-    tab: async (name) => { t.click(t.$$(".nav button").find((b) => b.textContent === name)); await sleep(1200); },
+    // The icon column (pages), without the Log out button.
+    tabs: () => t.$$(".side-btn").map((b) => b.dataset.tip).filter((n) => !n.startsWith("Log out")),
+    // Opens a page by its icon. "Studies" and "Series" are the two tabs of the Search page;
+    // "Settings" is the Configuration icon.
+    tab: async (name) => {
+      const icon = { Studies: "Search", Series: "Search", Settings: "Configuration" }[name] || name;
+      t.click(t.$$(".side-btn").find((b) => b.dataset.tip === icon)); await sleep(1200);
+      if (name === "Studies" || name === "Series") {
+        const tab = t.$$(".subtabs [role=tab]").find((b) => b.textContent === name);
+        if (tab.getAttribute("aria-selected") !== "true") { t.click(tab); await sleep(1200); }
+      }
+    },
     section: (title) => t.$$("section.settings-section").find((s) => s.querySelector("h2").textContent === title),
     labelInput: (scope, text) => Array.from(scope.querySelectorAll("label")).find((l) => l.textContent.startsWith(text)).querySelector("input,select,textarea"),
-    button: (scope, text) => Array.from(scope.querySelectorAll("button")).find((b) => b.textContent === text),
+    // A button by its text, or an icon button by its name (data-name: "Weasis", "Share...", "Revoke"...).
+    button: (scope, text) => Array.from(scope.querySelectorAll("button, a.btn, summary")).find((b) => b.textContent === text || b.dataset.name === text),
+    // Everything a row offers, in words: its text plus the names of its icon buttons.
+    words: (el) => `${el.textContent} ${Array.from(el.querySelectorAll("[data-name]")).map((b) => b.dataset.name).join(" ")}`,
   };
   return t;
 }
@@ -95,7 +108,9 @@ async function newLink(admin, body) {
   const admin = await makeDom(STAFF);
   await admin.login("admin", "SuperSecret123");
   await sleep(1200);
-  check("all tabs are there, including Shares", admin.tabs().join() === "Studies,Series,Uploads,Transfers,Shares,Settings,Help", admin.tabs().join());
+  check("all pages are in the icon column, including Shares and Transfers", admin.tabs().join() === "Home,Search,Shares,Uploads,Transfers,Help,Configuration", admin.tabs().join());
+  check("the home page opens first, with the recent studies", !!admin.$(".recent") && /Recent studies/.test(admin.$(".recent").textContent));
+  check("there is a single view: no view switch", !admin.$$(".side-btn").some((b) => /view/i.test(b.dataset.tip)) && !admin.$(".nav"));
 
   console.log("--- Settings is organised in tabs (users, DICOM nodes and the audit log live there)");
   await admin.tab("Settings");
@@ -125,10 +140,10 @@ async function newLink(admin, body) {
   const row = admin.$("tr.study");
   check("study row: preview, modalities, patient", !!row.querySelector(".thumb") && /DOE, JOHN/.test(row.textContent) && /CT/.test(row.textContent));
   check("a Weasis button on the study (desktop viewer)", !!admin.button(row, "Weasis"));
-  const ohifButton = Array.from(row.querySelectorAll("a.btn")).find((a) => a.textContent === "OHIF");
+  const ohifButton = admin.button(row, "OHIF");
   check("...and a separate OHIF button (browser viewer, new tab)", !!ohifButton && /\/ohif\/viewer\?StudyInstanceUIDs=/.test(ohifButton.getAttribute("href"))
     && ohifButton.getAttribute("target") === "_blank" && ohifButton.getAttribute("rel") === "noopener");
-  check("the Studies page uses the whole width (wide layout)", admin.$("main").classList.contains("wide"));
+  check("the Studies page is the Search page's first tab", admin.$(".subtabs [aria-selected=true]").textContent === "Studies");
   check("no accession number: neither a search box nor a column",
     !admin.$("input[name=accession_number]") && !admin.$$("main th").some((th) => /Accession/.test(th.textContent)) && !/ACC1/.test(row.textContent));
   const tagTitle = (code) => { const tag = Array.from(row.querySelectorAll(".chip")).find((c) => c.textContent === code); return tag && tag.getAttribute("title"); };
@@ -138,7 +153,8 @@ async function newLink(admin, body) {
   check("the study date never wraps", row.querySelectorAll("td.nowrap").length > 0);
   check("the old View drop-down is gone", !Array.from(row.querySelectorAll("summary")).some((s) => s.textContent === "View"));
   check("the Weasis notice is no longer on the Studies page", !/Weasis needs to be/.test(admin.$("main").textContent));
-  check("Send, Share, Download, Weasis and OHIF controls on every study", /Send to/.test(row.textContent) && /Share\.\.\./.test(row.textContent) && /Download/.test(row.textContent) && /Weasis/.test(row.textContent) && /OHIF/.test(row.textContent));
+  check("Send, Share, Download, Weasis and OHIF controls on every study", ["Send to...", "Share...", "Download", "Weasis", "OHIF"].every((n) => !!admin.button(row, n)), admin.words(row));
+  check("...each an icon that says what it does on hover", ["Send to...", "Share...", "Download", "Weasis", "OHIF"].every((n) => { const b = admin.button(row, n); return b.querySelector("svg") && b.getAttribute("data-tip") && b.getAttribute("aria-label"); }));
   check("the old internet-viewing switch is gone from the Network settings", !/Internet viewers cannot download/.test((await (await admin.call("GET", "/api/admin/settings")).text())));
 
   console.log("--- sharing: not set up yet");
@@ -227,7 +243,7 @@ async function newLink(admin, body) {
   const guest = await makeDom(GUEST, `/s/${token}`, SHARE);
   await until(() => guest.$("#share-password"));
   check("first thing: only a password form, no patient data", !!guest.$("#share-password") && /A study has been shared with you/.test(guest.text()) && !/DOE/.test(guest.text()));
-  check("the page has no staff controls (no tabs, no search)", !guest.$(".nav") && !guest.$(".chip-toggle") && !/weasis/i.test(guest.text()));
+  check("the page has no staff controls (no icons, no search)", !guest.$(".side-btn") && !guest.$(".chip-toggle") && !/weasis/i.test(guest.text()));
   guest.$("#share-password").value = "WRNG-WRNG-WRNG";
   guest.submit(guest.$("form.share-password"));
   await until(() => guest.$(".form-error") && !guest.$(".form-error").hidden);
@@ -293,7 +309,7 @@ async function newLink(admin, body) {
   check("...and the study details are gone from the page", !/DOE/.test(shortPage.text()) && !shortPage.$("dl.share-details"));
   const expiredPage = await guestOpens(shortLink.token);
   check("opening an expired link says so, without asking for the password", /This link has expired/.test(expiredPage.text()) && !expiredPage.$("#share-password"), expiredPage.text());
-  admin.click(admin.$$(".nav button").find((b) => b.textContent === "Studies")); await sleep(300);
+  await admin.tab("Studies");
   await admin.tab("Shares");
   check("the Shares tab shows it as expired", /expired/.test(admin.text()), "");
 
@@ -317,8 +333,9 @@ async function newLink(admin, body) {
   const adminNoOhif = await makeDom(STAFF);
   await adminNoOhif.login("admin", "SuperSecret123");
   await sleep(1000);
-  check("on the intranet Weasis is still there when OHIF is off", [...adminNoOhif.$$("tr.study button")].some((b) => /Weasis/.test(b.textContent)));
-  check("...and the OHIF button is gone", !adminNoOhif.$$("tr.study a.btn").some((a) => a.textContent === "OHIF"));
+  await until(() => adminNoOhif.$("tr.study"), 6000);
+  check("on the intranet Weasis is still there when OHIF is off", !!adminNoOhif.button(adminNoOhif.$("tr.study"), "Weasis"));
+  check("...and the OHIF button is gone", !adminNoOhif.button(adminNoOhif.$("tr.study"), "OHIF"));
   await admin.call("PUT", "/api/admin/settings", { ohif: "auto" });
 
   console.log("--- the Weasis button can be switched off in Settings");
@@ -337,7 +354,7 @@ async function newLink(admin, body) {
   check("switching Weasis off is saved", (await (await admin.call("GET", "/api/admin/settings")).json()).settings.weasis_enabled === false);
   await viewers.tab("Studies"); await until(() => viewers.$("tr.study"), 6000);
   check("...and the Weasis button disappears at once (no new sign-in), OHIF stays",
-    !viewers.button(viewers.$("tr.study"), "Weasis") && viewers.$$("tr.study a.btn").some((a) => a.textContent === "OHIF"));
+    !viewers.button(viewers.$("tr.study"), "Weasis") && !!viewers.button(viewers.$("tr.study"), "OHIF"));
   await admin.call("PUT", "/api/admin/settings", { weasis_enabled: true });
 
   console.log("--- modality buttons: order and visibility chosen in Settings");
@@ -365,6 +382,7 @@ async function newLink(admin, body) {
   await admin.call("PUT", "/api/admin/settings", { modality_buttons: savedButtons.map((b) => ({ ...b, visible: false })) });
   const noButtons = await makeDom(STAFF);
   await noButtons.login("admin", "SuperSecret123");
+  await noButtons.tab("Studies");
   await until(() => noButtons.$(".mod-picker"), 6000);
   check("with every button hidden, the Other codes box is still there", noButtons.$$(".chip-toggle").length === 0 && !!noButtons.$(".mod-picker .mod-other"));
   const defaultButtons = (await (await admin.call("GET", "/api/admin/settings")).json()).defaults.modality_buttons;
@@ -375,24 +393,28 @@ async function newLink(admin, body) {
   const sharer = await makeDom(STAFF);
   await sharer.login("sharer", "SharerPass123");
   await sleep(1200);
-  check("sharer: Studies, Series and Shares only", sharer.tabs().join() === "Studies,Series,Shares,Help", sharer.tabs().join());
+  check("sharer: Home, Search and Shares only", sharer.tabs().join() === "Home,Search,Shares,Help", sharer.tabs().join());
+  await until(() => sharer.$("tr.study"), 6000);
   const srow = sharer.$("tr.study");
-  check("sharer: Share... and the viewers, but no Send or Download", /Share\.\.\./.test(srow.textContent) && /Weasis/.test(srow.textContent) && /OHIF/.test(srow.textContent) && !/Send to/.test(srow.textContent) && !/Download/.test(srow.textContent), srow.textContent);
+  check("sharer: Share... and the viewers, but no Send or Download", ["Share...", "Weasis", "OHIF"].every((n) => !!sharer.button(srow, n)) && !sharer.button(srow, "Send to...") && !sharer.button(srow, "Download"), sharer.words(srow));
+  check("sharer: no upload area on the home page", !sharer.$(".home-drop"));
   await sharer.tab("Shares");
   check("sharer: sees none of the administrators' links", /No invitation yet/.test(sharer.text()), sharer.text().slice(-200));
   await admin.call("POST", "/api/admin/users", { username: "viewer1", password: "ViewerPass123", permissions: ["read", "visualize"] });
   const viewer = await makeDom(STAFF);
   await viewer.login("viewer1", "ViewerPass123");
   await sleep(1200);
-  check("viewer: Studies and Series, no Share button, no Shares tab", viewer.tabs().join() === "Studies,Series,Help" && !/Share\.\.\./.test(viewer.$("tr.study").textContent));
+  await until(() => viewer.$("tr.study"), 6000);
+  check("viewer: Home and Search, no Share button, no Shares page", viewer.tabs().join() === "Home,Search,Help" && !viewer.button(viewer.$("tr.study"), "Share..."), viewer.tabs().join());
   await admin.call("POST", "/api/admin/users", { username: "reader", password: "ReaderPass123", permissions: ["read"] });
   const reader = await makeDom(STAFF);
   await reader.login("reader", "ReaderPass123");
   await sleep(1000);
-  check("read-only account: the list, no View, no Share, no previews", reader.$$("tr.study").length === 1 && !reader.$("details.menu") && !/Share\.\.\./.test(reader.$("tr.study").textContent) && !reader.$(".thumb"));
+  await until(() => reader.$("tr.study"), 6000);
+  check("read-only account: the list, no Download, no Share, no viewers, no previews", reader.$$("tr.study").length === 1 && !reader.$("details.menu") && !reader.button(reader.$("tr.study"), "Share...") && !reader.button(reader.$("tr.study"), "Weasis") && !reader.$(".thumb"));
 
   console.log("--- search keeps working (modality filter)");
-  admin.click(admin.$$(".nav button").find((b) => b.textContent === "Studies")); await sleep(1000);
+  await admin.tab("Studies");
   admin.click(admin.$$(".chip-toggle").find((b) => b.textContent === "RX")); await sleep(1000);
   const lastFind = fs.readFileSync(path.join(LOGS, "find.log"), "utf8").trim().split("\n").pop();
   check("RX chip searches CR + DX", /"ModalitiesInStudy": "CR\\\\DX"/.test(lastFind), lastFind);

@@ -38,12 +38,12 @@
   --bar-ink-strong: #fff;  /* brand and selected tab in the top bar */
   --bar-line: #44546a;     /* outlines of buttons in the top bar */
   --bar-hover: #1b2735;
-  --side: var(--panel);    /* icon column of the simplified view */
+  --side: var(--panel);    /* icon column on the left */
   --side-ink: var(--ink-soft);
   --side-ink-strong: var(--ink);
   --side-hover: var(--panel-alt);
   --side-line: var(--line-strong);
-  --header: var(--panel);  /* header of the simplified view */
+  --header: var(--panel);  /* header across the top */
   --header-ink: var(--ink);
   --header-line: var(--line-strong);
   --card-min: 190px;       /* width of a study card on the home page */
@@ -134,41 +134,9 @@ a { color: var(--accent); }
   border-radius: 3px;
 }
 
-/* ---------- 4. Top bar and navigation ---------- */
-.topbar {
-  position: sticky;
-  top: 0;
-  z-index: 10;
-  display: flex;
-  align-items: center;
-  gap: 1.5rem;
-  padding: 0 1.25rem;
-  background: var(--bar);
-  color: var(--bar-ink);
-}
+/* ---------- 4. Logo and name (header, login page); page titles ---------- */
 .brand { display: flex; align-items: center; gap: 0.6rem; font-weight: 600; color: var(--bar-ink-strong); padding: 0.7rem 0; }
 .brand svg { width: 24px; height: 24px; }
-.nav { display: flex; gap: 0.25rem; flex: 1; overflow-x: auto; }
-.nav button {
-  background: none;
-  border: 0;
-  border-bottom: 3px solid transparent;
-  color: var(--bar-ink);
-  font: inherit;
-  padding: 1rem 0.8rem 0.8rem;
-  cursor: pointer;
-}
-.nav button:hover { color: var(--bar-ink-strong); }
-.nav button[aria-current="page"] { color: var(--bar-ink-strong); border-bottom-color: currentColor; font-weight: 600; }
-.userbox { display: flex; align-items: center; gap: 0.75rem; white-space: nowrap; }
-.userbox .btn { background: transparent; color: var(--bar-ink); border-color: var(--bar-line); }
-.userbox .btn:hover { background: var(--bar-hover); }
-
-.page { max-width: 1320px; margin: 0 auto; padding: 1.25rem; display: grid; gap: 1rem; }
-/* Table pages (Studies, Series, Transfers, Shares) use the whole window: more room for the
-   columns and the action buttons. `minmax(0, 1fr)` lets wide tables scroll inside their box
-   instead of stretching the page. */
-.page.wide { max-width: none; padding: 1.25rem 1.5rem; grid-template-columns: minmax(0, 1fr); }
 .page-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
 
 /* ---------- 5. Buttons and form controls ---------- */
@@ -340,12 +308,6 @@ dialog form, dialog .dialog-form { display: grid; gap: 0.9rem; padding: 1.3rem; 
 :root[data-theme="dark"] .toast.error { color: #1b0a09; }
 
 /* ---------- 11. Small screens and reduced motion ---------- */
-@media (max-width: 720px) {
-  .topbar { flex-wrap: wrap; gap: 0.5rem; padding: 0 0.75rem; }
-  .nav { order: 3; flex-basis: 100%; }
-  .nav button { padding-top: 0.5rem; }
-  .page, .page.wide { padding: 0.75rem; }
-}
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
 }
@@ -443,7 +405,7 @@ label.check { display: flex; align-items: center; gap: 0.5rem; color: var(--ink)
 
 /* Roles editor */
 .roles { display: grid; gap: 0.6rem; }
-.role-row { display: grid; grid-template-columns: 9rem minmax(10rem, 1fr) auto 10rem auto; gap: 0.6rem; align-items: center; padding: 0.5rem; border: 1px solid var(--line); border-radius: 8px; }
+.role-row { display: grid; grid-template-columns: 9rem minmax(10rem, 1fr) auto auto; gap: 0.6rem; align-items: center; padding: 0.5rem; border: 1px solid var(--line); border-radius: 8px; }
 .role-perms { display: flex; flex-wrap: wrap; gap: 0.2rem 0.9rem; }
 @media (max-width: 900px) { .role-row { grid-template-columns: 1fr; } }
 
@@ -555,7 +517,7 @@ dl.share-details dd { margin: 0; font-weight: 600; }
 .secret-box input { font-family: var(--mono); flex: 1; min-width: 0; }
 .secret-box .password { font-family: var(--mono); font-size: 1.4rem; font-weight: 700; letter-spacing: 0.08em; padding: 0.5rem 0.8rem; border: 2px dashed var(--accent); border-radius: 8px; user-select: all; }
 
-/* ---------- 18. Simplified view ----------
+/* ---------- 18. The portal's layout ----------
    Header (logo, practice name, total of studies) across the top, a column of icons on the
    left, and the main area. On phones the icon column becomes a bar at the bottom. The
    colours come from the --header*, --side* and --card-min tokens (Settings > Appearance). */
@@ -650,7 +612,7 @@ dl.share-details dd { margin: 0; font-weight: 600; }
 /* The home page takes exactly the height of the window: its drop zone stays at the bottom and the
    recent studies scroll inside their own box (see .home below). */
 .simple-main > .home { flex: 1 1 0; min-height: 0; }
-/* Like .page.wide: a wide table scrolls inside its own box instead of widening the page. */
+/* A wide table scrolls inside its own box instead of widening the page. */
 .simple-main .view { grid-template-columns: minmax(0, 1fr); }
 .simple-main > .banner { margin: -1.25rem -1.25rem 0; }
 
@@ -733,7 +695,7 @@ fieldset.duration legend { padding: 0; margin-bottom: 0.25rem; font-size: 0.92em
 .upload-progress-line .progress { flex: 1; }
 .upload-progress-line b { min-width: 2.8rem; text-align: right; }
 
-/* Icon buttons of the studies (simplified view) and their tooltip */
+/* Icon buttons (studies, links...) and their tooltip */
 .btn.icon-btn { padding: 0.3rem; min-width: 2.1rem; justify-content: center; }
 .actions:has(> .icon-btn, > details > .icon-btn) { flex-wrap: nowrap; }   /* a row of icons stays on one line */
 .btn.icon-btn svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }

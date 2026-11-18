@@ -81,18 +81,6 @@ pub enum SmtpSecurity {
     None,
 }
 
-/// The two looks of the staff portal.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Interface {
-    /// The full portal: top bar with tabs, search tables, every tool.
-    #[default]
-    Normal,
-    /// A reduced, icon-driven layout: header, icon column, home page with the recent
-    /// studies and a drop zone (Settings > Appearance).
-    Simplified,
-}
-
 /// Light / dark colours of the portal.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -145,9 +133,6 @@ pub struct Role {
     /// Name shown in the user form.
     pub label: String,
     pub permissions: Vec<Permission>,
-    /// The look users of this role get when the simplified view is switched on.
-    #[serde(default)]
-    pub interface: Interface,
 }
 
 /// Value of a switch missing from an older stored copy of the settings.
@@ -198,7 +183,6 @@ pub fn default_roles() -> Vec<Role> {
         key: key.into(),
         label: label.into(),
         permissions: permissions.to_vec(),
-        interface: Interface::Normal,
     };
     vec![
         role("viewer", "Viewer (search + view)", &[Permission::Read, Permission::Visualize]),
@@ -350,13 +334,8 @@ pub struct Settings {
     #[serde(default)]
     pub color_background: String,
 
-    // ---- Appearance: the simplified view ------------------------------------------
-    /// Master switch. Off = everybody gets the normal view, whatever their role says.
-    #[serde(default)]
-    pub simplified_enabled: bool,
-    /// The view of users whose role is unknown (custom permissions, or a deleted role).
-    #[serde(default)]
-    pub default_interface: Interface,
+    // ---- Appearance: the home page and the icons (the "simplified_" names date from when
+    // this layout was one of two views; kept so saved settings stay valid) -------------------
     /// Number of studies in the "recent studies" grid of the home page.
     #[serde(default = "default_recent_count")]
     pub simplified_recent_count: u64,
@@ -390,6 +369,21 @@ fn default_recent_title() -> String {
 }
 fn default_upload_text() -> String {
     "Drag a file to upload it".into()
+}
+
+/// Permissions that existed in earlier versions and no longer do (`switch_view`: choosing between the
+/// normal and the simplified view, which became the only one). They are removed from the roles of
+/// saved settings before reading them: otherwise the whole saved document would be refused.
+const RETIRED_PERMISSIONS: [&str; 1] = ["switch_view"];
+
+fn forget_retired_permissions(stored: &mut Value) {
+    if let Some(roles) = stored.get_mut("roles").and_then(Value::as_array_mut) {
+        for role in roles {
+            if let Some(list) = role.get_mut("permissions").and_then(Value::as_array_mut) {
+                list.retain(|p| !p.as_str().is_some_and(|p| RETIRED_PERMISSIONS.contains(&p)));
+            }
+        }
+    }
 }
 
 /// `#rrggbb` (or empty = the built-in colour).
@@ -444,8 +438,6 @@ impl Settings {
             color_header: String::new(),
             color_sidebar: String::new(),
             color_background: String::new(),
-            simplified_enabled: false,
-            default_interface: Interface::Normal,
             simplified_recent_count: default_recent_count(),
             simplified_recent_order: RecentOrder::Received,
             simplified_recent_layout: RecentLayout::Table,
@@ -520,7 +512,8 @@ impl Settings {
     pub fn merged_with_stored(seed: Settings, stored_json: Option<String>) -> Settings {
         let Some(raw) = stored_json else { return seed };
         let merged = (|| -> Result<Settings> {
-            let stored: Value = serde_json::from_str(&raw)?;
+            let mut stored: Value = serde_json::from_str(&raw)?;
+            forget_retired_permissions(&mut stored);
             let mut base = serde_json::to_value(&seed)?;
             if let (Some(base_obj), Some(stored_obj)) = (base.as_object_mut(), stored.as_object()) {
                 for (k, v) in stored_obj {
@@ -915,20 +908,6 @@ impl Settings {
             .or_else(|| self.roles.iter().find(|r| &PermissionSet::from_slice(&r.permissions) == permissions))
     }
 
-    /// The view a user gets: always the normal one while the simplified view is switched
-    /// off, otherwise the one of their role (or the default one without a role).
-    pub fn interface_for(&self, stored_role: &str, permissions: &PermissionSet) -> Interface {
-        self.interface_of(self.role_of(stored_role, permissions))
-    }
-
-    /// The view given by a role already looked up with [`Settings::role_of`] (`None` = no role).
-    pub fn interface_of(&self, role: Option<&Role>) -> Interface {
-        if !self.simplified_enabled {
-            return Interface::Normal;
-        }
-        role.map(|r| r.interface).unwrap_or(self.default_interface)
-    }
-
     /// The colours, as sent to every page (login and invitation pages included).
     pub fn theme(&self) -> Value {
         json!({
@@ -1004,22 +983,38 @@ mod tests {
         assert!(!refused(json!([{ "label": "CT", "codes": ["CT"], "visible": false }])));
     }
 
-    /// The view follows the master switch, then the role, then the default.
+    /// A user's role: the stored one, else the role with exactly their permissions, else none.
     #[test]
-    fn the_interface_follows_the_role() {
+    fn the_role_of_a_user() {
         let viewer = PermissionSet::from_slice(&[Permission::Read, Permission::Visualize]);
         let custom = PermissionSet::from_slice(&[Permission::Read, Permission::Upload, Permission::Send]);
-        let mut roles = default_roles();
-        roles[0].interface = Interface::Simplified; // viewer
-        let s = Settings::defaults().with_patch(&json!({ "roles": roles })).unwrap();
-        assert_eq!(s.interface_for("viewer", &viewer), Interface::Normal, "switched off: everybody normal");
-
-        let s = s.with_patch(&json!({ "simplified_enabled": true, "default_interface": "simplified" })).unwrap();
-        assert_eq!(s.interface_for("viewer", &viewer), Interface::Simplified);
-        assert_eq!(s.interface_for("", &viewer), Interface::Simplified, "no stored role: found by its permissions");
-        assert_eq!(s.interface_for("administrator", &viewer), Interface::Normal, "the stored role wins");
-        assert_eq!(s.interface_for("gone", &custom), Interface::Simplified, "unknown role: the default");
+        let s = Settings::defaults();
+        assert_eq!(s.role_of("viewer", &viewer).map(|r| r.key.as_str()), Some("viewer"));
+        assert_eq!(s.role_of("", &viewer).map(|r| r.key.as_str()), Some("viewer"), "found by its permissions");
+        assert_eq!(
+            s.role_of("administrator", &viewer).map(|r| r.key.as_str()),
+            Some("administrator"),
+            "the stored role wins"
+        );
         assert_eq!(s.role_of("gone", &custom).map(|r| r.key.as_str()), None);
+    }
+
+    /// Settings saved by earlier versions still load, with everything kept: the switch between two
+    /// views (simplified_enabled, default_interface, the view of each role) and the switch_view
+    /// permission no longer exist.
+    #[test]
+    fn settings_from_the_two_views_era_still_load() {
+        let mut roles = serde_json::to_value(default_roles()).unwrap();
+        roles[0]["interface"] = json!("simplified");
+        roles[4]["permissions"].as_array_mut().unwrap().push(json!("switch_view"));
+        let stored = json!({
+            "portal_name": "Chalklands", "simplified_enabled": true, "default_interface": "simplified",
+            "simplified_recent_count": 7, "roles": roles,
+        });
+        let loaded = Settings::merged_with_stored(Settings::defaults(), Some(stored.to_string()));
+        assert_eq!(loaded.portal_name, "Chalklands", "the saved settings were kept, not replaced by the defaults");
+        assert_eq!(loaded.simplified_recent_count, 7);
+        assert_eq!(loaded.roles[4].permissions, Permission::ALL.to_vec(), "switch_view is dropped");
     }
 
     /// The mail server password never travels without encryption.

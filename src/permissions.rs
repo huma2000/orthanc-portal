@@ -13,7 +13,6 @@
 //! | `send`      | Send a study to a remote DICOM node (an Orthanc "modality")            |
 //! | `share`     | Invite somebody OUTSIDE: password-protected link to ONE study          |
 //! | `admin`     | Manage users and settings, read the audit log                          |
-//! | `switch_view` | Switch between the normal and the simplified view (when the latter is on) |
 //!
 //! All accounts live on the **intranet**. People outside never have an account: they get a
 //! one-study invitation link (see `routes/shares.rs` and `routes/guest.rs`), which has its
@@ -38,14 +37,11 @@ pub enum Permission {
     Send,
     Share,
     Admin,
-    /// Choose between the normal and the simplified view oneself (Settings > Appearance).
-    #[serde(rename = "switch_view")]
-    SwitchView,
 }
 
 impl Permission {
     /// Every permission, in the order shown in the admin screen.
-    pub const ALL: [Permission; 8] = [
+    pub const ALL: [Permission; 7] = [
         Permission::Read,
         Permission::Visualize,
         Permission::Upload,
@@ -53,7 +49,6 @@ impl Permission {
         Permission::Send,
         Permission::Share,
         Permission::Admin,
-        Permission::SwitchView,
     ];
 
     /// Stable machine name, used in the database, in the JSON API and in error messages.
@@ -66,7 +61,6 @@ impl Permission {
             Permission::Send => "send",
             Permission::Share => "share",
             Permission::Admin => "admin",
-            Permission::SwitchView => "switch_view",
         }
     }
 
@@ -82,9 +76,6 @@ impl Permission {
                 "Invite people outside: password-protected link to one study (view + limited downloads)"
             }
             Permission::Admin => "Manage users and settings, view the audit log",
-            Permission::SwitchView => {
-                "Switch between the normal and the simplified view (while the simplified view is switched on)"
-            }
         }
     }
 

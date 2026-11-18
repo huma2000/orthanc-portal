@@ -55,14 +55,11 @@ seed() {
   COOKIE=$(curl -s -D - -o /dev/null -H "$H" -H "$J" -d '{"username":"admin","password":"AdminPass123"}' "$F/api/login" \
     | grep -i set-cookie | sed 's/.*portal_session=\([0-9a-f]*\);.*/\1/')
   [ -n "$COOKIE" ] || { echo "could not sign in as admin to create the demo accounts"; return 1; }
-  # The viewer and contributor roles use the simplified view; reception and doctor may switch views
-  # (switch_view permission), viewer may not.
   local roles
-  roles=$(api "$F/api/admin/settings" | "$PY" -c "import sys,json;d=json.load(sys.stdin);print(json.dumps([dict(r, interface='simplified' if r['key'] in ('viewer','contributor') else 'normal') for r in d['settings']['roles']]))")
-  api -X PUT "$F/api/admin/settings" -o /dev/null -d "{\"portal_name\":\"Demo Imaging Centre\",\"roles\":$roles,\"simplified_enabled\":true,\"share_public_url\":\"$GUEST_URL\"}"
-  api -X POST "$F/api/admin/users" -o /dev/null -d '{"username":"reception","password":"ReceptionPass123","permissions":["read","visualize","upload","switch_view"],"role":"contributor"}'
+  api -X PUT "$F/api/admin/settings" -o /dev/null -d "{\"portal_name\":\"Demo Imaging Centre\",\"share_public_url\":\"$GUEST_URL\"}"
+  api -X POST "$F/api/admin/users" -o /dev/null -d '{"username":"reception","password":"ReceptionPass123","permissions":["read","visualize","upload"],"role":"contributor"}'
   api -X POST "$F/api/admin/users" -o /dev/null -d '{"username":"viewer","password":"ViewerPass123","permissions":["read","visualize"],"role":"viewer"}'
-  api -X POST "$F/api/admin/users" -o /dev/null -d '{"username":"doctor","password":"DoctorPass123","permissions":["read","visualize","download","send","share","switch_view"],"role":"exporter"}'
+  api -X POST "$F/api/admin/users" -o /dev/null -d '{"username":"doctor","password":"DoctorPass123","permissions":["read","visualize","download","send","share"],"role":"exporter"}'
   api -X POST "$F/api/logout" -o /dev/null
 }
 
@@ -218,11 +215,11 @@ Test environment running.
   Fake Orthanc:      http://127.0.0.1:$ORTHANC_PORT  (demo data; uploads create new studies)
   Fake mail server:  127.0.0.1:$SMTP_PORT  (emails kept in $MAIL; read the last one: tests/dev_env.sh mail)
 
-  Account / password             view        permissions
-  admin / AdminPass123           normal      everything (Settings is here)
-  reception / ReceptionPass123   simplified  read, visualize, upload, switch_view
-  viewer / ViewerPass123         simplified  read, visualize  (cannot switch views)
-  doctor / DoctorPass123         normal      read, visualize, download, send, share, switch_view
+  Account / password             permissions
+  admin / AdminPass123           everything (Configuration is here)
+  reception / ReceptionPass123   read, visualize, upload
+  viewer / ViewerPass123         read, visualize
+  doctor / DoctorPass123         read, visualize, download, send, share
 
 Logs and database: $DIR
 Stop with: tests/dev_env.sh stop

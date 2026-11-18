@@ -10,8 +10,7 @@
 use crate::auth::{self, AuthUser, SESSION_COOKIE};
 use crate::db::User;
 use crate::error::{AppError, AppResult};
-use crate::permissions::Permission;
-use crate::settings::{CardSize, Interface, ModalityButton, RecentLayout, RecentOrder};
+use crate::settings::{CardSize, ModalityButton, RecentLayout, RecentOrder};
 use crate::state::AppState;
 use axum::{
     extract::{ConnectInfo, State},
@@ -62,11 +61,7 @@ pub struct Features {
     modality_buttons: Vec<ModalityButton>,
     /// Sharing with people outside (invitation links).
     share: ShareFeature,
-    /// The view this user gets: decided by their role (Settings > Appearance).
-    interface: Interface,
-    /// The user may switch between the two views: the `switch_view` permission, while the
-    /// simplified view is switched on (their choice is kept in their browser).
-    interface_switch: bool,
+    /// Options of the home page and the icons (Settings > Appearance).
     simplified: SimplifiedFeature,
 }
 
@@ -90,8 +85,6 @@ async fn me_response(state: &AppState, user: User) -> Me {
         max_downloads: settings.share_max_downloads,
         email: settings.email_configured(),
     };
-    let interface = settings.interface_for(&user.role, &user.permissions);
-    let interface_switch = settings.simplified_enabled && user.permissions.contains(Permission::SwitchView);
     let simplified = SimplifiedFeature {
         recent_count: settings.simplified_recent_count,
         recent_order: settings.simplified_recent_order,
@@ -110,9 +103,7 @@ async fn me_response(state: &AppState, user: User) -> Me {
             thumbnails: settings.thumbnails_enabled,
             modality_buttons: settings.visible_modality_buttons(),
             share,
-            interface,
             // Only meaningful while the simplified view is switched on.
-            interface_switch,
             simplified,
         },
     }

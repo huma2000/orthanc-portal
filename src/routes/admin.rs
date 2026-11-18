@@ -60,7 +60,6 @@ pub async fn list_users(State(state): State<AppState>, AuthUser(admin): AuthUser
             let role = settings.role_of(&u.role, &u.permissions);
             let mut value = serde_json::to_value(&u).unwrap_or_default();
             value["effective_role"] = json!(role.map(|r| &r.key));
-            value["interface"] = json!(settings.interface_of(role));
             value
         })
         .collect();

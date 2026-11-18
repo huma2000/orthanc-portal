@@ -4,3 +4,5 @@ target/
 *.db-wal
 *.db-shm
 tests/.dev-env/
+tests/node_modules/
+tests/package-lock.json

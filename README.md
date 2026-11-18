@@ -17,7 +17,7 @@ A web front-end for an **Orthanc PACS** (recent releases), written in Rust. One 
 | **Share a study**: link + password, valid 48 hours by default, 1 download by default (both adjustable) | yes (`share`) | - |
 | Download as ZIP | yes (`download`) | only the shared study, **as many times as the link allows** |
 | **Your own branding**: browser window title, website icon (favicon), logo, portal name, **colours**, light / dark | set by admins | shown on the invitation page |
-| **Two looks**: the normal view, or a **simplified view** (icons, recent studies, drag & drop upload) chosen **per role** | set by admins | - |
+| **A simple layout**: icons on the left, the recent studies and a drag & drop upload area on the home page, a Help page | yes | - |
 | Upload DICOM files / ZIPs | yes | no |
 | **Send a study to a remote DICOM node** and follow the transfer | yes | no |
 | User management, audit log | yes | no |
@@ -209,15 +209,15 @@ screens whose changes apply at once.
 |---|---|
 | **General > Branding** | **Browser window title**, **website icon**, **logo**, portal name, whether the name is shown next to the logo, notice shown on the login page (see below) |
 | **General > Modality buttons** | The quick modality filters of the Studies and Series pages: order, shown / hidden, label, DICOM codes, description; add, remove, restore defaults (the *Other codes* box is always shown) |
-| **Appearance > Colours** | Light / dark / automatic, and the **accent**, **header**, **icon column** and **page background** colours (each can go back to the built-in one). Previewed at once, kept when saved (see [The simplified view and the colours](#the-simplified-view-and-the-colours)) |
-| **Appearance > Simplified view** | Switch it on, the view of users without a role, how many recent studies the home page shows, which ones (last received / newest study date) and how (the Studies table, or cards with big previews), card size, the two texts of the home page, the total of studies in the header, names under the icons |
+| **Appearance > Colours** | Light / dark / automatic, and the **accent**, **header**, **icon column** and **page background** colours (each can go back to the built-in one). Previewed at once, kept when saved (see [The layout and the colours](#the-layout-and-the-colours)) |
+| **Appearance > Home page and icons** | How many recent studies the home page shows, which ones (last received / newest study date) and how (the Studies table, or cards with big previews), card size, the two texts of the home page, the total of studies in the header, names under the icons |
 | **General > Viewers and uploads** | Show the **Weasis** button (on / off), show the **OHIF** button (automatic / always / never), largest uploaded file, preview thumbnails on/off and their cache size |
 | **Orthanc > Orthanc connection** | Address; **with an account** (user name + password, write-only: never sent back to the browser) **or without an account** (for an Orthanc that only accepts a list of allowed computers); **Test connection** (mode used, version, DICOMweb/OHIF plugins, number of DICOM nodes; works on values you have typed but not yet saved) |
 | **Network & sharing > Network** | Intranet address, enable/disable the internet listener (invitation links only) and its address, optional fixed public address for Weasis |
 | **Network & sharing > Share links** | **The public address of the share links** (your Cloudflare hostname; sharing stays off until it is set), the default and maximum validity (hours) and the default and maximum number of ZIP downloads |
 | **Network & sharing > Email** | The mail server that sends share invitations (optional): server, port, encryption (STARTTLS / TLS / none), user name and password (write-only), sender address, a text added at the end of every email, and **Send a test email** |
 | **Security & roles > Sessions and sign-in security** | Session length, Weasis link validity, failed sign-ins before lockout, lockout length, secure-cookie mode, how long to keep the audit log (0 = forever) |
-| **Security & roles > Roles** | The role shortcuts offered in the user form (add, rename, change permissions, restore defaults) and the **view** (normal or simplified) of each role |
+| **Security & roles > Roles** | The role shortcuts offered in the user form (add, rename, change permissions, restore defaults) |
 | **Users** | Accounts, permissions, enable/disable, password reset |
 | **DICOM nodes** | Remote DICOM systems Orthanc sends studies to: add, edit (with a description shown to the staff), delete, **Test** (DICOM ping) |
 | **Audit log** | Every change above is recorded (setting names only, never values or passwords) |
@@ -234,7 +234,7 @@ including to people who are already signed in, and on the invitation page that g
 |---|---|
 | **Browser window title** | The text of the tab and window (max 80 characters). Empty = the portal name. |
 | **Website icon** | PNG, ICO, SVG, JPEG, WebP or GIF, up to 256 KB; square and at least 64 x 64 px works best. Shown in the tab and in bookmarks. |
-| **Logo** | PNG, JPEG, WebP, GIF or SVG, up to 1 MB. Shown in the top bar (about 32 px high, up to 220 px wide) and on the login page. It sits on a **light plate**, so a dark logo stays readable on the dark bar. A wide logo with a transparent background looks best. |
+| **Logo** | PNG, JPEG, WebP, GIF or SVG, up to 1 MB. Shown in the header (up to about 56 px high) and on the login page. It sits on a **light plate**, so a dark logo stays readable on the dark bar. A wide logo with a transparent background looks best. |
 | **Portal name** | Text next to the logo and the login heading. Untick **Show the portal name next to the logo** when the logo already contains the name (it is then kept as the logo's accessible text). |
 | **Login notice** | Optional message under the login heading. |
 
@@ -249,20 +249,20 @@ its name or what the browser claims). An **SVG** is refused if it contains scrip
 (`onload=`...), `javascript:` links, `<foreignObject>`, embedded pages or entities. Images are also served with a
 `sandbox` Content-Security-Policy, so even a file that slipped through cannot run anything if opened directly.
 
-### The simplified view and the colours
+### The layout and the colours
 
-Some staff only need to see what came in recently and to add studies. For them the portal has a second look,
-the **simplified view**:
+Every staff member uses the same layout, showing only what their permissions allow:
 
 ```
 +------------------------------------------------------+
 | logo + practice name                Total studies: N |
 +----+-------------------------------------------------+
-| ⌂  |  Recent studies: a grid of cards (preview,      |
-| ⌕  |  patient, date, description, modalities)        |
+| ⌂  |  Recent studies: the same table as the Search   |
+| ⌕  |  page, with the same buttons                    |
 | <  |                                                 |
 | ☁  |-------------------------------------------------|
-|    |  Drag a file to upload it                       |
+| →▯ |  Drag a file to upload it                       |
+| ?  |                                                 |
 | ⚙  |                                                 |
 | ⇥  |                                                 |
 +----+-------------------------------------------------+
@@ -270,34 +270,28 @@ the **simplified view**:
 
 * The **header** shows the logo and the portal name (*General > Branding*) and the **total number of studies**
   in Orthanc.
-* The **column of icons** leads to **Home**, **Search** (studies or series), **Shares**, **Uploads**, **Transfers**, **Help**, **Configuration** (administrators)
-  and **Log out**. Each icon names itself when the mouse rests on it (or always, under the icon, if you tick
-  *Write the name under each icon*). An icon is shown only to users with the matching permission. On a phone
-  the column becomes a bar at the bottom of the screen.
-* **Home** shows the most recent studies in the same table as the Studies page: same columns, same buttons
-  (Weasis, OHIF, Send to..., Share..., Download, the arrow that opens the series). Cards with big previews can be
-  chosen instead (a click on a card opens the study with the same buttons and its series). How many studies,
-  and whether "recent" means *last received by the PACS* or *newest study date*, are settings. Below them, files
-  and whole folders can be **dropped** to upload them; the list and the total refresh when the upload ends.
-* Search (its **Studies** and **Series** tabs), Shares, Uploads, Transfers and Configuration are the same pages as in
-  the normal view: every feature of the normal view is also in the simplified one.
-* **Help** (also a tab in the normal view) explains how to use the portal, in plain words for staff who are not
-  administrators. It is written for the person reading it: only the parts their account can use (no word about
-  uploading for someone who cannot upload), only the features switched on (Weasis, OHIF, thumbnails, email
-  invitations...), with the limits of this installation (longest link, number of recent studies), and in the words
-  of their view (the icons, drawn in the text, in the simplified view; the tabs in the normal one).
+* The **column of icons** leads to **Home**, **Search** (its **Studies** and **Series** tabs), **Shares**,
+  **Uploads**, **Transfers**, **Help**, **Configuration** (administrators) and **Log out**. Each icon names itself
+  when the mouse rests on it (or always, under the icon, if you tick *Write the name under each icon*). An icon is
+  shown only to users with the matching permission. On a phone the column becomes a bar at the bottom of the
+  screen. The buttons of a study or a link are icons too (Weasis, OHIF, Send to..., Share..., Download, Copy link,
+  Password, Edit..., Revoke, Refresh), each with a tooltip saying what it does.
+* **Home** shows the most recent studies in the same table as the Search page: same columns, same buttons, the
+  arrow that opens the series. Cards with big previews can be chosen instead (a click on a card opens the study
+  with the same buttons and its series). How many studies, and whether "recent" means *last received by the PACS*
+  or *newest study date*, are settings (*Appearance > Home page and icons*). Below them, files and whole folders
+  can be **dropped** to upload them; the list and the total refresh when the upload ends.
+* **Help** explains how to use the portal, in plain words for staff who are not administrators. It is written
+  for the person reading it: only the parts their account can use (no word about uploading for someone who cannot
+  upload), only the features switched on (Weasis, OHIF, thumbnails, email invitations...), with the limits of this
+  installation (longest link, number of recent studies), and with the buttons drawn in the text as they appear.
 * **Uploads** lists every upload of the browser session (newest first) with a progress bar, speed, time left,
   files done, new / already stored / failed and the studies touched. While files are being sent, the Uploads
-  icon (and the Uploads tab of the normal view) shows the percentage, so the upload can be followed from any page.
+  icon shows the percentage, so the upload can be followed from any page.
 
-**Who gets which view.** Every role (*Security & roles > Roles*) has a **view**: normal or simplified. The
-role is saved with each account (the *Role* list of the user form; *Custom* = no role). Accounts created before
-this existed are matched to the role with exactly their permissions. Users without a role get the *View of
-users without a role*. Nothing changes until **Switch on the simplified view** is ticked: switched off,
-everybody has the normal view. A user's role only chooses the look; **what they may do is still decided by
-their permissions**, checked by the server on every request. Users with the **`switch_view` permission** get a
-switch button in both views to change view themselves; their choice is kept in their own browser. Without that
-permission, users always see the view of their role.
+(Earlier versions also had a "normal view" with tabs at the top, chosen per role. It was removed once this layout
+had every one of its features; settings saved by those versions keep working, and the `switch_view` permission
+they had is simply dropped.)
 
 **Colours.** *Appearance > Colours* forces light or dark (or follows each computer), and replaces the accent,
 header, icon column and page background colours. Text on the header and the icon column switches between dark
@@ -369,7 +363,6 @@ with an invitation have no account and no permissions, only their link (section 
 | `send` | Send studies to remote DICOM nodes, see transfers |
 | `share` | **Invite somebody outside to look at a study** (create links), see and revoke their own links |
 | `admin` | Manage users, settings, DICOM nodes, branding, read the audit log; see and revoke **everyone's** links |
-| `switch_view` | Switch between the normal and the simplified view oneself (only while the simplified view is switched on; see section 4) |
 
 Rules: `visualize`, `download`, `send` and `share` require `read`. The last active administrator cannot be
 removed or disabled, and nobody can delete or demote their own account.
@@ -401,7 +394,7 @@ or resetting their password also ends their sessions and Weasis tokens. An admin
 
 ## 6. Searching and filtering by modality
 
-* **Studies** and **Series** tabs; text fields accept DICOM wildcards (`DOE*`, `?`), a plain word means
+* **Search** page, with its **Studies** and **Series** tabs; text fields accept DICOM wildcards (`DOE*`, `?`), a plain word means
   "contains". Study dates are a range. Newest studies come first (sorted by Orthanc, so paging is exact).
 * **Modality** is a row of toggle buttons, by default **CT, MR, US, RX, MG, XA, RF, NM, PT**. Several can be
   active at once (CT *or* US) and the list refreshes immediately. **RX** means X-ray, which DICOM splits into
@@ -489,7 +482,7 @@ maximums nobody can exceed (720 hours, 20 downloads). Make sure the Cloudflare T
 
 **Creating an invitation (staff with the `share` permission, on the intranet).**
 
-1. **Studies** tab, **Share...** on the study.
+1. **Search** (or the home page), **Share...** on the study.
 2. Choose **how long** the link works, in **days, hours and minutes** (default 2 days; at most the maximum of
    Settings, 30 days by default), **how many ZIP downloads** it allows (default 1; **0 = online viewing only**)
    and, if you wish, a note for your own records (for example "Dr. Smith, second opinion"). Optionally tick
@@ -497,7 +490,7 @@ maximums nobody can exceed (720 hours, 20 downloads). Make sure the Cloudflare T
 3. **Create link and password.** You get the **link** (`https://pacs.example.com/s/<48 random characters>`) and a
    generated **password** (`K7QX-M2PD-9RHW`: 12 characters without look-alikes such as `0/O` or `1/I/L`). Both
    have copy buttons. Send the password by a different channel than the link (a phone call, an SMS).
-4. The **Shares** tab lists the invitations (yours; administrators see everyone's) with the study, who made
+4. The **Shares** page lists the invitations (yours; administrators see everyone's) with the study, who made
    it, time left, downloads left, how often it was opened, its status (active / expired / revoked) and
    **Copy link**, **Password**, **Edit** and **Revoke** buttons. Revoking cuts off a guest who is looking at the
    study at that very moment.
@@ -567,10 +560,10 @@ only if Orthanc runs with `"DicomModalitiesInDatabase": true` (set in `deploy/or
 declaring them in Orthanc's `DicomModalities`. Do not forget to declare Orthanc's AE title and address on the
 other side.
 
-1. On the **Studies** tab, click **Send to...** on a study, pick the destination, **Send study**.
+1. On the **Search** page (or the home page), click **Send to...** on a study, pick the destination, **Send study**.
 2. The portal asks Orthanc to run a C-STORE job (`POST /modalities/{alias}/store` with
    `"Synchronous": false`), stores the job id and answers immediately.
-3. The **Transfers** tab (a page of its own in the simplified view) shows each transfer with the live Orthanc job
+3. The **Transfers** page shows each transfer with the live Orthanc job
    state (Pending / Running / Success / Failure) and its **progress**: a bar with the percentage, how many images
    were sent out of how many, how long it has been running and about how long is left, refreshing every 3 seconds
    while a job is active. Once finished: "120 images in 2 min", or why it failed and how many images could not
@@ -687,7 +680,7 @@ All JSON. State-changing calls need the header `X-Requested-With: portal`.
 
 | Method & path | Permission | Purpose |
 |---|---|---|
-| `POST /api/login`, `POST /api/logout`, `GET /api/me` | none / session | Session (`/me` returns the permissions, the `role` and `features`: `ohif`, `thumbnails`, `share`, `interface` (`normal` / `simplified`), `interface_switch`, `simplified` (home page options)) |
+| `POST /api/login`, `POST /api/logout`, `GET /api/me` | none / session | Session (`/me` returns the permissions, the `role` and `features`: `ohif`, `thumbnails`, `share`, `simplified` (home page and icon options)) |
 | `GET /api/studies?patient_name=&patient_id=&accession_number=&description=&modality=&date_from=&date_to=&order=&limit=&offset=` | read | Search studies (`modality=ct,rx`; `order=received` = last received first, otherwise newest study date) |
 | `GET /api/stats` | read | `{ "studies": N }`: number of studies in Orthanc |
 | `GET /api/studies/{id}/series` | read | Series of a study |
@@ -770,7 +763,7 @@ The code compiles without warnings on Rust 1.91, passes `cargo clippy --all-targ
 formatted with `rustfmt` (see `rustfmt.toml`), and its dependencies were checked against the RustSec advisory
 database (no known vulnerable version in `Cargo.lock`). The automated tests live in the **`tests/`** folder:
 
-* `tests/server_tests.sh`: **444 checks** of the server against a fake Orthanc (`tests/mock_orthanc.py`) and a
+* `tests/server_tests.sh`: **439 checks** of the server against a fake Orthanc (`tests/mock_orthanc.py`) and a
   fake mail server (`tests/mock_smtp.py`):
   the two doors (staff portal vs invitation links only, Cloudflare headers refused on the intranet port), creating
   links with the default and the limited validity/downloads, the password gate and its throttling, what a guest
@@ -781,12 +774,12 @@ database (no known vulnerable version in `Cargo.lock`). The automated tests live
   login hardening, caps, ETag/headers, concurrent administrators, and **talking to Orthanc with an account, without
   one, and when it refuses the portal** (what is sent, what is not, the message for each case), and an
   administrator changing their own password (every other session of that account is signed out);
-* `tests/ui_tests.js`: **74 checks** of both web pages in a simulated browser (jsdom): the Share dialog and the
+* `tests/ui_tests.js`: **109 checks** of both web pages in a simulated browser (jsdom): the Share dialog and the
   Shares tab, the guest page (password, study, series, countdown, downloads left, expiry, revoked, 0-download
   links, no OHIF), what each kind of staff account sees, search, the with/without-account choice in Settings;
-* `cargo test`: **27 unit tests** (image validation; password and link generation; the rules that confine a guest
+* `cargo test`: **28 unit tests** (image validation; password and link generation; the rules that confine a guest
   to one study; account / no account and the wording of Orthanc refusals; the thumbnail cache; tokens and sessions;
-  the view of each role and the appearance settings; email addresses, invitation texts, the hourly email limit and
+  the role of a user, settings saved by earlier versions, the appearance settings; email addresses, invitation texts, the hourly email limit and
   the rule that the mail server password never travels unencrypted).
 
 **Trying it by hand: `tests/dev_env.sh`.** It builds the portal and starts it with the fake Orthanc in a demo
@@ -795,7 +788,7 @@ folder (`tests/.dev-env`, not committed), so it never collides with the tests or
 
 | Command | What it does |
 |---|---|
-| `tests/dev_env.sh start` | Builds and starts everything; the first time, creates demo accounts (one per kind of user, normal and simplified view) and invitation links in every state. Prints the addresses and passwords |
+| `tests/dev_env.sh start` | Builds and starts everything; the first time, creates demo accounts (one per kind of user) and invitation links in every state. Prints the addresses and passwords |
 | `tests/dev_env.sh guest [N]` | **See what a person outside sees**: makes a new invitation link for demo study N (1-14), prints the link and its password, and opens it in your browser. `NO_BROWSER=1` only prints them |
 | `tests/dev_env.sh mail [N]` | The last email the portal sent (share invitations, test emails), as the recipient reads it; `mail 10` lists the last 10. The environment's fake mail server sends nothing anywhere: it keeps every email in `tests/.dev-env/mail/` as an `.eml` file any mail program opens |
 | `tests/dev_env.sh shares` | Adds another set of demo invitation links (active, no downloads left, view only, about to expire, expired, revoked, made by another user) |
@@ -831,12 +824,12 @@ plugin, a real Weasis or a real DICOM destination here, and the compose files we
    link in a private window (or on a phone using mobile data), type the password: you must see only that
    study, *View online* must load the images and *Download (ZIP)* must give a file and lower the counter.
    Try a second download (refused), then *Revoke* in the *Shares* tab and reload the guest page.
-6. **Thumbnails**: the Studies and Series tabs show pictures. Not every image can be rendered (for example some
+6. **Thumbnails**: the Search page (Studies and Series) and the home page show pictures. Not every image can be rendered (for example some
    JPEG 2000 files depending on how your Orthanc was built); those get the modality placeholder.
 
 | Symptom | Likely cause |
 |---|---|
-| Red "Orthanc:" strip under the top bar, or "Orthanc ... is not supported" in the log | Orthanc unreachable, wrong credentials, or older than 1.12.5 / no `HasExtendedFind`. Fix it in **Settings > Orthanc connection**; the portal keeps running meanwhile |
+| Red "Orthanc:" strip at the top of the page, or "Orthanc ... is not supported" in the log | Orthanc unreachable, wrong credentials, or older than 1.12.5 / no `HasExtendedFind`. Fix it in **Settings > Orthanc connection**; the portal keeps running meanwhile |
 | The portal does not start: "cannot start the intranet listener ... address already in use" (or `docker compose up` says "port is already allocated") | Another program uses that port: pick a free one, see [Changing the ports](#changing-the-ports) |
 | I changed the port and lost the page | Settings shows a link to the new address; if the new address is unusable the old one is kept. Last resort: start once with `RESET_SETTINGS=true` |
 | A DICOM node I added disappears after restarting Orthanc | Orthanc is not running with `"DicomModalitiesInDatabase": true` |
