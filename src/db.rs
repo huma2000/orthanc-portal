@@ -48,6 +48,20 @@ impl User {
             Err(AppError::Forbidden(permission.as_str()))
         }
     }
+
+    /// The permission, or administrator (who may do everything the optional features offer).
+    pub fn require_or_admin(&self, permission: Permission) -> Result<(), AppError> {
+        if self.permissions.contains(Permission::Admin) {
+            Ok(())
+        } else {
+            self.require(permission)
+        }
+    }
+
+    /// Does the user have the permission, or are they an administrator?
+    pub fn may(&self, permission: Permission) -> bool {
+        self.permissions.contains(permission) || self.permissions.contains(Permission::Admin)
+    }
 }
 
 /// An invitation: a password-protected link that lets ONE outside person look at ONE study
@@ -81,9 +95,30 @@ pub struct Share {
     /// [`Db::share_password`]). The copy itself is never read with the other fields.
     #[serde(skip)]
     pub has_password: bool,
+    /// The other studies of a link that shares several (the first one is `study_id` / `study_uid`).
+    pub extra_studies: Vec<SharedStudy>,
+}
+
+/// One more study of an invitation link.
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct SharedStudy {
+    pub id: String,
+    pub uid: String,
 }
 
 impl Share {
+    /// Every study of the link, the first one first.
+    pub fn studies(&self) -> Vec<SharedStudy> {
+        let mut all = vec![SharedStudy { id: self.study_id.clone(), uid: self.study_uid.clone() }];
+        all.extend(self.extra_studies.iter().cloned());
+        all
+    }
+
+    /// The StudyInstanceUIDs a guest of this link may read.
+    pub fn study_uids(&self) -> Vec<String> {
+        self.studies().into_iter().map(|s| s.uid).collect()
+    }
+
     /// Can the link still be used at time `now`? (Viewing does not depend on downloads left.)
     pub fn is_active(&self, now: i64) -> bool {
         self.revoked_at.is_none() && now < self.expires_at
@@ -105,6 +140,8 @@ pub struct NewShare<'a> {
     pub label: &'a str,
     pub note: &'a str,
     pub max_downloads: i64,
+    /// The other studies (JSON list of [`SharedStudy`], empty for one study).
+    pub extra_studies: &'a [SharedStudy],
     /// The password itself, kept so it can be shown again (`None` = Settings > Share links says not to).
     pub password_copy: Option<&'a str>,
 }
@@ -115,7 +152,7 @@ pub const EXPIRED_PASSWORD_GRACE: i64 = 30 * 86_400;
 const SHARE_COLUMNS: &str =
     "id, token, password_hash, created_at, expires_at, created_by, study_id, study_uid, label, \
                              note, max_downloads, downloads_used, revoked_at, access_count, last_access_at, \
-                             password_copy IS NOT NULL";
+                             password_copy IS NOT NULL, extra_studies";
 
 fn row_to_share(row: &Row) -> rusqlite::Result<Share> {
     Ok(Share {
@@ -135,6 +172,10 @@ fn row_to_share(row: &Row) -> rusqlite::Result<Share> {
         access_count: row.get(13)?,
         has_password: row.get(15)?,
         last_access_at: row.get(14)?,
+        extra_studies: row
+            .get::<_, Option<String>>(16)?
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default(),
     })
 }
 
@@ -174,6 +215,8 @@ pub struct Transfer {
     /// Transfers tab can still say "120 images in 2 min" once Orthanc has forgotten the job).
     #[serde(skip)]
     pub final_info: Option<String>,
+    /// `send` (to `target`) or `retrieve` (from `target`; `study_id` is then the StudyInstanceUID).
+    pub direction: String,
 }
 
 /// One stored branding image: `(kind, content type, bytes, updated_at)`.
@@ -305,7 +348,7 @@ impl Db {
         )?;
 
         // Databases created by older versions have no `final_state` / `final_error` / `final_info` columns.
-        for column in ["final_state", "final_error", "final_info"] {
+        for column in ["final_state", "final_error", "final_info", "direction"] {
             let exists = conn
                 .prepare("SELECT 1 FROM pragma_table_info('transfers') WHERE name = ?1")?
                 .exists(params![column])?;
@@ -319,6 +362,12 @@ impl Db {
             conn.prepare("SELECT 1 FROM pragma_table_info('shares') WHERE name = 'password_copy'")?.exists([])?;
         if !has_copy {
             conn.execute("ALTER TABLE shares ADD COLUMN password_copy TEXT", [])?;
+        }
+        // ...nor the other studies of a link that shares several.
+        let has_extra =
+            conn.prepare("SELECT 1 FROM pragma_table_info('shares') WHERE name = 'extra_studies'")?.exists([])?;
+        if !has_extra {
+            conn.execute("ALTER TABLE shares ADD COLUMN extra_studies TEXT", [])?;
         }
 
         // Databases created by older versions do not remember the role of each user.
@@ -489,13 +538,14 @@ impl Db {
         label: &str,
         target: &str,
         job_id: &str,
+        direction: &str,
     ) -> Result<i64, AppError> {
         let conn = self.lock();
         conn.prepare_cached(
-            "INSERT INTO transfers (ts, username, study_id, label, target, job_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO transfers (ts, username, study_id, label, target, job_id, direction)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )?
-        .execute(params![now_unix(), username, study_id, label, target, job_id])?;
+        .execute(params![now_unix(), username, study_id, label, target, job_id, direction])?;
         Ok(conn.last_insert_rowid())
     }
 
@@ -504,7 +554,7 @@ impl Db {
     pub fn recent_transfers(&self, only_user: Option<&str>, limit: i64) -> Result<Vec<Transfer>, AppError> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(
-            "SELECT id, ts, username, study_id, label, target, job_id, final_state, final_error, final_info FROM transfers
+            "SELECT id, ts, username, study_id, label, target, job_id, final_state, final_error, final_info, direction FROM transfers
              WHERE (?1 IS NULL OR username = ?1 COLLATE NOCASE)
              ORDER BY id DESC LIMIT ?2",
         )?;
@@ -520,6 +570,7 @@ impl Db {
                 final_state: r.get(7)?,
                 final_error: r.get(8)?,
                 final_info: r.get(9)?,
+                direction: r.get::<_, Option<String>>(10)?.unwrap_or_else(|| "send".into()),
             })
         })?;
         let transfers = rows.collect::<Result<Vec<_>, _>>()?;
@@ -638,8 +689,8 @@ impl Db {
             let conn = self.lock();
             conn.prepare_cached(
                 "INSERT INTO shares (token, password_hash, created_at, expires_at, created_by, study_id, study_uid,
-                                     label, note, max_downloads, password_copy)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                                     label, note, max_downloads, password_copy, extra_studies)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             )?
             .execute(params![
                 new.token,
@@ -652,7 +703,12 @@ impl Db {
                 new.label,
                 new.note,
                 new.max_downloads,
-                new.password_copy
+                new.password_copy,
+                if new.extra_studies.is_empty() {
+                    None
+                } else {
+                    Some(serde_json::to_string(new.extra_studies).unwrap_or_default())
+                }
             ])?;
             conn.last_insert_rowid()
         };

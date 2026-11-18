@@ -44,7 +44,7 @@ newlink() {
 
 echo "== two doors: the staff portal (intranet) and the internet listener (invitation links only)"
 ME=$(body $F $A /api/me)
-ok "intranet admin has all eight permissions" "$(echo $ME | py "','.join(d['permissions'])")" "read,visualize,upload,download,send,share,admin,labels"
+ok "intranet admin has all twelve permissions" "$(echo $ME | py "','.join(d['permissions'])")" "read,visualize,upload,download,send,share,admin,labels,delete,edit,retrieve,worklists"
 hasnt "accounts no longer have a remote/full 'scope'" "$ME" '"scope"'
 ok "share is a permission that needs 'read' (400 without it)" "$(code $F $A POST /api/admin/users -H "$J" -d '{"username":"badshare","password":"BadSharePass123","permissions":["share"]}')" "400"
 ok "the Exporter and Clinical roles include share" "$(body $F $A /api/admin/settings | py "[ 'share' in r['permissions'] for r in d['settings']['roles'] if r['key'] in ('exporter','clinical')]")" "[True, True]"
@@ -85,6 +85,11 @@ echo "== appearance: colours and the home page"
 ok "the colours are public (login and invitation pages)" "$(curl -s $G/api/public | py "sorted(d['theme'])")" "['accent', 'background', 'header', 'mode', 'sidebar']"
 ok "a colour that is not #rrggbb is refused (400)" "$(put $A '{"color_accent":"red"}' | tail -1)" "400"
 ok "the number of recent studies is limited (400)" "$(put $A '{"simplified_recent_count":500}' | tail -1)" "400"
+ok "auto-refresh: on, every 30 s, by default" "$(body $F $V /api/me | py "' '.join(str(d['features']['simplified'][k]) for k in ('recent_auto_refresh','transfers_auto_refresh','refresh_seconds'))")" "True True 30"
+ok "an auto-refresh interval under 5 s is refused (400)" "$(put $A '{"auto_refresh_seconds":2}' | tail -1)" "400"
+put $A '{"auto_refresh_seconds":60,"transfers_auto_refresh":false}' > /dev/null
+ok "the auto-refresh settings reach every user" "$(body $F $V /api/me | py "' '.join(str(d['features']['simplified'][k]) for k in ('transfers_auto_refresh','refresh_seconds'))")" "False 60"
+put $A '{"auto_refresh_seconds":30,"transfers_auto_refresh":true}' > /dev/null
 put $A '{"color_accent":"#AA3311","theme_mode":"dark"}' > /dev/null
 ok "saved colours reach the public page (lower-cased)" "$(curl -s $F/api/public | py "d['theme']['accent']+' '+d['theme']['mode']")" "#aa3311 dark"
 put $A '{"simplified_recent_count":8,"simplified_upload_text":"Drop here"}' > /dev/null
@@ -499,7 +504,7 @@ echo "== thumbnails"
 curl -s -D th.h -o th.b -H "Cookie: portal_session=$V" "$F/api/studies/$SID/thumbnail"
 has "study thumbnail is a JPEG, never stored by browsers" "$(cat th.h)" "image/jpeg"
 has "...no-store" "$(cat th.h)" "private, no-store"
-ok "picks the CT series (not the bigger report), middle image fails -> falls back (i2 then i1)" "$(python3 -c "import json;print(','.join(json.loads(l)['id'] for l in open('rendered.log')))")" "i2,i1"
+ok "picks the CT series (not the bigger report), middle image fails -> falls back (a2 then a1)" "$(python3 -c "import json;print(','.join(json.loads(l)['id'] for l in open('rendered.log')))")" "a2,a1"
 N=$(wc -l < rendered.log); body $F $V /api/studies/$SID/thumbnail -o /dev/null
 ok "second request is served from the cache" "$(wc -l < rendered.log)" "$N"
 ok "report series has no preview -> 404" "$(code $F $V GET /api/series/$SR/thumbnail)" "404"
@@ -707,6 +712,198 @@ ok "...and it works against an Orthanc that has no users" "$(code $F $A GET /api
 has "...Test connection says it is connected without an account" "$(otest | py "d['message']")" "Connected to Orthanc 1.12.10 without an account"
 
 echo "== ports: busy ports, fallback and LISTENERS_FROM_ENV"
+echo "== optional features (Settings > Features)"
+S2=bbbbbbbb-cccccccc-dddddddd-eeeeeeee-ffffffff
+SERIES_ID=11111111-22222222-33333333-44444444-55555555; SR_ID=99999999-88888888-77777777-66666666-55555555
+INST=a1
+A=$(login $F admin SuperSecret123)
+# Users of this part only (earlier parts change the accounts above).
+mkuser fviewer FViewerPass123 '"read","visualize"'
+mkuser freader FReaderPass123 '"read"'
+mkuser fsender FSenderPass123 '"read","send"'
+mkuser fsharer FSharerPass123 '"read","visualize","share"'
+V=$(login $F fviewer FViewerPass123); RD=$(login $F freader FReaderPass123)
+S=$(login $F fsender FSenderPass123); SH=$(login $F fsharer FSharerPass123)
+mkuser deleter DeleterPass123 '"read","delete"'
+mkuser editor  EditorPass123 '"read","edit"'
+mkuser fetcher FetcherPass123 '"read","retrieve"'
+mkuser planner PlannerPass123 '"worklists"'
+mkuser getter  GetterPass123 '"read","visualize","download"'
+DL=$(login $F deleter DeleterPass123); ED=$(login $F editor EditorPass123); FE=$(login $F fetcher FetcherPass123)
+PL=$(login $F planner PlannerPass123); GT=$(login $F getter GetterPass123)
+feat() { body $F $1 /api/me | py "$2"; }
+ok "the risky features are off by default" "$(feat $A "' '.join(str(d['features']['options'][k]) for k in ('delete','modify','anonymize','add_series','retrieve','worklists','raw_api'))")" "False False False False False False False"
+ok "...the harmless ones on (bulk, images, one link for several studies, jobs, system)" "$(feat $A "' '.join(str(d['features']['options'][k]) for k in ('bulk','instances','multi_share','jobs_page','system_page','labels'))")" "True True True True True True"
+ok "Jobs and System are for administrators only" "$(feat $V "str(d['features']['options']['jobs_page'])+' '+str(d['features']['options']['system_page'])")" "False False"
+ok "the new permissions are offered in the users screen" "$(body $F $A /api/admin/users | py "' '.join(p['key'] for p in d['permissions'] if p['key'] in ('delete','edit','retrieve','worklists'))")" "delete edit retrieve worklists"
+ok "a permission that needs 'read' is refused without it (400)" "$(code $F $A POST /api/admin/users -H "$J" -d '{"username":"badedit","password":"BadEditPass123","permissions":["edit"]}')" "400"
+
+echo "-- images, tags, PDF, single files"
+ok "the images of a series (read)" "$(body $F $RD /api/series/$SERIES_ID/instances | py "','.join(i['id']+':'+i['number'] for i in d)")" "a1:1,a2:2,a3:3"
+ok "...each says whether it is a PDF" "$(body $F $RD /api/series/$SERIES_ID/instances | py "str(d[0]['is_pdf'])")" "False"
+ok "the DICOM tags of an image (read)" "$(body $F $RD /api/instances/$INST/tags | py "d['0010,0010']['Value']")" "DOE^JOHN"
+ok "an image's picture needs visualize (403 for read only)" "$(code $F $RD GET /api/instances/$INST/preview)" "403"
+ok "...with visualize: a JPEG" "$(curl -s -o /dev/null -w '%{content_type}' -H "Cookie: portal_session=$V" $F/api/instances/$INST/preview)" "image/jpeg"
+ok "a PDF report opens in the browser (inline)" "$(curl -s -D - -o /dev/null -H "Cookie: portal_session=$V" $F/api/instances/$INST/pdf | grep -i '^content-disposition' | tr -d '\r')" "content-disposition: inline; filename=\"report.pdf\""
+ok "one DICOM file needs download (403 for a viewer)" "$(code $F $V GET /api/instances/$INST/download)" "403"
+ok "...with download: the file" "$(body $F $GT /api/instances/$INST/download)" "DICM-one-file"
+has "...recorded in the audit log" "$(body $F $A '/api/admin/audit?limit=5')" "download_instance"
+ok "a bad instance id is refused (400)" "$(code $F $RD GET '/api/instances/..%2Fsystem/tags')" "400"
+put $A '{"instance_browser":false,"single_file_download":false}' > /dev/null
+ok "switched off: no images list (403)" "$(code $F $RD GET /api/series/$SERIES_ID/instances)" "403"
+ok "...no single files (403)" "$(code $F $GT GET /api/instances/$INST/download)" "403"
+put $A '{"instance_browser":true,"single_file_download":true}' > /dev/null
+ok "NIfTI is off by default (403)" "$(code $F $GT GET /api/series/$SERIES_ID/nifti)" "403"
+put $A '{"nifti_export":true}' > /dev/null
+ok "...switched on: the .nii.gz of the series" "$(curl -s -D - -o /dev/null -H "Cookie: portal_session=$GT" $F/api/series/$SERIES_ID/nifti | grep -i '^content-disposition' | tr -d '\r')" "content-disposition: attachment; filename=\"series_11111111.nii.gz\""
+put $A '{"nifti_export":false}' > /dev/null
+
+echo "-- several studies at once"
+ok "several studies in one ZIP" "$(body $F $GT "/api/download?studies=$SID,$S2")" "PK"$'\x03\x04'"several-studies"
+ok "...through Orthanc's create-archive with both" "$(tail -1 "$WORK/archive.log" | py "d['tool']+' '+','.join(d['body']['Resources'])")" "/tools/create-archive $SID,$S2"
+ok "...or with a DICOMDIR (create-media)" "$(body $F $GT "/api/download?studies=$SID&dicomdir=true" > /dev/null; tail -1 "$WORK/archive.log" | py "d['tool']")" "/tools/create-media"
+ok "...needs download (403)" "$(code $F $V GET "/api/download?studies=$SID")" "403"
+ok "...ids are checked (400)" "$(code $F $GT GET "/api/download?studies=$SID,../x")" "400"
+ok "send several studies: one transfer each" "$(body $F $S /api/send -X POST -H "$J" -d "{\"target\":\"ris\",\"studies\":[\"$SID\",\"$S2\"]}" | py "str(d['started'])+' '+str(len(d['errors']))")" "2 0"
+put $A '{"bulk_actions":false}' > /dev/null
+ok "bulk actions switched off: no ZIP of several (403)" "$(code $F $GT GET "/api/download?studies=$SID,$S2")" "403"
+ok "...no sending several (403)" "$(code $F $S POST /api/send -H "$J" -d "{\"target\":\"ris\",\"studies\":[\"$SID\"]}")" "403"
+put $A '{"bulk_actions":true}' > /dev/null
+
+echo "-- one link for several studies"
+put $A '{"share_public_url":"https://pacs.example.com"}' > /dev/null
+MS=$(body $F $SH /api/shares -X POST -H "$J" -d "{\"studies\":[\"$SID\",\"$S2\"],\"minutes\":60,\"downloads\":2}")
+MS_TOKEN=$(echo "$MS" | py "d['url'].rsplit('/s/',1)[1]"); MS_PW=$(echo "$MS" | py "d['password']")
+has "one link for two studies: its label says so" "$(echo "$MS" | py "d['label']")" "+ 1 more"
+ok "...the Shares list counts its studies" "$(body $F $SH /api/shares | py "[s['study_count'] for s in d if s['id']==$(echo "$MS" | py "d['id']")][0]")" "2"
+MC=$(unlock $MS_TOKEN "$MS_PW")
+ok "...the guest sees both studies" "$(gbody $MC /api/share/$MS_TOKEN/study | py "' / '.join(s['study']['description'] for s in d['studies'])")" "CT CHEST <script>alert(1)</script> / MR KNEE"
+ok "...the viewer opens both" "$(gbody $MC /api/share/$MS_TOKEN/study | py "d['viewer']['url']")" "/ohif/viewer?StudyInstanceUIDs=1.2.826.0.1.3680043.8.498.1,1.2.826.0.1.3680043.8.498.2"
+ok "...the viewer may read the second study" "$(gcode $MC GET /dicom-web/studies/1.2.826.0.1.3680043.8.498.2/metadata)" "200"
+ok "...but no other study (403)" "$(gcode $MC GET /dicom-web/studies/1.2.826.0.1.3680043.8.498.9/metadata)" "403"
+ok "...downloading the second study uses one download" "$(gcode $MC GET "/api/share/$MS_TOKEN/download?study=1")/$(gbody $MC /api/share/$MS_TOKEN/study | py "d['downloads']['left']")" "200/1"
+ok "...a study that is not in the link: 404" "$(gcode $MC GET "/api/share/$MS_TOKEN/download?study=5")" "404"
+put $A '{"multi_study_shares":false}' > /dev/null
+ok "switched off: no link for several studies (403)" "$(code $F $SH POST /api/shares -H "$J" -d "{\"studies\":[\"$SID\",\"$S2\"]}")" "403"
+ok "...one study through the same route still works" "$(code $F $SH POST /api/shares -H "$J" -d "{\"studies\":[\"$SID\"]}")" "200"
+put $A '{"multi_study_shares":true}' > /dev/null
+
+echo "-- delete, modify, anonymize, add a series"
+ok "deleting is off by default, even for an administrator (403)" "$(code $F $A DELETE /api/studies/$S2)" "403"
+put $A '{"allow_delete":true,"allow_modify":true,"allow_anonymize":true,"allow_add_series":true}' > /dev/null
+ok "switched on: still needs the delete permission (403 for a reader)" "$(code $F $RD DELETE /api/studies/$S2)" "403"
+ok "...with it: deleted" "$(code $F $DL DELETE /api/studies/$S2)" "200"
+ok "...Orthanc was asked to delete it" "$(tail -1 "$WORK/delete.log" | py "d['kind']+' '+d['id']")" "studies $S2"
+has "...and the audit log says what" "$(body $F $A '/api/admin/audit?limit=5')" "delete_studies"
+ok "a series and an image can be deleted too" "$(code $F $DL DELETE /api/series/$SR_ID)/$(code $F $DL DELETE /api/instances/a2)" "200/200"
+ok "modifying needs edit (403 for the deleter)" "$(code $F $DL POST /api/studies/$SID/modify -H "$J" -d '{"replace":{"PatientName":"DOE^JANE"}}')" "403"
+MJ=$(body $F $ED /api/studies/$SID/modify -X POST -H "$J" -d '{"replace":{"PatientName":"DOE^JANE","StudyDate":"20240518"},"keep_uids":true}')
+ok "...with edit: a job" "$(echo "$MJ" | py "str(len(d['job_id']) > 10)")" "True"
+ok "...Orthanc got the new values, kept the UIDs, replaced the original" "$(tail -1 "$WORK/modify.log" | py "d['body']['Replace']['PatientName']+' '+','.join(d['body']['Keep'])+' '+str(d['body']['KeepSource'])")" "DOE^JANE StudyInstanceUID,SeriesInstanceUID,SOPInstanceUID False"
+ok "...the job can be followed" "$(body $F $ED /api/jobs/$(echo "$MJ" | py "d['job_id']") | py "d['state']")" "Success"
+ok "only listed tags can be changed (400)" "$(code $F $ED POST /api/studies/$SID/modify -H "$J" -d '{"replace":{"SOPInstanceUID":"1.2"}}')" "400"
+ok "...with valid values (a date is YYYYMMDD: 400)" "$(code $F $ED POST /api/studies/$SID/modify -H "$J" -d '{"replace":{"StudyDate":"2024-05-18"}}')" "400"
+ok "moving a study to another patient copies that patient" "$(body $F $ED /api/studies/$SID/move -X POST -H "$J" -d "{\"patient_from_study\":\"$S2\"}" > /dev/null; tail -1 "$WORK/modify.log" | py "d['body']['Replace']['PatientID']")" "P-001"
+ok "moving a series to a new study gives it a new StudyInstanceUID" "$(body $F $ED /api/series/$SERIES_ID/move -X POST -H "$J" -d '{"study":"new","description":"Split"}' > /dev/null; tail -1 "$WORK/modify.log" | py "d['body']['Replace']['StudyInstanceUID'][:5]+' '+d['body']['Replace']['StudyDescription']")" "2.25. Split"
+ok "anonymizing keeps the original by default" "$(body $F $ED /api/studies/$SID/anonymize -X POST -H "$J" -d '{"patient_id":"ANON-1"}' > /dev/null; tail -1 "$WORK/modify.log" | py "d['action']+' '+d['body']['Replace']['PatientID']+' '+str(d['body']['KeepSource'])")" "anonymize ANON-1 True"
+ok "adding a series of PDF files" "$(body $F $ED /api/studies/$SID/add-series -X POST -H "$J" -d '{"description":"Report","files":["data:application/pdf;base64,JVBERi0xLjQK"]}' | py "d['created']")" "1"
+ok "...created as a DOC series of the study" "$(tail -1 "$WORK/create_dicom.log" | py "d['parent']+' '+d['tags']['Modality']")" "$SID DOC"
+ok "...only PDF, PNG and JPEG (400)" "$(code $F $ED POST /api/studies/$SID/add-series -H "$J" -d '{"files":["data:text/html;base64,PGgxPg=="]}')" "400"
+ok "...needs edit (403)" "$(code $F $RD POST /api/studies/$SID/add-series -H "$J" -d '{"files":["data:application/pdf;base64,JVBERi0xLjQK"]}')" "403"
+put $A '{"allow_delete":false,"allow_modify":false,"allow_anonymize":false,"allow_add_series":false}' > /dev/null
+ok "switched off again: nothing of it works (403 x4)" "$(code $F $DL DELETE /api/series/$SERIES_ID) $(code $F $ED POST /api/studies/$SID/modify -H "$J" -d '{"replace":{"PatientName":"X"}}') $(code $F $ED POST /api/studies/$SID/anonymize -H "$J" -d '{}') $(code $F $ED POST /api/studies/$SID/add-series -H "$J" -d '{"files":[]}')" "403 403 403 403"
+
+echo "-- sending to peers and DICOMweb servers"
+ok "only DICOM nodes by default" "$(body $F $S /api/modalities | py "','.join(sorted(set(n['kind'] for n in d)))")" "dicom"
+put $A '{"send_to_peers":true,"send_to_dicomweb":true}' > /dev/null
+ok "switched on: the peers and DICOMweb servers of Orthanc too" "$(body $F $S /api/modalities | py "','.join(n['id'] for n in d if n['kind']!='dicom')")" "peer:branch,dicomweb:cloud"
+ok "...with their address, never their account" "$(body $F $S /api/modalities | py "[n['url'] for n in d if n['id']=='peer:branch'][0]+' '+str('secret-user' in json.dumps(d))")" "https://branch.example.com/orthanc/ False"
+ok "send to a peer: Orthanc's peer store" "$(body $F $S /api/studies/$SID/send -X POST -H "$J" -d '{"target":"peer:branch"}' > /dev/null; tail -1 "$WORK/store.log" | py "d.get('peer','')+' '+str(d['Synchronous'])")" "branch False"
+ok "send to a DICOMweb server: STOW-RS" "$(body $F $S /api/studies/$SID/send -X POST -H "$J" -d '{"target":"dicomweb:cloud"}' > /dev/null; tail -1 "$WORK/dicomweb_client.log" | py "d['server']+' '+d['action']")" "cloud stow"
+ok "...both show in Transfers" "$(body $F $S /api/transfers | py "','.join(t['target'] for t in d[:2])")" "dicomweb:cloud,peer:branch"
+put $A '{"send_to_peers":false,"send_to_dicomweb":false}' > /dev/null
+ok "switched off: a peer is an unknown destination (400)" "$(code $F $S POST /api/studies/$SID/send -H "$J" -d '{"target":"peer:branch"}')" "400"
+
+echo "-- query / retrieve"
+ok "off by default (403)" "$(code $F $FE GET /api/retrieve/sources)" "403"
+put $A '{"query_retrieve":true}' > /dev/null
+ok "the systems that can be searched (C-FIND nodes and DICOMweb servers)" "$(body $F $FE /api/retrieve/sources | py "','.join(n['id'] for n in d)")" "archive-only,down,ris,dicomweb:cloud"
+ok "needs the retrieve permission (403 for a reader)" "$(code $F $RD GET /api/retrieve/sources)" "403"
+Q=$(body $F $FE /api/retrieve/query -X POST -H "$J" -d '{"source":"ris","patient_name":"DOE"}')
+ok "a search on a DICOM node" "$(echo "$Q" | py "','.join(a['patient_id'] for a in d['answers'])")" "R-1,P-001"
+ok "...the name is searched as 'contains'" "$(tail -1 "$WORK/qr.log" | py "d['action']+' '+d['body']['Query']['PatientName']")" "query *DOE*"
+ok "...studies already here say so" "$(echo "$Q" | py "','.join(str(bool(a['local_id'])) for a in d['answers'])")" "False,True"
+ok "a search needs something to look for (400)" "$(code $F $FE POST /api/retrieve/query -H "$J" -d '{"source":"ris"}')" "400"
+ok "a search on a DICOMweb server" "$(body $F $FE /api/retrieve/query -X POST -H "$J" -d '{"source":"dicomweb:cloud","patient_id":"R-1"}' | py "d['answers'][0]['patient_name']")" "REMOTE^ROSA"
+ok "retrieving: C-MOVE of that study" "$(body $F $FE /api/retrieve/retrieve -X POST -H "$J" -d '{"source":"ris","study_uid":"1.2.999.900","label":"REMOTE ROSA | 20261001 | CT"}' > /dev/null; tail -1 "$WORK/qr.log" | py "d['action']+' '+d['body']['Resources'][0]['StudyInstanceUID']")" "move 1.2.999.900"
+ok "...it shows in the Transfers of that person, as a retrieval" "$(body $F $FE /api/transfers | py "d[0]['direction']+' '+d[0]['study_uid']+' '+d[0]['state']")" "retrieve 1.2.999.900 Success"
+ok "...a bad UID is refused (400)" "$(code $F $FE POST /api/retrieve/retrieve -H "$J" -d '{"source":"ris","study_uid":"1.2.x"}')" "400"
+put $A '{"query_retrieve":false}' > /dev/null
+
+echo "-- worklists"
+ok "off by default (403)" "$(code $F $PL GET /api/worklists)" "403"
+put $A '{"worklists_enabled":true}' > /dev/null
+WL=$(body $F $PL /api/worklists -X POST -H "$J" -d '{"patient_name":"DOE^JANE","patient_id":"P-9","modality":"us","date":"20261120","time":"0930","description":"Abdomen"}')
+ok "a worklist is created through the plugin" "$(tail -1 "$WORK/worklists.log" | py "d['create']['PatientID']+' '+d['create']['ScheduledProcedureStepSequence'][0]['Modality']")" "P-9 US"
+ok "...and listed" "$(body $F $PL /api/worklists | py "d[0]['patient_id']+' '+d[0]['modality']+' '+d[0]['time']")" "P-9 US 0930"
+WID=$(echo "$WL" | py "d['id']")
+ok "changing it: a new one replaces it" "$(body $F $PL /api/worklists/$WID -X PUT -H "$J" -d '{"patient_name":"DOE^JANE","patient_id":"P-9","modality":"CT","date":"20261121"}' > /dev/null; body $F $PL /api/worklists | py "str(len(d))+' '+d[0]['modality']")" "1 CT"
+ok "bad values are refused before anything is deleted (400)" "$(code $F $PL PUT /api/worklists/$(body $F $PL /api/worklists | py "d[0]['id']") -H "$J" -d '{"patient_name":"X","patient_id":"P","modality":"CT","date":"2026-11-21"}')/$(body $F $PL /api/worklists | py "len(d)")" "400/1"
+ok "deleting it" "$(code $F $PL DELETE /api/worklists/$(body $F $PL /api/worklists | py "d[0]['id']"))/$(body $F $PL /api/worklists | py "len(d)")" "200/0"
+ok "needs the worklists permission (403)" "$(code $F $RD GET /api/worklists)" "403"
+put $A '{"worklists_enabled":false}' > /dev/null
+
+echo "-- Configuration > System and Jobs"
+ok "System: version and counts" "$(body $F $A /api/admin/system | py "d['system']['version']+' '+str(d['statistics']['CountStudies'])")" "1.12.10 1"
+ok "...the plugins with their version" "$(body $F $A /api/admin/system | py "','.join(p['name']+'='+p['version'] for p in d['plugins'])")" "dicom-web=1.0,ohif=1.0,explorer.html=1.0"
+ok "...the log level can be changed" "$(body $F $A /api/admin/system/log-level -X PUT -H "$J" -d '{"level":"verbose"}' > /dev/null; body $F $A /api/admin/system | py "d['log_level']")" "verbose"
+ok "...only to known levels (400)" "$(code $F $A PUT /api/admin/system/log-level -H "$J" -d '{"level":"loud"}')" "400"
+ok "...metrics as text" "$(body $F $A /api/admin/system/metrics)" "orthanc_count_studies 1"
+ok "...administrators only (403)" "$(code $F $V GET /api/admin/system)" "403"
+ok "reading Orthanc's API is off by default (403)" "$(code $F $A GET '/api/admin/orthanc?path=/system')" "403"
+put $A '{"raw_api":true}' > /dev/null
+ok "...switched on: GET of an address" "$(body $F $A '/api/admin/orthanc?path=/system' | py "d['Version']")" "1.12.10"
+ok "...never files (400)" "$(code $F $A GET '/api/admin/orthanc?path=/instances/a1/file')" "400"
+ok "...no climbing out (400)" "$(code $F $A GET '/api/admin/orthanc?path=/studies/../system')" "400"
+put $A '{"raw_api":false,"system_page":false}' > /dev/null
+ok "System switched off (403)" "$(code $F $A GET /api/admin/system)" "403"
+put $A '{"system_page":true}' > /dev/null
+ok "Jobs: every Orthanc job" "$(body $F $A /api/admin/jobs | py "str(len(d) > 0)+' '+str(all('state' in j for j in d))")" "True True"
+JOBID=$(body $F $A /api/admin/jobs | py "d[0]['id']")
+ok "...a job can be cancelled" "$(code $F $A POST /api/admin/jobs/$JOBID/cancel)/$(tail -1 "$WORK/job_action.log" | py "d['action']")" "200/cancel"
+ok "...only known actions (400)" "$(code $F $A POST /api/admin/jobs/$JOBID/explode)" "400"
+ok "...administrators only (403)" "$(code $F $S GET /api/admin/jobs)" "403"
+
+echo "-- viewers, labels switched off, formatting, custom CSS"
+ok "the other viewers follow Orthanc's plugins (none here)" "$(feat $V "' '.join(str(d['features']['viewers'][k]) for k in ('stone','volview','wsi'))")" "False False False"
+put $A '{"stone_viewer":"on","ohif_modes":["viewer","tmtv"],"meddream_url":"https://md.example.com/?study={study_uid}"}' > /dev/null
+ok "...or are switched on: Stone, the OHIF modes, MedDream" "$(feat $V "str(d['features']['viewers']['stone'])+' '+','.join(d['features']['viewers']['ohif_modes'])+' '+d['features']['viewers']['meddream_url']")" "True viewer,tmtv https://md.example.com/?study={study_uid}"
+ok "...the Stone viewer is reached through the portal" "$(code $F $V GET /stone-webviewer/index.html)" "200"
+ok "...with the viewer permission (401 signed out)" "$(curl -s -o /dev/null -w '%{http_code}' $F/stone-webviewer/index.html)" "401"
+ok "...never through the internet listener (404)" "$(curl -s -o /dev/null -w '%{http_code}' $G/stone-webviewer/index.html)" "404"
+ok "...VolView is not, while it is off" "$(put $A '{"volview_viewer":"off"}' > /dev/null; code $F $V GET /volview/index.html)" "404"
+ok "an unsafe MedDream address is refused (400)" "$(put $A '{"meddream_url":"javascript:alert(1)//{study_uid}"}' | tail -1)" "400"
+put $A '{"stone_viewer":"auto","volview_viewer":"auto","ohif_modes":["viewer"],"meddream_url":""}' > /dev/null
+put $A '{"labels_enabled":false}' > /dev/null
+ok "labels switched off: no labels list (403)" "$(code $F $V GET /api/labels)" "403"
+ok "...no putting labels on (403)" "$(code $F $A PUT /api/studies/$SID/labels/urgent)" "403"
+ok "...a label filter in an old link is ignored" "$(body $F $V '/api/studies?labels=urgent' > /dev/null; tail -1 "$WORK/find.log" | py "str('Labels' in d)")" "False"
+ok "...the users are told" "$(feat $V "str(d['features']['options']['labels'])")" "False"
+put $A '{"labels_enabled":true}' > /dev/null
+put $A '{"date_format":"dmy","name_format":"first_last"}' > /dev/null
+ok "the date and name formats reach every user" "$(feat $V "d['features']['format']['date']+' '+d['features']['format']['name']")" "dmy first_last"
+ok "...and the invitation page" "$(curl -s $G/api/public | py "d['format']['date']")" "dmy"
+put $A '{"date_format":"iso","name_format":"last_first"}' > /dev/null
+ok "no custom CSS: no extra style sheet" "$(curl -s $F/ | grep -c 'custom.css')" "0"
+put $A '{"custom_css":".simple-head { border-bottom: 3px solid #c00; }"}' > /dev/null
+has "custom CSS: the page links it" "$(curl -s $F/)" "/branding/custom.css?v="
+has "...the invitation page too" "$(curl -s $G/s/$MS_TOKEN)" "/branding/custom.css?v="
+ok "...served as CSS" "$(curl -s $F/branding/custom.css)" ".simple-head { border-bottom: 3px solid #c00; }"
+ok "...nothing that loads from elsewhere (400)" "$(put $A '{"custom_css":"@import url(https://evil.example.com/x.css);"}' | tail -1)" "400"
+put $A '{"custom_css":""}' > /dev/null
+ok "download names follow the template" "$(put $A '{"download_name_template":"{patient_name}_{study_date}"}' > /dev/null; curl -s -D - -o /dev/null -H "Cookie: portal_session=$GT" $F/api/studies/$SID/download | grep -i '^content-disposition' | tr -d '\r')" "content-disposition: attachment; filename=\"DOE_JOHN_20240517.zip\""
+put $A '{"download_name_template":"{patient_id}_{study_date}_{id}"}' > /dev/null
+
 # hold_port PORT -> keeps 127.0.0.1:PORT busy (as "another program" would) until killed
 hold_port() { "$PYTHON3" -c "import socket,time;s=socket.socket();s.bind(('127.0.0.1',$1));s.listen();time.sleep(60)" & sleep 0.5; }
 A=$(login $F admin SuperSecret123)

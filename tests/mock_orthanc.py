@@ -34,9 +34,9 @@ STUDY = {"ID": STUDY_ID, "Type": "Study", "Series": [SERIES_ID, SR_ID],
          "PatientMainDicomTags": {"PatientName": "DOE^JOHN", "PatientID": "P-001", "PatientBirthDate": "19800502", "PatientSex": "M",
                                   "OtherPatientIDs": "OLD-77"},
          "RequestedTags": {"ModalitiesInStudy": "CT\\SR", "NumberOfStudyRelatedInstances": "120"}}
-SERIES = {"ID": SERIES_ID, "ParentStudy": STUDY_ID, "Instances": ["i1", "i2", "i3"],
+SERIES = {"ID": SERIES_ID, "ParentStudy": STUDY_ID, "Instances": ["a1", "a2", "a3"],
           "MainDicomTags": {"SeriesInstanceUID": "1.2.3.4", "Modality": "CT", "SeriesDescription": "Chest 1mm", "SeriesNumber": "2", "BodyPartExamined": "CHEST"}}
-SR_SERIES = {"ID": SR_ID, "ParentStudy": STUDY_ID, "Instances": ["s1", "s2", "s3", "s4", "s5"],
+SR_SERIES = {"ID": SR_ID, "ParentStudy": STUDY_ID, "Instances": ["b1", "b2", "b3", "b4", "b5"],
              "MainDicomTags": {"SeriesInstanceUID": "1.2.3.5", "Modality": "SR", "SeriesDescription": "Dose report", "SeriesNumber": "9"}}
 JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00fake-thumbnail-bytes\xff\xd9"
 MODALITIES = {"ris": {"AET": "RIS", "Host": "10.0.0.20", "Port": 104, "Manufacturer": "Generic", "AllowStore": True, "AllowFind": True},
@@ -86,7 +86,7 @@ def demo_png(width, seed):
 def demo_add_study(n, name, pid, date, desc, modality, body, images, received, referring="", institution=""):
     # Hex digits and dashes only, like real Orthanc ids (the portal refuses anything else).
     sid, ser = f"{n:08x}-0000-0000-0000-00000000000a", f"{n:08x}-0000-0000-0000-00000000000b"
-    DEMO_SERIES[ser] = {"ID": ser, "ParentStudy": sid, "Instances": [f"demo{n:04d}-i{k}" for k in range(images)],
+    DEMO_SERIES[ser] = {"ID": ser, "ParentStudy": sid, "Instances": [f"{n:08x}-{k:08x}" for k in range(images)],
                         "MainDicomTags": {"SeriesInstanceUID": f"1.2.999.{n}.1", "Modality": modality,
                                           "SeriesDescription": desc, "SeriesNumber": "1", "BodyPartExamined": body}}
     DEMO_STUDIES[sid] = {"ID": sid, "Type": "Study", "Series": [ser], "LastUpdate": received,
@@ -196,9 +196,216 @@ def demo_upload():
                           "OT", "", 1, time.strftime("%Y%m%dT%H%M%S"))
 
 
+import threading
+LOG_LOCK = threading.Lock()   # requests arrive in parallel: one line at a time
+
+
 def log(name, obj):
-    with open(os.path.join(LOG_DIR, name + ".log"), "a") as f:
+    with LOG_LOCK, open(os.path.join(LOG_DIR, name + ".log"), "a") as f:
         f.write(json.dumps(obj) + "\n")
+
+
+# ---- the optional features (Settings > Features): images, tags, changes, jobs, peers, DICOMweb,
+# query / retrieve, worklists, system. Works on the fixture study and, in demo mode, on the demo data.
+import uuid as _uuid, time as _time
+
+JOBS = {}          # instant jobs (modify, anonymize, move, retrieve...): id -> job
+WORKLISTS = {}     # id -> {"ID", "Tags"}
+LOG_LEVEL = {"level": "default"}
+PEERS = {"branch": {"Url": "https://branch.example.com/orthanc/", "Username": "secret-user"}}
+DICOMWEB = {"cloud": {"Url": "https://dicomweb.example.com/", "Username": "secret-user"}}
+PDF = b"%PDF-1.4\n% fake report\n"
+REMOTE = [  # what the remote systems "have" (query / retrieve)
+    {"StudyInstanceUID": "1.2.999.900", "PatientName": "REMOTE^ROSA", "PatientID": "R-1", "StudyDate": "20261001",
+     "StudyDescription": "CT ABDOMEN (OTHER CLINIC)", "AccessionNumber": "X1", "ModalitiesInStudy": "CT", "NumberOfStudyRelatedInstances": "40"},
+    {"StudyInstanceUID": "1.2.826.0.1.3680043.8.498.1", "PatientName": "DOE^JOHN", "PatientID": "P-001", "StudyDate": "20240517",
+     "StudyDescription": "CT CHEST", "AccessionNumber": "ACC1", "ModalitiesInStudy": "CT\\SR", "NumberOfStudyRelatedInstances": "120"},
+]
+
+
+def instant_job(kind, content=None, state="Success"):
+    job = str(_uuid.uuid4())
+    JOBS[job] = {"ID": job, "Type": kind, "State": state, "Progress": 100 if state == "Success" else 0, "Priority": 0,
+                 "CreationTime": _time.strftime("%Y%m%dT%H%M%S"), "CompletionTime": _time.strftime("%Y%m%dT%H%M%S"),
+                 "EffectiveRuntime": 0.4, "ErrorDescription": "Success" if state == "Success" else "Failure", "Content": content or {}}
+    return {"ID": job, "Path": f"/jobs/{job}"}
+
+
+STUDY2_ID = "bbbbbbbb-cccccccc-dddddddd-eeeeeeee-ffffffff"   # a second study (links for several studies)
+STUDY2 = {"ID": STUDY2_ID, "Type": "Study", "Series": [SERIES_ID],
+          "MainDicomTags": {"StudyInstanceUID": "1.2.826.0.1.3680043.8.498.2", "StudyDate": "20250101", "StudyDescription": "MR KNEE"},
+          "PatientMainDicomTags": {"PatientName": "DOE^JOHN", "PatientID": "P-001"},
+          "RequestedTags": {"ModalitiesInStudy": "MR", "NumberOfStudyRelatedInstances": "3"}}
+
+
+def all_studies():
+    return DEMO_STUDIES if DEMO else {STUDY_ID: STUDY, STUDY2_ID: STUDY2}
+
+
+def all_series():
+    return DEMO_SERIES if DEMO else {SERIES_ID: SERIES, SR_ID: SR_SERIES}
+
+
+def instances_of(series):
+    out = []
+    for n, iid in enumerate(series["Instances"]):
+        pdf = series["MainDicomTags"].get("Modality") == "DOC"
+        out.append({"ID": iid, "Type": "Instance", "ParentSeries": series["ID"],
+                    "MainDicomTags": {"InstanceNumber": str(n + 1), "SOPInstanceUID": f"{series['MainDicomTags']['SeriesInstanceUID']}.{n + 1}"},
+                    "RequestedTags": {"SOPClassUID": "1.2.840.10008.5.1.4.1.1.104.1" if pdf else "1.2.840.10008.5.1.4.1.1.2"}})
+    return out
+
+
+def find_instance(iid):
+    for series in all_series().values():
+        if iid in series["Instances"]:
+            return series
+    return None
+
+
+def apply_replace(study_id, replace):
+    """Modify / move in the demo: the new values go into the study (a real Orthanc rewrites the files)."""
+    study = all_studies().get(study_id)
+    if not study: return
+    for key, value in replace.items():
+        part = "PatientMainDicomTags" if key.startswith("Patient") or key == "OtherPatientIDs" else "MainDicomTags"
+        study[part][key] = value
+
+
+def extra_get(h, p, query):
+    if not DEMO and p == f"/studies/{STUDY2_ID}": return h._json(with_labels(STUDY2))
+    if not DEMO and p == f"/studies/{STUDY2_ID}/series": return h._json([SERIES])
+    m = re.match(r"^/series/([^/]+)/instances$", p)
+    if m and m.group(1) in all_series(): return h._json(instances_of(all_series()[m.group(1)]))
+    m = re.match(r"^/instances/([^/]+)/(tags|preview|pdf|file)$", p)
+    if m:
+        series = find_instance(m.group(1))
+        if not series: return h._json({"error": "nf"}, 404)
+        kind = m.group(2)
+        log("instance", {"id": m.group(1), "what": kind})
+        if kind == "tags":
+            return h._json({"0010,0010": {"Name": "PatientName", "Type": "String", "Value": "DOE^JOHN"},
+                            "0008,0060": {"Name": "Modality", "Type": "String", "Value": series["MainDicomTags"].get("Modality", "")},
+                            "0008,1032": {"Name": "ProcedureCodeSequence", "Type": "Sequence",
+                                          "Value": [{"0008,0100": {"Name": "CodeValue", "Type": "String", "Value": "CT-CHEST"}}]},
+                            "7fe0,0010": {"Name": "PixelData", "Type": "Null", "Value": None}})
+        if kind == "pdf": return h._send(PDF, "application/pdf")
+        if kind == "file": return h._send(b"DICM-one-file", "application/dicom")
+        return h._send(JPEG, "image/jpeg")
+    m = re.match(r"^/series/([^/]+)/nifti$", p)
+    if m and m.group(1) in all_series(): log("nifti", {"id": m.group(1)}); return h._send(b"\x1f\x8bfake-nifti", "application/gzip")
+    if p == "/jobs":
+        jobs = list(JOBS.values()) + ([demo_job(j) | {"CreationTime": "20261118T090000", "Priority": 0} for j in DEMO_JOBS] if DEMO else [])
+        return h._json(jobs if "expand" in query else [j["ID"] for j in jobs])
+    if p.startswith("/jobs/") and p[6:] in JOBS: return h._json(JOBS[p[6:]])
+    if p == "/peers": return h._json(PEERS if "expand" in query else list(PEERS))
+    if p == "/dicom-web/servers": return h._json(DICOMWEB if "expand" in query else list(DICOMWEB))
+    m = re.match(r"^/queries/([^/]+)/answers$", p)
+    if m: return h._json(REMOTE)
+    if p in ("/worklists", "/worklists/"):
+        return h._json([dict(w["Tags"], ID=w["ID"]) for w in WORKLISTS.values()])
+    m = re.match(r"^/worklists/([^/]+)$", p)
+    if m: return h._json(WORKLISTS[m.group(1)]) if m.group(1) in WORKLISTS else h._json({"error": "nf"}, 404)
+    if p == "/tools/log-level": return h._send(LOG_LEVEL["level"].encode(), "text/plain")
+    if p == "/tools/metrics-prometheus": return h._send(b"orthanc_count_studies 1\n", "text/plain")
+    m = re.match(r"^/plugins/([^/]+)$", p)
+    if m: return h._json({"ID": m.group(1), "Version": "1.0", "Description": f"The {m.group(1)} plugin"})
+    if p.startswith("/stone-webviewer") or p.startswith("/volview") or p.startswith("/wsi"):
+        log("proxy", {"path": h.path})
+        return h._send(b"<!doctype html><title>viewer</title>", "text/html")
+    return None
+
+
+def extra_post(h, path, body):
+    p = path.split("?")[0]
+    data = json.loads(body or b"{}") if body[:1] in (b"{", b"[") else {}
+    m = re.match(r"^/(studies|series)/([^/]+)/(modify|anonymize)$", p)
+    if m:
+        kind, rid, action = m.groups()
+        if rid not in (all_studies() if kind == "studies" else all_series()): return h._json({"error": "nf"}, 404)
+        log("modify", {"kind": kind, "id": rid, "action": action, "body": data})
+        if DEMO and action == "modify" and kind == "studies": apply_replace(rid, data.get("Replace", {}))   # the tests keep their fixture
+        return h._json(instant_job("ResourceModification", {"ID": rid}))
+    if p in ("/tools/create-archive", "/tools/create-media"):
+        log("archive", {"tool": p, "body": data})
+        return h._send(b"PK\x03\x04several-studies", "application/zip")
+    if p == "/tools/create-dicom":
+        log("create_dicom", {"parent": data.get("Parent"), "tags": data.get("Tags"), "content": (data.get("Content") or "")[:40]})
+        study = all_studies().get(data.get("Parent"))
+        if not study: return h._json({"error": "nf"}, 404)
+        if DEMO:
+            uid = data["Tags"]["SeriesInstanceUID"]
+            sid = next((s for s, v in DEMO_SERIES.items() if v["MainDicomTags"]["SeriesInstanceUID"] == uid), None)
+            if not sid:
+                sid = f"{len(DEMO_SERIES) + 500:08x}-0000-0000-0000-00000000000c"
+                DEMO_SERIES[sid] = {"ID": sid, "ParentStudy": study["ID"], "Instances": [],
+                                    "MainDicomTags": {"SeriesInstanceUID": uid, "Modality": data["Tags"]["Modality"],
+                                                      "SeriesDescription": data["Tags"]["SeriesDescription"], "SeriesNumber": "9000"}}
+                study["Series"].append(sid)
+            DEMO_SERIES[sid]["Instances"].append(f"{len(DEMO_SERIES) + 500:08x}-{len(DEMO_SERIES[sid]['Instances']):08x}")
+        return h._json({"ID": "new-instance", "Path": "/instances/new-instance"})
+    m = re.match(r"^/jobs/([^/]+)/(cancel|pause|resume|resubmit)$", p)
+    if m:
+        log("job_action", {"id": m.group(1), "action": m.group(2)})
+        if m.group(1) in JOBS: JOBS[m.group(1)]["State"] = {"cancel": "Failure", "pause": "Paused", "resume": "Running", "resubmit": "Pending"}[m.group(2)]
+        return h._json({})
+    m = re.match(r"^/peers/([^/]+)/store$", p)
+    if m:
+        log("store", {"peer": unquote(m.group(1)), **data})
+        return h._json(instant_job("OrthancPeerStore", {"Peer": [unquote(m.group(1))], "InstancesCount": 3}))
+    m = re.match(r"^/dicom-web/servers/([^/]+)/(stow|get|retrieve)$", p)
+    if m:
+        name, action = unquote(m.group(1)), m.group(2)
+        log("dicomweb_client", {"server": name, "action": action, "body": data})
+        if action == "stow": return h._json(instant_job("DicomWebStowClient", {"InstancesCount": 3}))
+        if action == "retrieve": return h._json(instant_job("DicomWebRetrieve", {}))
+        return h._json([{"0020000D": {"vr": "UI", "Value": [r["StudyInstanceUID"]]}, "00100010": {"vr": "PN", "Value": [{"Alphabetic": r["PatientName"]}]},
+                         "00100020": {"vr": "LO", "Value": [r["PatientID"]]}, "00080020": {"vr": "DA", "Value": [r["StudyDate"]]},
+                         "00081030": {"vr": "LO", "Value": [r["StudyDescription"]]}, "00080061": {"vr": "CS", "Value": r["ModalitiesInStudy"].split("\\")}}
+                        for r in REMOTE])
+    m = re.match(r"^/modalities/([^/]+)/(query|move)$", p)
+    if m:
+        alias = unquote(m.group(1))
+        if alias not in MODALITIES: return h._json({"error": "nf"}, 404)
+        log("qr", {"alias": alias, "action": m.group(2), "body": data})
+        if m.group(2) == "query": return h._json({"ID": "q1", "Path": "/queries/q1"})
+        if DEMO:  # the "retrieved" study appears in the archive
+            uid = data["Resources"][0]["StudyInstanceUID"]
+            r = next((x for x in REMOTE if x["StudyInstanceUID"] == uid), None)
+            if r and not any(s["MainDicomTags"]["StudyInstanceUID"] == uid for s in DEMO_STUDIES.values()):
+                sid = demo_add_study(200 + len(DEMO_STUDIES), r["PatientName"], r["PatientID"], r["StudyDate"], r["StudyDescription"],
+                                     "CT", "ABDOMEN", 4, _time.strftime("%Y%m%dT%H%M%S"))
+                DEMO_STUDIES[sid]["MainDicomTags"]["StudyInstanceUID"] = uid
+        return h._json(instant_job("DicomMoveScu", {}))
+    if p == "/worklists/create":
+        wid = str(_uuid.uuid4())
+        WORKLISTS[wid] = {"ID": wid, "Tags": data.get("Tags", {})}
+        log("worklists", {"create": data.get("Tags", {})})
+        return h._json({"ID": wid, "Path": f"/worklists/{wid}"})
+    return None
+
+
+def extra_delete(h, path):
+    m = re.match(r"^/(studies|series|instances|worklists)/([^/]+)$", path)
+    if not m: return None
+    kind, rid = m.groups()
+    log("delete", {"kind": kind, "id": rid})
+    if kind == "worklists":
+        return h._json({}) if WORKLISTS.pop(rid, None) else h._json({"error": "nf"}, 404)
+    if kind == "studies":
+        if rid not in all_studies(): return h._json({"error": "nf"}, 404)
+        if DEMO: del DEMO_STUDIES[rid]
+        return h._json({})
+    if kind == "series":
+        if rid not in all_series(): return h._json({"error": "nf"}, 404)
+        if DEMO:
+            series = DEMO_SERIES.pop(rid); study = DEMO_STUDIES.get(series["ParentStudy"])
+            if study and rid in study["Series"]: study["Series"].remove(rid)
+        return h._json({})
+    series = find_instance(rid)
+    if not series: return h._json({"error": "nf"}, 404)
+    if DEMO: series["Instances"].remove(rid)
+    return h._json({})
 
 
 class H(BaseHTTPRequestHandler):
@@ -209,8 +416,9 @@ class H(BaseHTTPRequestHandler):
         self.send_response(code); self.send_header("Content-Type", ctype); self.send_header("Content-Length", str(len(body)))
         for k, v in (extra or {}).items(): self.send_header(k, v)
         self.end_headers(); self.wfile.write(body)
+        return True
 
-    def _json(self, obj, code=200): self._send(json.dumps(obj).encode(), "application/json", code)
+    def _json(self, obj, code=200): return self._send(json.dumps(obj).encode(), "application/json", code)
     def _gate(self):
         """Decides whether this request may pass, like Orthanc's authentication / allowed-clients setup.
         Answers 401 or 403 itself and returns False when it may not."""
@@ -229,7 +437,9 @@ class H(BaseHTTPRequestHandler):
         if not self._gate(): return
         p = self.path.split("?")[0]
         if p == "/system": return self._json({"Version": VERSION, "Capabilities": ["HasExtendedFind", "HasExtendedChanges"]})
-        if p == "/plugins": return self._json(["dicom-web", "ohif", "explorer.html"])
+        if p == "/plugins":   # MOCK_PLUGINS=stone-webviewer,volview adds plugins (the dev environment)
+            return self._json(["dicom-web", "ohif", "explorer.html"] + [x for x in os.environ.get("MOCK_PLUGINS", "").split(",") if x])
+        if extra_get(self, p, self.path.split("?", 1)[1] if "?" in self.path else "") is not None: return
         if p == "/tools/labels": return self._json(all_labels())
         m = re.match(r"^/studies/([^/]+)/labels$", p)
         if m: return self._json(sorted(LABELS.get(m.group(1), ())))
@@ -240,10 +450,10 @@ class H(BaseHTTPRequestHandler):
                 study = DEMO_STUDIES[m.group(1)]
                 return self._json([DEMO_SERIES[s] for s in study["Series"]] if m.group(2) else with_labels(study))
             if p.startswith("/series/") and p[8:] in DEMO_SERIES: return self._json(DEMO_SERIES[p[8:]])
-            m = re.match(r"^/instances/(demo(\d+)-i\d+)/rendered$", p)
+            m = re.match(r"^/instances/(([0-9a-f]{8})-[0-9a-f]{8})/(rendered|preview)$", p)
             if m:
                 width = re.search(r"width=(\d+)", self.path)
-                return self._send(demo_png(width.group(1) if width else 128, int(m.group(2))), "image/png")
+                return self._send(demo_png(width.group(1) if width else 128, int(m.group(2), 16)), "image/png")
         if p == "/statistics": return self._json({"CountPatients": 1, "CountStudies": 1, "CountSeries": 2, "CountInstances": 8})
         if p == "/modalities": return self._json(MODALITIES)
         if p == f"/jobs/{JOB_ID}":
@@ -262,8 +472,8 @@ class H(BaseHTTPRequestHandler):
         if m:
             iid = m.group(1)
             log("rendered", {"id": iid, "query": self.path.split("?", 1)[-1], "accept": self.headers.get("Accept")})
-            if iid in ("i1", "i3"): return self._send(JPEG, "image/jpeg")
-            return self._send(b'{"Message":"Unsupported image"}', "application/json", 415)   # i2 + report images: no preview
+            if iid in ("a1", "a3"): return self._send(JPEG, "image/jpeg")
+            return self._send(b'{"Message":"Unsupported image"}', "application/json", 415)   # a2 + report images: no preview
         if p.endswith("/archive") or p.endswith("/media"):
             data = b"PK\x03\x04fake-zip-content" * 1000
             self.send_response(200); self.send_header("Content-Type", "application/zip"); self.send_header("Transfer-Encoding", "chunked"); self.end_headers()
@@ -292,6 +502,7 @@ class H(BaseHTTPRequestHandler):
             alias = unquote(m.group(1))
             if alias not in MODALITIES: return self._json({"error": "nf"}, 404)
             return self._json({"Message": "Error in the network protocol"}, 500) if alias == "down" else self._json({})
+        if extra_post(self, self.path, body) is not None: return
         if self.path == "/tools/find":
             q = json.loads(body); log("find", q)
             if DEMO: return self._json(demo_find(q))
@@ -319,6 +530,8 @@ class H(BaseHTTPRequestHandler):
     def do_PUT(self):
         raw = self._body()
         if not self._gate(): return
+        if self.path == "/tools/log-level":
+            LOG_LEVEL["level"] = raw.decode().strip(); log("loglevel", {"level": LOG_LEVEL["level"]}); return self._send(b"", "text/plain")
         m = re.match(r"^/studies/([^/]+)/labels/([^/]+)$", self.path)
         if m:
             if m.group(1) not in (DEMO_STUDIES if DEMO else {STUDY_ID: 1}): return self._json({"error": "nf"}, 404)
@@ -332,6 +545,7 @@ class H(BaseHTTPRequestHandler):
     def do_DELETE(self):
         self._body()
         if not self._gate(): return
+        if extra_delete(self, self.path) is not None: return
         m = re.match(r"^/studies/([^/]+)/labels/([^/]+)$", self.path)
         if m:
             labels = LABELS.get(m.group(1), set()); labels.discard(unquote(m.group(2)))

@@ -757,3 +757,37 @@ th[aria-sort] .sort-header { color: var(--accent); text-decoration: none; }
   .simple-main { padding: 0.75rem; }
   .simple-main > .banner { margin: -0.75rem -0.75rem 0; }
 }
+
+/* Auto-refresh switch next to a Refresh button */
+.head-actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.chip-toggle.auto-refresh { font-size: 0.85rem; white-space: nowrap; }
+
+/* ---- Optional features (Settings > Features) ---- */
+/* Tick boxes and the bar of actions on several studies */
+.pick-cell { width: 2rem; text-align: center; }
+.pick-cell input { width: 1.05rem; height: 1.05rem; }
+.bulk-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; padding: 0.55rem 0.8rem; margin-bottom: 0.5rem;
+  background: var(--accent-soft); border: 1px solid var(--line); border-radius: 8px; position: sticky; top: 0; z-index: 3; }
+.bulk-bar b { margin-right: 0.4rem; }
+details.menu .menu-list button.menu-item { width: 100%; text-align: left; background: none; border: 0; font: inherit; color: inherit; cursor: pointer; }
+details.menu .menu-list .menu-item.danger-text { color: var(--danger); }
+/* Images, tags and PDF of a series */
+dialog.wide-dialog { width: min(1100px, calc(100vw - 2rem)); }
+.instances { display: grid; grid-template-columns: minmax(7rem, 12rem) 1fr; gap: 1rem; min-height: 50vh; }
+.instance-list { display: flex; flex-direction: column; gap: 0.3rem; max-height: 65vh; overflow: auto; }
+.instance-view { min-width: 0; }
+.instance-view .actions { justify-content: flex-start; flex-wrap: wrap; margin: 0.5rem 0; }
+.instance-picture img { max-width: 100%; max-height: 60vh; background: #000; border-radius: 6px; }
+.tags-table { max-height: 55vh; overflow: auto; }
+.tag-value { word-break: break-word; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85rem; }
+.tag-nested { padding-left: 1.2rem; color: var(--ink-soft); }
+@media (max-width: 700px) { .instances { grid-template-columns: 1fr; } .instance-list { flex-direction: row; flex-wrap: wrap; max-height: none; } }
+/* Move dialogs, Jobs and System */
+.move-results { display: flex; flex-direction: column; gap: 0.3rem; max-height: 14rem; overflow: auto; }
+.raw-box { max-height: 50vh; overflow: auto; background: var(--panel-alt); border: 1px solid var(--line); border-radius: 6px; padding: 0.6rem;
+  font-size: 0.8rem; white-space: pre-wrap; word-break: break-word; }
+.job-details { max-width: 28rem; color: var(--ink-soft); font-size: 0.9rem; }
+.view > .panel + .panel, #system-panels > .panel { margin-top: 1rem; }
+/* Invitation page: a link for several studies */
+.share-study { border-top: 1px solid var(--line); padding-top: 0.8rem; margin-top: 0.8rem; }
+.share-study h2 { font-size: 1.05rem; }

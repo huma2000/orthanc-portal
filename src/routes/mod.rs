@@ -49,26 +49,32 @@
 pub mod admin;
 pub mod branding;
 pub mod download;
+pub mod files;
 pub mod guest;
 pub mod labels;
+pub mod manage;
+pub mod retrieve;
 pub mod send;
 pub mod session;
 pub mod settings;
 pub mod shares;
 pub mod studies;
+pub mod system;
 pub mod thumbnails;
 pub mod upload;
 pub mod viewer;
+pub mod worklists;
 
 use crate::auth;
 use crate::state::AppState;
 use crate::util::is_https;
 use axum::body::Body;
+use axum::extract::DefaultBodyLimit;
 use axum::extract::{Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{Extension, Json, Router};
 use serde_json::json;
 use std::sync::OnceLock;
@@ -101,6 +107,7 @@ fn common_routes() -> Router<AppState> {
         // --- public branding images (login / invitation pages and the browser tab need them) ---
         .route("/branding/logo", get(branding::logo_image))
         .route("/branding/favicon", get(branding::favicon_image))
+        .route("/branding/custom.css", get(branding::custom_css))
         // --- read-only proxy for the viewers (Weasis + OHIF) ---
         .route("/dicom-web/{*path}", get(viewer::dicomweb_proxy))
         .route("/wado", get(viewer::wado_proxy))
@@ -109,10 +116,23 @@ fn common_routes() -> Router<AppState> {
         .route("/ohif/{*path}", get(viewer::ohif_proxy))
 }
 
+/// The other viewers of Orthanc's plugins (staff only; see `viewer::app_proxy`).
+fn staff_viewer_routes() -> Router<AppState> {
+    let mut router = Router::new();
+    for root in ["/stone-webviewer", "/volview", "/wsi"] {
+        router = router
+            .route(root, get(viewer::app_proxy))
+            .route(&format!("{root}/"), get(viewer::app_proxy))
+            .route(&format!("{root}/{{*path}}"), get(viewer::app_proxy));
+    }
+    router
+}
+
 /// The intranet portal for staff.
 fn staff_router(state: AppState) -> Router {
     // The upload size limit is a setting (Settings > Uploads) read on every request.
     let upload_guard = middleware::from_fn_with_state(state.clone(), upload_limit);
+    let add_series_guard = middleware::from_fn_with_state(state.clone(), upload_limit);
 
     let api = Router::new()
         // --- session ---
@@ -124,6 +144,35 @@ fn staff_router(state: AppState) -> Router {
         // --- consult ---
         .route("/studies", get(studies::search_studies))
         .route("/studies/{id}/series", get(studies::study_series))
+        // --- images, tags, PDF reports, single files, NIfTI, several studies in one ZIP ---
+        .route("/series/{id}/instances", get(files::series_instances))
+        .route("/instances/{id}/tags", get(files::instance_tags))
+        .route("/instances/{id}/preview", get(files::instance_preview))
+        .route("/instances/{id}/pdf", get(files::instance_pdf))
+        .route("/instances/{id}/download", get(files::instance_download))
+        .route("/series/{id}/nifti", get(files::series_nifti))
+        .route("/download", get(files::download_many))
+        // --- delete, modify, anonymize, add a series (each switched on in Settings > Features) ---
+        .route("/studies/{id}", delete(manage::delete_study))
+        .route("/series/{id}", delete(manage::delete_series))
+        .route("/instances/{id}", delete(manage::delete_instance))
+        .route("/studies/{id}/modify", post(manage::modify_study))
+        .route("/series/{id}/modify", post(manage::modify_series))
+        .route("/studies/{id}/move", post(manage::move_study))
+        .route("/series/{id}/move", post(manage::move_series))
+        .route("/studies/{id}/anonymize", post(manage::anonymize_study))
+        .route("/series/{id}/anonymize", post(manage::anonymize_series))
+        .route(
+            "/studies/{id}/add-series",
+            post(manage::add_series).layer(DefaultBodyLimit::disable()).layer(add_series_guard),
+        )
+        .route("/jobs/{id}", get(manage::job_status))
+        // --- query / retrieve, worklists ---
+        .route("/retrieve/sources", get(retrieve::list_sources))
+        .route("/retrieve/query", post(retrieve::query))
+        .route("/retrieve/retrieve", post(retrieve::retrieve))
+        .route("/worklists", get(worklists::list).post(worklists::create))
+        .route("/worklists/{id}", put(worklists::update).delete(worklists::delete))
         .route("/series", get(studies::search_series))
         .route("/stats", get(studies::statistics))
         // --- labels on studies ---
@@ -142,10 +191,11 @@ fn staff_router(state: AppState) -> Router {
         // --- send to remote DICOM nodes ---
         .route("/modalities", get(send::list_modalities))
         .route("/studies/{id}/send", post(send::send_study))
+        .route("/send", post(send::send_many))
         .route("/transfers", get(send::list_transfers))
         // --- invitation links for people outside ---
         .route("/studies/{id}/share", post(shares::create_share))
-        .route("/shares", get(shares::list_shares))
+        .route("/shares", get(shares::list_shares).post(shares::create_multi_share))
         .route("/shares/{id}/revoke", post(shares::revoke_share))
         .route("/shares/{id}/password", post(shares::show_password))
         .route("/shares/{id}", put(shares::update_share))
@@ -162,10 +212,18 @@ fn staff_router(state: AppState) -> Router {
         .route("/admin/nodes", get(settings::list_nodes))
         .route("/admin/nodes/{alias}", put(settings::put_node).delete(settings::delete_node))
         .route("/admin/nodes/{alias}/echo", post(settings::echo_node))
+        // --- Configuration > System and Jobs ---
+        .route("/admin/system", get(system::overview))
+        .route("/admin/system/log-level", put(system::set_log_level))
+        .route("/admin/system/metrics", get(system::metrics))
+        .route("/admin/orthanc", get(system::raw))
+        .route("/admin/jobs", get(system::list_jobs))
+        .route("/admin/jobs/{id}/{action}", post(system::job_action))
         // All JSON/API endpoints share the CSRF guard.
         .layer(middleware::from_fn(csrf_guard));
 
     common_routes()
+        .merge(staff_viewer_routes())
         // --- web UI, compiled into the executable: nothing to deploy besides the binary ---
         .route("/", get(branding::index)) // the page, with the configured title and icon filled in
         .route("/static/app.js", get(|headers: HeaderMap| serve_static(&APP_JS, headers)))
@@ -318,7 +376,9 @@ async fn csrf_guard(request: Request, next: Next) -> Response {
 /// more permissive policy. It is still limited to this origin (no external sites).
 async fn security_headers(request: Request, next: Next) -> Response {
     let path = request.uri().path();
-    let is_ohif = path == "/ohif" || path.starts_with("/ohif/");
+    let is_ohif = ["/ohif", "/stone-webviewer", "/volview", "/wsi"]
+        .iter()
+        .any(|root| path == *root || path.starts_with(&format!("{root}/")));
     let is_branding_image = path.starts_with("/branding/");
     let is_api = path.starts_with("/api/");
     let over_https = is_https(request.headers());

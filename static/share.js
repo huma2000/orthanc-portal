@@ -68,16 +68,29 @@ async function api(method, url, body) {
   return data;
 }
 
-/** "DOE^JOHN" -> "DOE, JOHN". */
+/** How the practice writes dates and names (Settings > Appearance, from /api/public). */
+const format = () => (state.brand && state.brand.format) || {};
+
+/** "DOE^JOHN" -> "DOE, JOHN" (or "JOHN DOE", or as stored). */
 function formatName(raw) {
   if (!raw) return "(no name)";
+  if (format().name === "dicom") return raw.replace(/\^+$/, "");
   const parts = raw.split("^").map((p) => p.trim()).filter(Boolean);
-  return parts.length > 1 ? `${parts[0]}, ${parts.slice(1).join(" ")}` : parts[0] || raw;
+  if (parts.length < 2) return parts[0] || raw;
+  return format().name === "first_last" ? `${parts.slice(1).join(" ")} ${parts[0]}` : `${parts[0]}, ${parts.slice(1).join(" ")}`;
 }
 
-/** DICOM date 20240517 -> "17 May 2024" in the visitor's language. */
+/**
+ * DICOM date 20240517 -> "17 May 2024" in the visitor's language, or the practice's own format
+ * when it chose one other than the default.
+ */
 function formatDate(value) {
   if (!/^\d{8}$/.test(value || "")) return value || "";
+  const [y, m, d] = [value.slice(0, 4), value.slice(4, 6), value.slice(6, 8)];
+  const style = format().date;
+  if (style === "dmy") return `${d}/${m}/${y}`;
+  if (style === "mdy") return `${m}/${d}/${y}`;
+  if (style === "dmy_dots") return `${d}.${m}.${y}`;
   const date = new Date(Number(value.slice(0, 4)), Number(value.slice(4, 6)) - 1, Number(value.slice(6, 8)));
   return date.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
 }
@@ -159,7 +172,10 @@ async function showStudy() {
   state.clockOffset = data.now - Date.now() / 1000;
   state.expiresAt = data.expires_at;
 
-  const { patient, study, series, downloads, viewer } = data;
+  const { downloads, viewer } = data;
+  const studies = data.studies && data.studies.length ? data.studies : [{ patient: data.patient, study: data.study, series: data.series, index: 0, viewer_url: viewer.url }];
+  if (studies.length > 1) return showStudies(data, studies);
+  const { patient, study, series } = studies[0];
   const row = (label, value) => (value ? [h("dt", null, label), h("dd", null, value)] : []);
   const details = h("dl", { class: "share-details" },
     row("Patient", formatName(patient.name)),
@@ -208,6 +224,44 @@ async function showStudy() {
     h("div", { class: "share-actions" }, view, download),
     meta,
     h("p", { class: "muted" }, "You can look at the study online until the link expires, even when no downloads are left."),
+    h("button", { class: "btn small", type: "button", onclick: closeSession }, "Close this session")));
+  paintCountdown(downloads);
+  clearInterval(state.timer);
+  state.timer = setInterval(() => paintCountdown(), 1000);
+  state.downloads = downloads;
+}
+
+/** A link for several studies: each with its details, series, viewer and download; "view all" at the top. */
+function showStudies(data, studies) {
+  const { downloads, viewer } = data;
+  const row = (label, value) => (value ? [h("dt", null, label), h("dd", null, value)] : []);
+  const canDownload = downloads.max > 0 && downloads.left > 0;
+  const blocks = studies.map((item) => {
+    const { patient, study, series } = item;
+    return h("section", { class: "share-study" },
+      h("h2", null, `${formatDate(study.date)}  ${study.description || ""}`.trim()),
+      h("dl", { class: "share-details" },
+        row("Patient", formatName(patient.name)), row("Patient ID", patient.id), row("Accession", study.accession),
+        row("Modalities", study.modalities.length ? study.modalities.map((m) => h("span", { class: "chip", "data-m": m }, m)) : ""),
+        row("Series", `${series.length} (${series.reduce((n, s) => n + (Number(s.images) || 0), 0)} images)`)),
+      h("div", { class: "share-actions" },
+        viewer.available ? h("a", { class: "btn", href: item.viewer_url, target: "_blank", rel: "noopener" }, "View online") : null,
+        canDownload ? h("a", {
+          class: "btn", href: `/api/share/${TOKEN}/download?study=${item.index}`, download: "",
+          onclick: () => { setTimeout(refreshDownloads, 3000); setTimeout(refreshDownloads, 12000); },
+        }, "Download (ZIP)") : null));
+  });
+  const remaining = h("b", { id: "share-remaining" });
+  const left = h("b", { id: "share-downloads" });
+  draw(h("section", { class: "share-card" },
+    h("h1", null, `${studies.length} shared studies`),
+    h("div", { class: "share-actions" },
+      viewer.available ? h("a", { class: "btn primary big", href: viewer.url, target: "_blank", rel: "noopener" }, "View them all online") : null),
+    blocks,
+    h("div", { class: "share-meta", "aria-live": "polite" },
+      h("div", null, "This link expires in ", remaining, h("span", { class: "muted" }, ` (${new Date(data.expires_at * 1000).toLocaleString()})`)),
+      h("div", null, "Downloads left: ", left, h("span", { class: "muted" }, " (each study downloaded uses one)"))),
+    h("p", { class: "muted" }, "You can look at the studies online until the link expires, even when no downloads are left."),
     h("button", { class: "btn small", type: "button", onclick: closeSession }, "Close this session")));
   paintCountdown(downloads);
   clearInterval(state.timer);
@@ -270,7 +324,7 @@ function applyTheme(theme) {
 (async function start() {
   try {
     const info = await api("GET", "/api/public");
-    state.brand = { name: info.name, show_name: info.show_name, logo: info.logo };
+    state.brand = { name: info.name, show_name: info.show_name, logo: info.logo, format: info.format || {} };
     applyTheme(info.theme);
   } catch { /* the page still works without branding */ }
   if (!TOKEN) return message("Open your invitation link", "This address only serves studies that were shared with you. Use the link you were sent.");

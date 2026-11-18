@@ -10,6 +10,7 @@
 use crate::auth::{self, AuthUser, SESSION_COOKIE};
 use crate::db::User;
 use crate::error::{AppError, AppResult};
+use crate::permissions::Permission;
 use crate::settings::{CardSize, ModalityButton, RecentLayout, RecentOrder};
 use crate::state::AppState;
 use axum::{
@@ -46,6 +47,9 @@ pub struct SimplifiedFeature {
     show_labels: bool,
     recent_title: String,
     upload_text: String,
+    recent_auto_refresh: bool,
+    transfers_auto_refresh: bool,
+    refresh_seconds: u64,
 }
 
 /// Settings > Search & labels, as the pages need them.
@@ -80,6 +84,12 @@ pub struct Features {
     simplified: SimplifiedFeature,
     /// Columns, search boxes, live search, endless lists and labels (Settings > Search & labels).
     search: SearchFeature,
+    /// The optional features of Settings > Features, as far as this user may use them.
+    options: serde_json::Value,
+    /// The other viewers (Stone, VolView, WSI, MedDream) and the OHIF modes offered.
+    viewers: serde_json::Value,
+    /// How dates and names are written (Settings > Appearance).
+    format: serde_json::Value,
 }
 
 /// Answer of `/api/login` and `/api/me`: the user fields (id, username,
@@ -93,7 +103,41 @@ pub struct Me {
 
 async fn me_response(state: &AppState, user: User) -> Me {
     let settings = state.settings.get();
-    let ohif = state.orthanc.ohif_available(settings.ohif).await;
+    let orthanc = &state.orthanc;
+    let (ohif, stone, volview, wsi) = tokio::join!(
+        orthanc.ohif_available(settings.ohif),
+        orthanc.viewer_available(settings.stone_viewer, "stone"),
+        orthanc.viewer_available(settings.volview_viewer, "volview"),
+        orthanc.viewer_available(settings.wsi_viewer, "wsi"),
+    );
+    let may = |p: Permission| user.may(p);
+    let is_admin = user.permissions.contains(Permission::Admin);
+    let options = serde_json::json!({
+        "labels": settings.labels_enabled,
+        "detail_fields": settings.study_detail_fields,
+        "bulk": settings.bulk_actions,
+        "instances": settings.instance_browser,
+        "single_file": settings.single_file_download,
+        "nifti": settings.nifti_export,
+        "delete": settings.allow_delete && may(Permission::Delete),
+        "modify": settings.allow_modify && may(Permission::Edit),
+        "anonymize": settings.allow_anonymize && may(Permission::Edit),
+        "add_series": settings.allow_add_series && may(Permission::Edit),
+        "multi_share": settings.multi_study_shares,
+        "retrieve": settings.query_retrieve && may(Permission::Retrieve),
+        "worklists": settings.worklists_enabled && may(Permission::Worklists),
+        "jobs_page": settings.jobs_page && is_admin,
+        "system_page": settings.system_page && is_admin,
+        "raw_api": settings.raw_api && is_admin,
+    });
+    let viewers = serde_json::json!({
+        "stone": stone,
+        "volview": volview,
+        "wsi": wsi,
+        "meddream_url": settings.meddream_url,
+        "ohif_modes": settings.ohif_modes,
+    });
+    let format = serde_json::json!({ "date": settings.date_format, "name": settings.name_format });
     let share = ShareFeature {
         configured: !settings.share_public_url.is_empty(),
         default_hours: settings.share_default_hours,
@@ -121,6 +165,9 @@ async fn me_response(state: &AppState, user: User) -> Me {
         show_labels: settings.simplified_show_labels,
         recent_title: settings.simplified_recent_title.clone(),
         upload_text: settings.simplified_upload_text.clone(),
+        recent_auto_refresh: settings.recent_auto_refresh,
+        transfers_auto_refresh: settings.transfers_auto_refresh,
+        refresh_seconds: settings.auto_refresh_seconds,
     };
     Me {
         user,
@@ -133,6 +180,9 @@ async fn me_response(state: &AppState, user: User) -> Me {
             // Only meaningful while the simplified view is switched on.
             simplified,
             search,
+            options,
+            viewers,
+            format,
         },
     }
 }

@@ -107,6 +107,8 @@ async function newLink(admin, body) {
   console.log("--- intranet administrator: the staff portal");
   const admin = await makeDom(STAFF);
   await admin.login("admin", "SuperSecret123");
+  // Lists that refresh themselves would add searches to the logs the checks read: off, except in their own part.
+  await admin.call("PUT", "/api/admin/settings", { recent_auto_refresh: false, transfers_auto_refresh: false });
   await sleep(1200);
   check("all pages are in the icon column, including Shares and Transfers", admin.tabs().join() === "Home,Search,Shares,Uploads,Transfers,Help,Configuration", admin.tabs().join());
   check("the home page opens first, with the recent studies", !!admin.$(".recent") && /Recent studies/.test(admin.$(".recent").textContent));
@@ -117,7 +119,7 @@ async function newLink(admin, body) {
   await until(() => admin.$("form.settings-form"), 6000);
   const subtab = (name) => admin.$$(".subtabs [role=tab]").find((b) => b.textContent === name);
   const visibleSections = () => admin.$$("section.settings-section").filter((s) => !s.hidden).map((s) => s.querySelector("h2").textContent);
-  check("Settings tabs", admin.$$(".subtabs [role=tab]").map((b) => b.textContent).join() === "General,Appearance,Search & labels,Orthanc,Network & sharing,Security & roles,Users,DICOM nodes,Audit log",
+  check("Settings tabs", admin.$$(".subtabs [role=tab]").map((b) => b.textContent).join() === "General,Appearance,Search & labels,Features,Orthanc,Network & sharing,Security & roles,Users,DICOM nodes,Audit log,Jobs,System",
     admin.$$(".subtabs [role=tab]").map((b) => b.textContent).join());
   check("no stray 'null' text on the page (it used to appear under the title)",
     !admin.$$("main *").some((el) => Array.from(el.childNodes).some((n) => n.nodeType === 3 && n.textContent.trim() === "null")));
@@ -470,6 +472,134 @@ async function newLink(admin, body) {
   check("...with three, the results follow without pressing Search", findLog().Query.PatientName === "*DOE*", JSON.stringify(findLog().Query));
   await fetch("http://127.0.0.1:18042/__mock/copies", { method: "POST", body: JSON.stringify({ n: 1 }) });
   await admin.call("PUT", "/api/admin/settings", { search_as_you_type: false, infinite_scroll: false });
+
+  { // its own scope: the names below are used again further on
+  console.log("--- optional features (Settings > Features)");
+  const fresh = async () => { const t = await makeDom(STAFF); await t.login("admin", "SuperSecret123"); await t.tab("Studies"); await until(() => t.$("tr.study"), 6000); return t; };
+  let f = await fresh();
+  check("by default: tick boxes on the studies list", !!f.$("tr.study input.pick") && !!f.$("thead input.pick-all"));
+  check("...no Manage menu while delete / modify are off", !f.$("tr.study [data-name=Manage]"));
+  check("...no Retrieve or Worklists page", !f.tabs().includes("Retrieve") && !f.tabs().includes("Worklists"));
+  const pick = f.$("tr.study input.pick");
+  pick.checked = true; pick.dispatchEvent(new f.window.Event("change", { bubbles: true }));
+  const bar = f.$(".bulk-bar");
+  check("ticking a study shows the bar of actions", !!bar && !bar.hidden && /1 selected/.test(bar.textContent), bar && bar.textContent);
+  check("...with one ZIP for the ticked studies", !!bar.querySelector(`a[href="/api/download?studies=${SID}"]`));
+  check("...send, share (one link), labels, clear", ["Send...", "Share (one link)...", "Labels...", "Clear"].every((t) => f.button(bar, t)));
+  f.click(f.button(bar, "Clear"));
+  check("...Clear unticks and hides the bar", !pick.checked && bar.hidden);
+  f.click(f.$("tr.study .twisty")); await until(() => f.$("tr.series-row [data-name=Images]"), 6000);
+  check("a series offers its images", !!f.$("tr.series-row [data-name=Images]"));
+  f.click(f.$("tr.series-row [data-name=Images]")); await until(() => f.$("dialog .instance-list button"), 6000);
+  check("...the images of the series are listed", f.$$("dialog .instance-list button").length === 3, String(f.$$("dialog .instance-list button").length));
+  f.click(f.button(f.$("dialog .instance-view"), "DICOM tags")); await until(() => f.$("dialog .tags-table tbody tr"), 6000);
+  const tagText = f.$("dialog .tags-table").textContent;
+  check("...an image's DICOM tags, sequences included", /PatientName/.test(tagText) && /DOE\^JOHN/.test(tagText) && /CodeValue/.test(tagText), tagText.slice(0, 200));
+  const tagFilter = f.$("dialog .instance-view input");
+  tagFilter.value = "modality"; tagFilter.dispatchEvent(new f.window.Event("input"));
+  check("...the filter box narrows them", f.$$("dialog .tags-table tbody tr").length === 1, String(f.$$("dialog .tags-table tbody tr").length));
+  f.$("dialog").close();
+  f.window.close();
+
+  await admin.call("PUT", "/api/admin/settings", { labels_enabled: false, bulk_actions: false, date_format: "dmy", name_format: "first_last" });
+  f = await fresh();
+  const heads = f.$$("table.data thead th").map((th) => th.textContent.replace(/[▲▼]/g, "").trim()).join();
+  check("labels switched off: no Labels column", !/Labels/.test(heads), heads);
+  check("...no labels box in the search", !f.$(".label-picker"));
+  check("...no labels button on a study", !f.$("tr.study [data-name=Labels]"));
+  check("bulk actions off: no tick boxes", !f.$("input.pick") && !f.$(".bulk-bar"));
+  check("dates follow the chosen format (17/05/2024)", /17\/05\/2024/.test(f.$("tr.study").textContent), f.$("tr.study").textContent);
+  check("...names too (JOHN DOE)", /JOHN DOE/.test(f.$("tr.study").textContent));
+  f.window.close();
+  await admin.call("PUT", "/api/admin/settings", { labels_enabled: true, bulk_actions: true, date_format: "iso", name_format: "last_first" });
+
+  await admin.call("PUT", "/api/admin/settings", { allow_delete: true, allow_modify: true, allow_anonymize: true, allow_add_series: true,
+    query_retrieve: true, worklists_enabled: true, stone_viewer: "on", ohif_modes: ["viewer", "mpr"] });
+  f = await fresh();
+  const manage = f.$("tr.study [data-name=Manage]");
+  check("switched on: a Manage menu on each study", !!manage);
+  const items = manage ? Array.from(manage.parentElement.querySelectorAll(".menu-item")).map((b) => b.textContent) : [];
+  check("...change, move, anonymize, add a series, delete", ["Change patient / study details...", "Move to another patient...", "Anonymize...", "Add a series (PDF, pictures)...", "Delete..."].every((t) => items.includes(t)), items.join());
+  const moreViewers = f.$("tr.study [data-name='More viewers']");
+  const viewerLinks = moreViewers ? Array.from(moreViewers.parentElement.querySelectorAll("a.menu-item")).map((a) => `${a.textContent}=${a.getAttribute("href")}`) : [];
+  check("More viewers: the OHIF MPR mode and Stone", viewerLinks.some((l) => l.startsWith("OHIF: MPR=/ohif/viewer?hangingprotocolId=mpr&StudyInstanceUIDs=")) && viewerLinks.some((l) => l.startsWith(`Stone Web Viewer=/stone-webviewer/index.html?study=${STUDY_UID}`)), viewerLinks.join(" | "));
+  f.click(Array.from(manage.parentElement.querySelectorAll(".menu-item")).find((b) => b.textContent.startsWith("Change patient")));
+  await until(() => f.$("dialog input[data-tag=PatientName]"), 4000);
+  const nameBox = f.$("dialog input[data-tag=PatientName]");
+  check("...the change window is filled with the study's values", nameBox && nameBox.value === "DOE^JOHN");
+  nameBox.value = "DOE^JANE";
+  f.submit(f.$("dialog form")); await sleep(1500);
+  const lastModify = JSON.parse(fs.readFileSync(path.join(LOGS, "modify.log"), "utf8").trim().split("\n").pop());
+  check("...only the changed tag is sent to Orthanc", JSON.stringify(lastModify.body.Replace) === JSON.stringify({ PatientName: "DOE^JANE" }), JSON.stringify(lastModify.body.Replace));
+  check("...the window closes and the job is followed", !f.$("dialog[open]") && /Changing the study/.test(f.text()));
+  check("Retrieve and Worklists pages appear", f.tabs().includes("Retrieve") && f.tabs().includes("Worklists"), f.tabs().join());
+  await f.tab("Retrieve"); await until(() => f.$("select[name=source] option[value=ris]"), 6000);
+  f.$("select[name=source]").value = "ris";
+  f.$("input[name=patient_name]").value = "DOE";
+  f.submit(f.$("main form")); await until(() => f.$$("main table.data tbody tr").length === 2, 6000);
+  const answers = f.$$("main table.data tbody tr").map((tr) => tr.textContent);
+  check("Retrieve: the other system's studies", answers.length === 2 && /REMOTE/.test(answers[0]), answers.join(" | "));
+  check("...one is already here (Open), the other can be retrieved", /Already here/.test(answers[1]) && !!f.button(f.$$("main table.data tbody tr")[0], "Retrieve"));
+  f.click(f.button(f.$$("main table.data tbody tr")[0], "Retrieve")); await sleep(1200);
+  await f.tab("Transfers"); await until(() => /REMOTE/.test((f.$("main table.data") || {}).textContent || ""), 6000);
+  const retrievedRow = f.$$("main table.data tbody tr").find((tr) => /REMOTE/.test(tr.textContent));
+  check("...Transfers says the study was retrieved (not sent), from that system", !!retrievedRow && /Retrieved/.test(retrievedRow.textContent) && !/Sent/.test(retrievedRow.textContent) && /from/.test(retrievedRow.textContent), retrievedRow && retrievedRow.textContent);
+  check("...and offers to open it", !!retrievedRow && !!f.button(retrievedRow, "Open the study"));
+  await f.tab("Worklists"); await until(() => f.button(f.$("main"), "Add a worklist"), 6000);
+  f.click(f.button(f.$("main"), "Add a worklist")); await until(() => f.$("dialog input[name=patient_id]"), 4000);
+  const wl = (name, value) => { f.$(`dialog input[name=${name}]`).value = value; };
+  wl("patient_name", "DOE^JANE"); wl("patient_id", "P-77"); wl("modality", "us"); wl("date", "2026-11-20"); wl("time", "09:30");
+  f.submit(f.$("dialog form")); await until(() => f.$$("main table.data tbody tr").length > 0, 6000);
+  check("Worklists: a new one is listed", /P-77/.test(f.$("main table.data").textContent) && /09:30/.test(f.$("main table.data").textContent), f.$("main").textContent.slice(0, 300));
+  f.window.close();
+  await admin.call("PUT", "/api/admin/settings", { allow_delete: false, allow_modify: false, allow_anonymize: false, allow_add_series: false,
+    query_retrieve: false, worklists_enabled: false, stone_viewer: "auto", ohif_modes: ["viewer"] });
+
+  f = await makeDom(STAFF); await f.login("admin", "SuperSecret123");
+  await f.tab("Settings"); await until(() => f.section("Optional features"), 6000);
+  f.click(f.$$(".subtabs [role=tab]").find((b) => b.textContent === "Features"));
+  const shownSections = f.$$("section.settings-section").filter((s) => !s.hidden).map((s) => s.querySelector("h2").textContent).join();
+  check("Settings > Features: the optional features and the viewers", shownSections === "Optional features,More viewers", shownSections);
+  f.click(f.$$(".subtabs [role=tab]").find((b) => b.textContent === "System")); await until(() => /Plugins \(/.test(f.text()), 6000);
+  check("Configuration > System: version, counts and plugins", /1\.12\.10/.test(f.text()) && /Plugins \(3\)/.test(f.text()));
+  f.click(f.$$(".subtabs [role=tab]").find((b) => b.textContent === "Jobs")); await until(() => f.$("main table.data tbody tr") || /No job/.test(f.text()), 6000);
+  check("Configuration > Jobs: Orthanc's jobs", !!f.$("main table.data tbody tr"), f.$("main").textContent.slice(0, 200));
+  f.window.close();
+
+  }
+
+  console.log("--- auto-refresh");
+  await admin.call("PUT", "/api/admin/settings", { auto_refresh_seconds: 5, recent_auto_refresh: true, transfers_auto_refresh: true });
+  const auto = await makeDom(STAFF);
+  let studySearches = 0; // the searches of this browser only
+  const autoFetch = auto.window.fetch;
+  auto.window.fetch = (url, opts) => { if (String(url).startsWith("/api/studies?")) studySearches += 1; return autoFetch(url, opts); };
+  const findCount = () => studySearches;
+  await auto.login("admin", "SuperSecret123"); await until(() => auto.$("tr.study"), 6000);
+  const homeSwitch = auto.$(".recent-head [data-name=auto-refresh]");
+  check("the home page has an Auto-refresh switch, on, with the interval", !!homeSwitch && homeSwitch.getAttribute("aria-pressed") === "true" && homeSwitch.textContent === "Auto-refresh · 5 s", homeSwitch && homeSwitch.textContent);
+  let before = findCount(); await sleep(5800);
+  check("...the recent studies refresh themselves", findCount() > before, `${before} -> ${findCount()}`);
+  auto.click(homeSwitch);
+  check("...a click pauses it (remembered in the browser)", homeSwitch.getAttribute("aria-pressed") === "false" && auto.window.localStorage.getItem("portal.autorefresh.recent") === "off");
+  before = findCount(); await sleep(5800);
+  check("...and paused, nothing is asked any more", findCount() === before, `${before} -> ${findCount()}`);
+  auto.click(homeSwitch);
+  auto.click(auto.$("tr.study .twisty")); await sleep(800);
+  before = findCount(); await sleep(5800);
+  check("...while the series of a study are unfolded, it waits", !!auto.$("tr.series-row:not([hidden])") && findCount() === before, `${before} -> ${findCount()}`);
+  auto.click(auto.$("tr.study .twisty"));
+  before = findCount(); await sleep(5800);
+  check("...and folded again, it goes on", findCount() > before, `${before} -> ${findCount()}`);
+  await auto.tab("Transfers"); await until(() => auto.$(".page-head [data-name=auto-refresh]"), 6000);
+  check("the Transfers page has its own switch, next to Refresh", !!auto.$(".page-head [data-name=auto-refresh]") && auto.$(".page-head [data-name=auto-refresh]").getAttribute("aria-pressed") === "true");
+  await admin.call("PUT", "/api/admin/settings", { auto_refresh_seconds: 30, recent_auto_refresh: false, transfers_auto_refresh: false });
+  const noAuto = await makeDom(STAFF);
+  await noAuto.login("admin", "SuperSecret123"); await until(() => noAuto.$("tr.study"), 6000);
+  const homeHasSwitch = !!noAuto.$("[data-name=auto-refresh]");
+  await noAuto.tab("Transfers"); await sleep(800);
+  check("switched off in Settings, no switch on either page", !homeHasSwitch && !noAuto.$("[data-name=auto-refresh]"));
+  auto.window.close(); noAuto.window.close();
 
   await admin.call("PUT", "/api/admin/settings", { study_columns: ["patient", "accession", "labels"], study_search_fields: ["patient_name", "sex"] });
   const custom = await makeDom(STAFF);

@@ -31,7 +31,7 @@
 //! Give it to the guest through a different channel than the link (a phone call, an SMS...).
 
 use crate::auth::{self, AuthUser};
-use crate::db::{NewShare, Share};
+use crate::db::{NewShare, Share, SharedStudy};
 use crate::error::{AppError, AppResult};
 use crate::mailer::{self, Invitation};
 use crate::models::StudySummary;
@@ -145,6 +145,30 @@ pub struct CreateShare {
     note: Option<String>,
     /// Also send the invitation by email.
     email: Option<EmailRequest>,
+    /// `POST /api/shares` only: the studies of a link that shares several (Settings > Features).
+    #[serde(default)]
+    studies: Vec<String>,
+}
+
+/// Most studies one link may share.
+const MAX_STUDIES_PER_LINK: usize = 50;
+
+/// Creates ONE invitation for several studies: `POST /api/shares { studies: [...], minutes, ... }`.
+pub async fn create_multi_share(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Json(mut req): Json<CreateShare>,
+) -> AppResult<Json<Value>> {
+    user.require(Permission::Share)?;
+    let mut ids = std::mem::take(&mut req.studies);
+    ids.dedup();
+    if ids.len() > 1 && !state.settings.get().multi_study_shares {
+        return Err(AppError::Denied("Links for several studies are switched off (Settings > Features)".into()));
+    }
+    if ids.is_empty() || ids.len() > MAX_STUDIES_PER_LINK {
+        return Err(AppError::BadRequest(format!("Choose 1 to {MAX_STUDIES_PER_LINK} studies")));
+    }
+    create(state, user, ids, req).await
 }
 
 /// Creates an invitation for a study and returns the link and the password (shown only now).
@@ -155,7 +179,11 @@ pub async fn create_share(
     Json(req): Json<CreateShare>,
 ) -> AppResult<Json<Value>> {
     user.require(Permission::Share)?;
-    if !is_valid_orthanc_id(&id) {
+    create(state, user, vec![id], req).await
+}
+
+async fn create(state: AppState, user: crate::db::User, ids: Vec<String>, req: CreateShare) -> AppResult<Json<Value>> {
+    if ids.iter().any(|id| !is_valid_orthanc_id(id)) {
         return Err(AppError::BadRequest("Invalid study id".into()));
     }
     let settings = state.settings.get();
@@ -177,11 +205,22 @@ pub async fn create_share(
     let note: String = req.note.unwrap_or_default().trim().chars().filter(|c| !c.is_control()).take(120).collect();
     let email = prepare_email(&settings, &user.username, req.email)?;
 
-    // Reading the study checks that it exists and gives what the link will point at.
-    let study = StudySummary::from_orthanc(&state.orthanc.get_json(&format!("/studies/{id}")).await?);
-    if study.study_instance_uid.is_empty() {
-        return Err(AppError::BadRequest("This study has no StudyInstanceUID and cannot be shared".into()));
+    // Reading the studies checks that they exist and gives what the link will point at.
+    let mut studies = Vec::with_capacity(ids.len());
+    for id in &ids {
+        let study = StudySummary::from_orthanc(&state.orthanc.get_json(&format!("/studies/{id}")).await?);
+        if study.study_instance_uid.is_empty() {
+            return Err(AppError::BadRequest("This study has no StudyInstanceUID and cannot be shared".into()));
+        }
+        studies.push(study);
     }
+    let study = &studies[0];
+    let id = ids[0].clone();
+    let extra: Vec<SharedStudy> = ids[1..]
+        .iter()
+        .zip(&studies[1..])
+        .map(|(id, s)| SharedStudy { id: id.clone(), uid: s.study_instance_uid.clone() })
+        .collect();
 
     let password = sharing::generate_password();
     let password_hash = auth::hash_password(sharing::normalize_password(&password)).await?;
@@ -190,8 +229,9 @@ pub async fn create_share(
     let label: String =
         format!("{} | {} | {}", study.patient_name.replace('^', " "), study.study_date, study.study_description)
             .chars()
-            .take(160)
+            .take(140)
             .collect();
+    let label = if extra.is_empty() { label } else { format!("{label} + {} more", extra.len()) };
 
     let share = state.db.create_share(&NewShare {
         token: &token,
@@ -203,6 +243,7 @@ pub async fn create_share(
         label: &label,
         note: &note,
         max_downloads: downloads as i64,
+        extra_studies: &extra,
         password_copy: settings.share_keep_passwords.then_some(password.as_str()),
     })?;
     state.db.audit(
@@ -255,10 +296,13 @@ pub struct ShareView {
     /// Times the password was entered correctly, and the last time.
     access_count: i64,
     last_access_at: Option<i64>,
+    /// How many studies the link shares.
+    study_count: usize,
 }
 
 fn view(share: Share, base_url: &str, now: i64, keep_passwords: bool) -> ShareView {
     ShareView {
+        study_count: 1 + share.extra_studies.len(),
         id: share.id,
         password_available: keep_passwords && share.has_password && share.is_active(now),
         password_kept: keep_passwords,

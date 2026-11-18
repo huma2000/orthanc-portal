@@ -134,6 +134,10 @@ pub struct ModalityNode {
     /// What the staff call it (Settings > DICOM nodes); empty when no description was given.
     #[serde(default)]
     pub description: String,
+    /// `dicom` (a DICOM node), `peer` (another Orthanc) or `dicomweb` (a DICOMweb server).
+    pub kind: &'static str,
+    /// The address of a peer or DICOMweb server.
+    pub url: String,
 }
 
 impl ModalityNode {
@@ -146,6 +150,8 @@ impl ModalityNode {
             port: cfg["Port"].as_u64().unwrap_or(0),
             manufacturer: text(&cfg["Manufacturer"]),
             description: String::new(),
+            kind: "dicom",
+            url: String::new(),
         }
     }
 
@@ -158,6 +164,8 @@ impl ModalityNode {
             port: 0,
             manufacturer: String::new(),
             description: String::new(),
+            kind: "dicom",
+            url: String::new(),
         }
     }
 }

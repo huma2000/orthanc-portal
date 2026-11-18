@@ -268,6 +268,50 @@ impl OrthancClient {
         self.check(resp).await.map(|_| ())
     }
 
+    /// `PUT path` with a plain-text body (e.g. `/tools/log-level`).
+    pub async fn put_text(&self, path: &str, body: &str) -> Result<(), AppError> {
+        let resp = self.request(Method::PUT, path).body(body.to_string()).timeout(JSON_TIMEOUT).send().await?;
+        self.check(resp).await.map(|_| ())
+    }
+
+    /// `GET path` as text (metrics, log level).
+    pub async fn get_text(&self, path: &str) -> Result<String, AppError> {
+        let resp = self.request(Method::GET, path).timeout(JSON_TIMEOUT).send().await?;
+        Ok(self.check(resp).await?.text().await?)
+    }
+
+    /// `GET path`, checked but NOT read: the caller streams it (a DICOM file, a PDF, a NIfTI file).
+    pub async fn get_stream(&self, path: &str) -> Result<Response, AppError> {
+        let resp = self.request(Method::GET, path).send().await?;
+        self.check(resp).await
+    }
+
+    /// `POST path` with a JSON body, checked but NOT read (`/tools/create-archive`).
+    pub async fn post_stream(&self, path: &str, body: &Value) -> Result<Response, AppError> {
+        let resp = self.request(Method::POST, path).json(body).send().await?;
+        self.check(resp).await
+    }
+
+    /// `POST path` that starts an Orthanc job; returns the job id (`ID` of the answer).
+    pub async fn start_job(&self, path: &str, body: &Value) -> Result<String, AppError> {
+        let answer = self.post_json(path, body).await?;
+        answer["ID"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| AppError::Upstream("Orthanc did not return a job id".into()))
+    }
+
+    /// `{ name: {Url, ...} }` of `GET /peers?expand` or `GET /dicom-web/servers?expand` (empty when unavailable).
+    pub async fn named_targets(&self, path: &str) -> Map<String, Value> {
+        match self.get_json(&format!("{path}?expand")).await {
+            Ok(Value::Object(map)) => map,
+            Ok(Value::Array(ids)) => {
+                ids.iter().filter_map(|v| v.as_str()).map(|id| (id.to_string(), Value::Null)).collect()
+            }
+            _ => Map::new(),
+        }
+    }
+
     /// `POST /tools/find` - returns the array of matching resources.
     pub async fn find(&self, body: &Value) -> Result<Vec<Value>, AppError> {
         let resp = self.request(Method::POST, "/tools/find").json(body).timeout(JSON_TIMEOUT).send().await?;
@@ -296,7 +340,7 @@ impl OrthancClient {
     }
 
     /// Is a plugin whose name contains `name` loaded? (`GET /plugins`, cached 60 s.)
-    async fn plugin_loaded(&self, name: &str) -> bool {
+    pub async fn plugin_loaded(&self, name: &str) -> bool {
         // Look in the cache first. The lock is released before any `.await`.
         {
             let cache = self.plugins_cache.lock().unwrap_or_else(|e| e.into_inner());
@@ -320,6 +364,15 @@ impl OrthancClient {
         let found = plugins.iter().any(|p| p.to_lowercase().contains(name));
         *self.plugins_cache.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), plugins));
         found
+    }
+
+    /// Should the UI offer the viewer of the plugin `plugin`? Same rules as OHIF (see [`OhifMode`]).
+    pub async fn viewer_available(&self, mode: OhifMode, plugin: &str) -> bool {
+        match mode {
+            OhifMode::On => true,
+            OhifMode::Off => false,
+            OhifMode::Auto => self.plugin_loaded(plugin).await,
+        }
     }
 
     /// Should the UI offer the OHIF browser viewer? (see [`OhifMode`])

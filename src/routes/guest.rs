@@ -32,7 +32,7 @@ use crate::routes::download::zip_response;
 use crate::sharing;
 use crate::state::AppState;
 use crate::util::{now_unix, sanitize_filename};
-use axum::extract::{ConnectInfo, Path, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -145,22 +145,12 @@ pub async fn unlock(
     Ok(response)
 }
 
-/// What the guest sees once in: the study, its series, the time left and the downloads left.
-pub async fn study(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(token): Path<String>,
-) -> AppResult<Json<Value>> {
-    let share = guest_of(&state, &headers, &token)?;
+/// What the guest's page shows about one study of the link.
+async fn study_details(state: &AppState, study_id: &str) -> AppResult<Value> {
     let orthanc = &state.orthanc;
-
-    // The three questions to Orthanc are independent: ask them at the same time, so the page
-    // waits for the slowest one instead of the sum of all three.
-    let study_path = format!("/studies/{}", share.study_id);
+    let study_path = format!("/studies/{study_id}");
     let series_path = format!("{study_path}/series");
-    let ohif_mode = state.settings.get().ohif;
-    let (study_json, series_json, viewer_available) =
-        tokio::join!(orthanc.get_json(&study_path), orthanc.get_json(&series_path), orthanc.ohif_available(ohif_mode));
+    let (study_json, series_json) = tokio::join!(orthanc.get_json(&study_path), orthanc.get_json(&series_path));
     let study = StudySummary::from_orthanc(&study_json?);
     let series_json = series_json?;
     let mut series: Vec<SeriesSummary> =
@@ -170,8 +160,7 @@ pub async fn study(
     let mut modalities: Vec<String> = series.iter().map(|s| s.modality.clone()).filter(|m| !m.is_empty()).collect();
     modalities.sort();
     modalities.dedup();
-
-    Ok(Json(json!({
+    Ok(json!({
         "patient": {
             "name": study.patient_name,
             "id": study.patient_id,
@@ -184,6 +173,7 @@ pub async fn study(
             "description": study.study_description,
             "accession": study.accession_number,
             "modalities": modalities,
+            "uid": study.study_instance_uid,
         },
         "series": series.iter().map(|s| json!({
             "number": s.series_number,
@@ -192,6 +182,38 @@ pub async fn study(
             "body_part": s.body_part,
             "images": s.instances_count,
         })).collect::<Vec<_>>(),
+    }))
+}
+
+/// Everything the guest's page shows: the studies of the link (one or several), the time and
+/// downloads left, and the viewer.
+pub async fn study(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(token): Path<String>,
+) -> AppResult<Json<Value>> {
+    let share = guest_of(&state, &headers, &token)?;
+    let ohif_mode = state.settings.get().ohif;
+    let shared = share.studies();
+    // The questions to Orthanc are independent: ask them at the same time.
+    let details = futures_util::future::join_all(shared.iter().map(|s| study_details(&state, &s.id)));
+    let (details, viewer_available) = tokio::join!(details, state.orthanc.ohif_available(ohif_mode));
+    let mut studies = Vec::with_capacity(details.len());
+    for (index, d) in details.into_iter().enumerate() {
+        let mut d = d?;
+        d["index"] = json!(index);
+        d["viewer_url"] = json!(format!("/ohif/viewer?StudyInstanceUIDs={}", shared[index].uid));
+        studies.push(d);
+    }
+    let first = studies[0].clone();
+    let all_uids = share.study_uids().join(",");
+
+    Ok(Json(json!({
+        // The first study, as before (pages and tools that know only one study keep working).
+        "patient": first["patient"],
+        "study": first["study"],
+        "series": first["series"],
+        "studies": studies,
         // Both clocks come from the server, so a wrong clock on the guest's computer cannot
         // extend or shorten the link.
         "now": now_unix(),
@@ -203,21 +225,30 @@ pub async fn study(
         },
         "viewer": {
             "available": viewer_available,
-            "url": format!("/ohif/viewer?StudyInstanceUIDs={}", share.study_uid),
+            "url": format!("/ohif/viewer?StudyInstanceUIDs={all_uids}"),
         },
     })))
 }
 
-/// The study as a ZIP. Takes one of the downloads the link allows.
+#[derive(Deserialize)]
+pub struct DownloadQuery {
+    /// Which study of the link (0 = the first). Each download of a study uses one download.
+    #[serde(default)]
+    study: usize,
+}
+
 pub async fn download(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(token): Path<String>,
+    Query(q): Query<DownloadQuery>,
 ) -> AppResult<Response> {
     let share = guest_of(&state, &headers, &token)?;
+    let shared = share.studies();
+    let Some(target) = shared.get(q.study) else { return Err(AppError::NotFound) };
 
     // Read the study FIRST: if it is gone, fail before a download is used up. Also gives the file name.
-    let study = StudySummary::from_orthanc(&state.orthanc.get_json(&format!("/studies/{}", share.study_id)).await?);
+    let study = StudySummary::from_orthanc(&state.orthanc.get_json(&format!("/studies/{}", target.id)).await?);
 
     // Take the download atomically: two requests at the same moment cannot both use the last one.
     if !state.db.reserve_download(share.id, now_unix())? {
@@ -228,7 +259,7 @@ pub async fn download(
         }));
     }
 
-    match state.orthanc.archive(ArchiveKind::Study, &share.study_id, false).await {
+    match state.orthanc.archive(ArchiveKind::Study, &target.id, false).await {
         Ok(upstream) => {
             let who = if study.patient_id.is_empty() { &study.patient_name } else { &study.patient_id };
             let file_name = format!("{}_{}.zip", sanitize_filename(who), sanitize_filename(&study.study_date));

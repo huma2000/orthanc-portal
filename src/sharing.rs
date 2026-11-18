@@ -102,10 +102,10 @@ fn query_values(query: Option<&str>, keys: &[&str]) -> Vec<String> {
         .collect()
 }
 
-/// True when the query names the shared study, and ONLY that study (every value must match).
-fn names_only_study(query: Option<&str>, keys: &[&str], study_uid: &str) -> bool {
+/// True when the query names shared studies, and ONLY those (every value must be one of them).
+fn names_only_study(query: Option<&str>, keys: &[&str], study_uids: &[String]) -> bool {
     let values = query_values(query, keys);
-    !values.is_empty() && values.iter().all(|v| v == study_uid)
+    !values.is_empty() && values.iter().all(|v| study_uids.iter().any(|uid| uid == v))
 }
 
 /// May a guest of the share for `study_uid` read this DICOMweb path?
@@ -114,24 +114,24 @@ fn names_only_study(query: Option<&str>, keys: &[&str], study_uid: &str) -> bool
 ///   `StudyInstanceUID=<uid>` (otherwise they would list the whole archive);
 /// * anything below `studies/<uid>/...` when `<uid>` is the shared study, except whole files;
 /// * nothing else.
-pub fn guest_may_read_dicomweb(path: &str, query: Option<&str>, study_uid: &str) -> bool {
+pub fn guest_may_read_dicomweb(path: &str, query: Option<&str>, study_uids: &[String]) -> bool {
     if is_whole_dicom_retrieval(path) {
         return false;
     }
     let parts: Vec<&str> = path.split('/').collect();
     match parts.as_slice() {
         ["studies"] | ["series"] | ["instances"] => {
-            names_only_study(query, &["StudyInstanceUID", "0020000D"], study_uid)
+            names_only_study(query, &["StudyInstanceUID", "0020000D"], study_uids)
         }
-        ["studies", uid, ..] => *uid == study_uid,
+        ["studies", uid, ..] => study_uids.iter().any(|shared| shared == uid),
         _ => false,
     }
 }
 
 /// WADO-URI (`/wado?requestType=WADO&studyUID=...&contentType=image/jpeg`): only for the shared
 /// study and only as a picture. Without a picture type Orthanc returns a whole DICOM file.
-pub fn guest_may_read_wado(query: Option<&str>, study_uid: &str) -> bool {
-    names_only_study(query, &["studyUID"], study_uid) && is_picture_request(query)
+pub fn guest_may_read_wado(query: Option<&str>, study_uids: &[String]) -> bool {
+    names_only_study(query, &["studyUID"], study_uids) && is_picture_request(query)
 }
 
 /// True when every `contentType` asked for is a picture type (and there is at least one).
@@ -148,6 +148,10 @@ mod tests {
     use super::*;
 
     const UID: &str = "1.2.826.0.1.3680043.8.498.1";
+
+    fn one() -> Vec<String> {
+        vec![UID.to_string()]
+    }
 
     #[test]
     fn generated_passwords_are_readable_and_strong_enough() {
@@ -191,7 +195,7 @@ mod tests {
             "series/1.2".to_string(),
             "instances/3.4".to_string(),
         ] {
-            assert!(!guest_may_read_dicomweb(&path, None, UID), "{path}");
+            assert!(!guest_may_read_dicomweb(&path, None, &one()), "{path}");
         }
     }
 
@@ -208,57 +212,68 @@ mod tests {
             format!("studies/{UID}/series/1.2/instances/3.4/rendered"),
             format!("studies/{UID}/series/1.2/instances/3.4/thumbnail"),
         ] {
-            assert!(guest_may_read_dicomweb(&path, None, UID), "{path}");
+            assert!(guest_may_read_dicomweb(&path, None, &one()), "{path}");
         }
     }
 
     #[test]
     fn guests_cannot_reach_other_studies() {
-        assert!(!guest_may_read_dicomweb("studies/9.9.9/series", None, UID));
-        assert!(!guest_may_read_dicomweb("studies/9.9.9/metadata", None, UID));
-        assert!(!guest_may_read_dicomweb("studies", None, UID), "an unfiltered search lists everybody");
-        assert!(!guest_may_read_dicomweb("studies", Some("limit=100"), UID));
-        assert!(!guest_may_read_dicomweb("series", Some("Modality=CT"), UID));
-        assert!(!guest_may_read_dicomweb("studies", Some("StudyInstanceUID=9.9.9"), UID));
+        assert!(!guest_may_read_dicomweb("studies/9.9.9/series", None, &one()));
+        assert!(!guest_may_read_dicomweb("studies/9.9.9/metadata", None, &one()));
+        assert!(!guest_may_read_dicomweb("studies", None, &one()), "an unfiltered search lists everybody");
+        assert!(!guest_may_read_dicomweb("studies", Some("limit=100"), &one()));
+        assert!(!guest_may_read_dicomweb("series", Some("Modality=CT"), &one()));
+        assert!(!guest_may_read_dicomweb("studies", Some("StudyInstanceUID=9.9.9"), &one()));
         assert!(!guest_may_read_dicomweb(
             "studies",
             Some(&format!("StudyInstanceUID={UID}&StudyInstanceUID=9.9.9")),
-            UID
+            &one()
         ));
-        assert!(!guest_may_read_dicomweb("studies", Some(&format!("StudyInstanceUID={UID}\\9.9.9")), UID));
-        assert!(!guest_may_read_dicomweb("studies", Some(&format!("StudyInstanceUID=*{UID}")), UID));
-        assert!(!guest_may_read_dicomweb("series/1.2/metadata", None, UID));
-        assert!(!guest_may_read_dicomweb("servers", None, UID));
+        assert!(!guest_may_read_dicomweb("studies", Some(&format!("StudyInstanceUID={UID}\\9.9.9")), &one()));
+        assert!(!guest_may_read_dicomweb("studies", Some(&format!("StudyInstanceUID=*{UID}")), &one()));
+        assert!(!guest_may_read_dicomweb("series/1.2/metadata", None, &one()));
+        assert!(!guest_may_read_dicomweb("servers", None, &one()));
     }
 
     #[test]
     fn searches_narrowed_to_the_shared_study_are_fine() {
-        assert!(guest_may_read_dicomweb("studies", Some(&format!("StudyInstanceUID={UID}")), UID));
+        assert!(guest_may_read_dicomweb("studies", Some(&format!("StudyInstanceUID={UID}")), &one()));
         assert!(guest_may_read_dicomweb(
             "studies",
             Some(&format!("limit=101&offset=0&includefield=00081030&StudyInstanceUID={UID}")),
-            UID
+            &one()
         ));
-        assert!(guest_may_read_dicomweb("studies", Some(&format!("0020000d={UID}")), UID));
-        assert!(guest_may_read_dicomweb("series", Some(&format!("StudyInstanceUID={UID}")), UID));
+        assert!(guest_may_read_dicomweb("studies", Some(&format!("0020000d={UID}")), &one()));
+        assert!(guest_may_read_dicomweb("series", Some(&format!("StudyInstanceUID={UID}")), &one()));
         assert!(guest_may_read_dicomweb(
             "instances",
             Some(&format!("StudyInstanceUID={}", UID.replace('.', "%2E"))),
-            UID
+            &one()
         ));
     }
 
     #[test]
     fn wado_only_as_a_picture_of_the_shared_study() {
         let q = |extra: &str| format!("requestType=WADO&studyUID={UID}&seriesUID=1&objectUID=2{extra}");
-        assert!(guest_may_read_wado(Some(&q("&contentType=image/jpeg")), UID));
-        assert!(guest_may_read_wado(Some(&q("&contentType=image%2Fpng")), UID));
-        assert!(!guest_may_read_wado(Some(&q("")), UID), "no type = a whole DICOM file");
-        assert!(!guest_may_read_wado(Some(&q("&contentType=application/dicom")), UID));
-        assert!(!guest_may_read_wado(Some(&q("&contentType=image/jpeg,application/dicom")), UID));
-        assert!(!guest_may_read_wado(Some(&q("&contentType=image/jpeg&contentType=application/dicom")), UID));
-        assert!(!guest_may_read_wado(Some("requestType=WADO&studyUID=9.9&contentType=image/jpeg"), UID));
-        assert!(!guest_may_read_wado(Some("contentType=image/jpeg"), UID));
-        assert!(!guest_may_read_wado(None, UID));
+        assert!(guest_may_read_wado(Some(&q("&contentType=image/jpeg")), &one()));
+        assert!(guest_may_read_wado(Some(&q("&contentType=image%2Fpng")), &one()));
+        assert!(!guest_may_read_wado(Some(&q("")), &one()), "no type = a whole DICOM file");
+        assert!(!guest_may_read_wado(Some(&q("&contentType=application/dicom")), &one()));
+        assert!(!guest_may_read_wado(Some(&q("&contentType=image/jpeg,application/dicom")), &one()));
+        assert!(!guest_may_read_wado(Some(&q("&contentType=image/jpeg&contentType=application/dicom")), &one()));
+        assert!(!guest_may_read_wado(Some("requestType=WADO&studyUID=9.9&contentType=image/jpeg"), &one()));
+        assert!(!guest_may_read_wado(Some("contentType=image/jpeg"), &one()));
+        assert!(!guest_may_read_wado(None, &one()));
+    }
+
+    #[test]
+    fn a_link_for_several_studies_reaches_each_of_them_only() {
+        let uids = vec![UID.to_string(), "1.2.3.9".to_string()];
+        assert!(guest_may_read_dicomweb("studies/1.2.3.9/metadata", None, &uids));
+        assert!(guest_may_read_dicomweb(&format!("studies/{UID}/series"), None, &uids));
+        assert!(guest_may_read_dicomweb("studies", Some("StudyInstanceUID=1.2.3.9"), &uids));
+        assert!(!guest_may_read_dicomweb("studies/9.9.9/metadata", None, &uids));
+        assert!(!guest_may_read_dicomweb("studies", Some("StudyInstanceUID=1.2.3.9&StudyInstanceUID=9.9"), &uids));
+        assert!(!guest_may_read_dicomweb("studies/1.2.3.9", None, &uids), "never whole files");
     }
 }

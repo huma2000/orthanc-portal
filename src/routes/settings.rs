@@ -48,6 +48,8 @@ pub async fn public_info(State(state): State<AppState>) -> Json<Value> {
         "favicon": branding["favicon"],
         // Colours chosen in Settings > Appearance (the login and invitation pages use them too).
         "theme": settings.theme(),
+        // How dates and names are written (the invitation page follows it too).
+        "format": { "date": settings.date_format, "name": settings.name_format },
     }))
 }
 
@@ -65,6 +67,7 @@ async fn settings_document(state: &AppState) -> Value {
             "modality_buttons": default_modality_buttons(),
             "study_columns": Settings::defaults().study_columns,
             "study_search_fields": Settings::defaults().study_search_fields,
+            "study_detail_fields": Settings::defaults().study_detail_fields,
         },
         "branding": state.branding.describe(),
         // Every permission, for the roles editor.

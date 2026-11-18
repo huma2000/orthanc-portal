@@ -162,16 +162,32 @@ function sessionExpired() {
    4. FORMATTING HELPERS
    ==================================================================== */
 
-/** DICOM person name "DOE^JOHN^^^" -> "DOE, JOHN". */
+/** How dates and names are written (Settings > Appearance); the login page uses the public copy. */
+const formatOptions = () => (state.user && state.user.features && state.user.features.format) || (state.brand && state.brand.format) || {};
+
+/** DICOM person name "DOE^JOHN^^^" -> "DOE, JOHN" (or "JOHN DOE", or as stored: Settings > Appearance). */
 function formatName(raw) {
   if (!raw) return "(no name)";
+  const style = formatOptions().name;
+  if (style === "dicom") return raw.replace(/\^+$/, "");
   const parts = raw.split("^").map((p) => p.trim()).filter(Boolean);
-  return parts.length > 1 ? `${parts[0]}, ${parts.slice(1).join(" ")}` : parts[0] || raw;
+  if (parts.length < 2) return parts[0] || raw;
+  return style === "first_last" ? `${parts.slice(1).join(" ")} ${parts[0]}` : `${parts[0]}, ${parts.slice(1).join(" ")}`;
 }
 
-/** DICOM date "20240517" -> "2024-05-17". Anything else is shown unchanged. */
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** DICOM date "20240517" -> "2024-05-17" (or 17/05/2024...: Settings > Appearance). Anything else is shown unchanged. */
 function formatDicomDate(value) {
-  return /^\d{8}$/.test(value || "") ? `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}` : value || "";
+  if (!/^\d{8}$/.test(value || "")) return value || "";
+  const [y, m, d] = [value.slice(0, 4), value.slice(4, 6), value.slice(6, 8)];
+  switch (formatOptions().date) {
+    case "dmy": return `${d}/${m}/${y}`;
+    case "mdy": return `${m}/${d}/${y}`;
+    case "dmy_dots": return `${d}.${m}.${y}`;
+    case "long": return `${Number(d)} ${MONTHS[Number(m) - 1] || m} ${y}`;
+    default: return `${y}-${m}-${d}`;
+  }
 }
 
 /** Unix seconds -> local date/time string. */
@@ -445,6 +461,12 @@ const ICONS = {
   revoke: [{ c: [12, 12, 8.5] }, "M6 6l12 12"],
   key: [{ c: [7.5, 15.5, 4] }, "M10.5 12.5 20 3", "M16.5 6.5l2.5 2.5", "M14 9l2 2"],
   edit: ["M4 20h4L19 9l-4-4L4 16z", "M13.5 6.5l4 4"],
+  more: [{ c: [5.5, 12, 1.3] }, { c: [12, 12, 1.3] }, { c: [18.5, 12, 1.3] }],          // three dots: more actions
+  viewers: ["M3 5h18v14H3z", "M8 19v-4h8v4", "M7 9h10", "M7 12h6"],                     // another viewer
+  images: ["M3.5 5h13v13h-13z", "M7.5 2.5h13v13", "M3.5 15l4-4 3 3 2-2 4 4"],            // a stack of images
+  pdf: ["M6 2.5h8l4.5 4.5v14.5H6z", "M14 2.5V7h4.5", "M9 13h6", "M9 16.5h6"],            // a document
+  retrieve: ["M12 3v11", "M7.5 9.5 12 14l4.5-4.5", "M3 14.5h4v5h10v-5h4"],               // into this archive
+  worklist: ["M8 4.5h11", "M8 10h11", "M8 15.5h11", { c: [4.5, 4.5, 1] }, { c: [4.5, 10, 1] }, { c: [4.5, 15.5, 1] }, "M3 20.5h18"],
 };
 
 /**
@@ -517,7 +539,9 @@ const SIMPLE_PAGES = [
   { id: "search", label: "Search", icon: "search", needs: "read", build: buildSimpleSearch },
   { id: "shares", label: "Shares", icon: "share", needs: "share", build: buildSharesView },
   { id: "upload", label: "Uploads", icon: "upload", needs: "upload", build: buildUploadView },
-  { id: "transfers", label: "Transfers", icon: "transfers", needs: "send", build: buildTransfersView },
+  { id: "transfers", label: "Transfers", icon: "transfers", needs: null, when: () => can("send") || !!opts().retrieve, build: buildTransfersView },
+  { id: "retrieve", label: "Retrieve", icon: "retrieve", needs: null, when: () => !!opts().retrieve, build: buildRetrieveView },
+  { id: "worklists", label: "Worklists", icon: "worklist", needs: null, when: () => !!opts().worklists, build: buildWorklistsView },
   { id: "help", label: "Help", icon: "help", needs: null, bottom: true, build: buildHelpView },
   { id: "settings", label: "Configuration", icon: "settings", needs: "admin", bottom: true, build: buildSettingsView },
 ];
@@ -544,7 +568,7 @@ const simpleOptions = () => (state.user && state.user.features && state.user.fea
 /** Draws the portal: header, icon column and the current page. */
 function renderSimplified() {
   const options = simpleOptions();
-  const pages = SIMPLE_PAGES.filter((p) => !p.needs || can(p.needs));
+  const pages = SIMPLE_PAGES.filter((p) => (!p.needs || can(p.needs)) && (!p.when || p.when()));
   if (!pages.some((p) => p.id === state.simpleView)) state.simpleView = "home";
   const current = pages.find((p) => p.id === state.simpleView);
   // The address carries the filters of the Search page (see showSearchInAddress); elsewhere it is plain.
@@ -604,6 +628,36 @@ async function refreshTotalStudies(force = false) {
 let reloadRecentStudies = null;
 
 /** The home page: the most recent studies, and a drop zone to upload. */
+/**
+ * A switch "Auto-refresh · 30 s" that calls `refresh` every few seconds (Settings > Appearance) while `node`
+ * is on the page. Each user can pause it (remembered in this browser). A refresh is skipped while the tab is
+ * hidden, a window is open or series are unfolded, so nothing changes under the user's mouse.
+ */
+function autoRefresh(key, node, refresh) {
+  const seconds = Math.max(5, Number(simpleOptions().refresh_seconds) || 30);
+  const storageKey = `portal.autorefresh.${key}`;
+  let on = true;
+  try { on = localStorage.getItem(storageKey) !== "off"; } catch { /* private window: on */ }
+  const button = h("button", { type: "button", class: "chip-toggle auto-refresh has-tip", "data-name": "auto-refresh" }, `Auto-refresh · ${seconds} s`);
+  const show = () => {
+    button.setAttribute("aria-pressed", String(on));
+    button.dataset.tip = on ? `The list refreshes itself every ${seconds} seconds. Click to pause.` : "Paused. Click to refresh the list automatically again.";
+  };
+  button.addEventListener("click", () => {
+    on = !on;
+    try { localStorage.setItem(storageKey, on ? "on" : "off"); } catch { /* not remembered */ }
+    show();
+  });
+  show();
+  const timer = setInterval(() => {
+    if (!button.isConnected || !node.isConnected) { clearInterval(timer); return; }
+    if (!on || document.hidden || document.querySelector("dialog[open]")) return;
+    if (node.querySelector("tr.series-row:not([hidden])")) return;
+    refresh();
+  }, seconds * 1000);
+  return button;
+}
+
 function buildHomeView() {
   const options = simpleOptions();
   const parts = [];
@@ -633,7 +687,9 @@ function buildHomeView() {
     const section = h("section", { class: "recent", "aria-labelledby": "recent-title" },
       h("div", { class: "recent-head" },
         h("h2", { id: "recent-title" }, options.recent_title || "Recent studies"),
-        actionButton("button", "refresh", "Refresh", "Refresh the recent studies", { class: "btn small", type: "button", onclick: load })),
+        h("div", { class: "head-actions" },
+          options.recent_auto_refresh ? autoRefresh("recent", body, () => { load(); refreshTotalStudies(true); }) : null,
+          actionButton("button", "refresh", "Refresh", "Refresh the recent studies", { class: "btn small", type: "button", onclick: load }))),
       body);
     reloadRecentStudies = () => { if (section.isConnected) load(); };
     load();
@@ -670,19 +726,23 @@ function studyCard(study) {
 /** Details of one study (opened from a card): who, when, what, the actions and the series. */
 function openStudyDialog(study) {
   const seriesSlot = h("div", null, h("div", { class: "loading" }, "Loading series..."));
-  const demographics = [study.patient_sex, formatDicomDate(study.patient_birth_date)].filter(Boolean).join(", ");
   const detail = (label, value) => (value ? [h("dt", null, label), h("dd", null, value)] : null);
   const labelsSlot = h("dd", null, labelChips(study.labels));
+  const values = {
+    patient_id: study.patient_id, birth_date: formatDicomDate(study.patient_birth_date), sex: study.patient_sex,
+    other_ids: study.other_patient_ids, study_date: formatDicomDate(study.study_date), description: study.study_description,
+    accession: study.accession_number, referring: study.referring_physician ? formatName(study.referring_physician) : "",
+    requesting: study.requesting_physician ? formatName(study.requesting_physician) : "", institution: study.institution,
+    modalities: study.modalities.length ? h("span", null, study.modalities.map(chip)) : null,
+    series: `${study.series_count ?? "?"} series${study.instances_count != null ? `, ${study.instances_count} images` : ""}`,
+    study_uid: study.study_instance_uid,
+  };
+  const fields = (opts().detail_fields || ["patient_id", "sex", "birth_date", "study_date", "description", "modalities", "series", "labels"])
+    .filter((k) => k !== "labels" || labelsOn());
   const dialog = h("dialog", { class: "study-dialog" }, h("div", { class: "dialog-form" },
     h("h2", null, formatName(study.patient_name)),
     h("dl", { class: "share-details" },
-      detail("Patient ID", study.patient_id),
-      detail("Sex, birth date", demographics),
-      detail("Study date", formatDicomDate(study.study_date)),
-      detail("Description", study.study_description),
-      detail("Modalities", study.modalities.length ? h("span", null, study.modalities.map(chip)) : null),
-      detail("Content", `${study.series_count ?? "?"} series${study.instances_count != null ? `, ${study.instances_count} images` : ""}`),
-      [h("dt", null, "Labels"), labelsSlot]),
+      fields.map((k) => (k === "labels" ? [h("dt", null, "Labels"), labelsSlot] : detail(STUDY_DETAIL_TITLES[k], values[k])))),
     h("div", { class: "actions" }, studyActions(study, () => labelsSlot.replaceChildren(...[labelChips(study.labels)].flat()))),
     seriesSlot,
     h("div", { class: "dialog-actions" }, h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Close"))));
@@ -691,7 +751,7 @@ function openStudyDialog(study) {
   dialog.showModal();
 
   api("GET", `/api/studies/${study.id}/series`)
-    .then((list) => seriesSlot.replaceChildren(renderSeriesBox(list)))
+    .then((list) => seriesSlot.replaceChildren(renderSeriesBox(list, study)))
     .catch((e) => seriesSlot.replaceChildren(h("div", { class: "series-empty muted" }, e.message)));
 }
 
@@ -813,7 +873,7 @@ const searchMemory = { studies: {}, series: {} };
 
 /** Settings > Search & labels, as sent by the server: columns, search boxes, live search, endless lists, labels. */
 const searchOptions = () => (state.user && state.user.features && state.user.features.search) || {};
-const canEditLabels = () => !!searchOptions().can_edit_labels;
+const canEditLabels = () => opts().labels !== false && !!searchOptions().can_edit_labels;
 
 /**
  * Every search box the Studies search can offer; Settings > Search & labels chooses which ones are
@@ -845,10 +905,11 @@ const STUDY_SEARCH = {
   title: "Studies",
   endpoint: "/api/studies",
   get fields() {
-    return (searchOptions().fields || DEFAULT_STUDY_FIELDS).flatMap((key) => (STUDY_FIELDS[key] ? STUDY_FIELDS[key].controls : []));
+    return (searchOptions().fields || DEFAULT_STUDY_FIELDS).filter((key) => key !== "labels" || labelsOn())
+      .flatMap((key) => (STUDY_FIELDS[key] ? STUDY_FIELDS[key].controls : []));
   },
   get allControls() {
-    return [...Object.values(STUDY_FIELDS).flatMap((f) => f.controls), ...EXTRA_STUDY_CONTROLS];
+    return [...Object.entries(STUDY_FIELDS).filter(([key]) => key !== "labels" || labelsOn()).flatMap(([, f]) => f.controls), ...EXTRA_STUDY_CONTROLS];
   },
   defaultSort: { sort: "study_date", dir: "desc" },
   renderTable: renderStudiesTable,
@@ -1244,6 +1305,9 @@ function buildSearchView(cfg) {
       options.live ? h("span", { class: "muted" }, "Results update as you type.") : null));
 
   run(0); // show the most recent studies right away
+  // After a delete / modify / anonymize, the list searches again (same filters, first page).
+  const onChange = () => { if (results.isConnected) run(0); else window.removeEventListener("portal-archive-changed", onChange); };
+  window.addEventListener("portal-archive-changed", onChange);
   return h("div", { class: "view" },
     h("div", { class: "page-head" }, h("h1", null, cfg.title),
       actionButton("button", "link", "Copy link", "Copy a link to this search (with its filters)", {
@@ -1285,21 +1349,33 @@ const STUDY_COLUMNS = {
   series: { title: "Series / images", cell: (s) => h("td", null, `${s.series_count ?? "?"} series`, s.instances_count != null ? h("div", { class: "sub" }, `${s.instances_count} images`) : null) },
   labels: { title: "Labels", cell: (s) => h("td", { class: "labels-cell" }, labelChips(s.labels)) },
 };
+/** The fields the study window can show (Settings > Search & labels), and their titles. */
+const STUDY_DETAIL_TITLES = {
+  patient_id: "Patient ID", birth_date: "Birth date", sex: "Sex", other_ids: "Other patient IDs", study_date: "Study date",
+  description: "Description", accession: "Accession number", referring: "Referring physician", requesting: "Requesting physician",
+  institution: "Institution", modalities: "Modalities", series: "Content", labels: "Labels", study_uid: "StudyInstanceUID",
+};
 const DEFAULT_STUDY_COLUMNS = ["patient", "patient_id", "study_date", "description", "modalities", "series", "labels"];
-const studyColumnKeys = () => (searchOptions().columns || DEFAULT_STUDY_COLUMNS).filter((key) => STUDY_COLUMNS[key]);
-/** Number of cells in a study row: arrow, preview, the chosen columns, actions. */
-const studyColumnCount = () => 2 + (showThumbs() ? 1 : 0) + studyColumnKeys().length;
+const studyColumnKeys = () => (searchOptions().columns || DEFAULT_STUDY_COLUMNS).filter((key) => STUDY_COLUMNS[key] && (key !== "labels" || labelsOn()));
+/** Number of cells in a study row: tick box, arrow, preview, the chosen columns, actions. */
+const studyColumnCount = () => 2 + (bulkOn() ? 1 : 0) + (showThumbs() ? 1 : 0) + studyColumnKeys().length;
 
 /** The studies table (Search, and the home page). `sorting` makes the column titles sort the list. */
 function renderStudiesTable(studies, sorting = null) {
-  return h("div", { class: "table-wrap" },
+  const table = h("div", { class: "table-wrap" },
     h("table", { class: "data" },
       h("thead", null, h("tr", null,
+        bulkOn() ? h("th", { class: "pick-cell" }, pickAllBox()) : null,
         h("th", null, ""),
         showThumbs() ? h("th", null, "Preview") : null,
         studyColumnKeys().map((key) => columnHeader(STUDY_COLUMNS[key].title, STUDY_COLUMNS[key].sort, sorting)),
         h("th", { class: "num" }, "Actions"))),
       h("tbody", null, studies.map((s) => studyRows(s)))));
+  if (!bulkOn()) return table;
+  // With tick boxes: a bar above the table offers what can be done with the ticked studies.
+  const block = h("div", { class: "studies-block" });
+  block.append(buildBulkBar(block), table);
+  return block;
 }
 
 /** Two table rows per study: the study itself and a hidden row that will hold its series. */
@@ -1319,7 +1395,7 @@ function studyRows(study) {
       loaded = true;
       seriesCell.replaceChildren(h("div", { class: "loading" }, "Loading series..."));
       try {
-        seriesCell.replaceChildren(renderSeriesBox(await api("GET", `/api/studies/${study.id}/series`)));
+        seriesCell.replaceChildren(renderSeriesBox(await api("GET", `/api/studies/${study.id}/series`), study));
       } catch (e) {
         loaded = false; // allow a retry
         seriesCell.replaceChildren(h("div", { class: "series-empty muted" }, e.message));
@@ -1334,6 +1410,7 @@ function studyRows(study) {
     if (i >= 0) cells[i].replaceChildren(...[labelChips(study.labels)].flat());
   };
   const mainRow = h("tr", { class: "study" },
+    bulkOn() ? h("td", { class: "pick-cell" }, pickBox(study)) : null,
     h("td", null, twisty),
     showThumbs() ? h("td", { class: "thumb-cell" }, thumb("studies", study.id, study.modalities[0])) : null,
     cells,
@@ -1353,11 +1430,15 @@ function studyActions(study, onLabels = () => {}) {
     can("send") ? actionButton("button", "send", "Send to...", "Send to a DICOM node", { class: "btn small", type: "button", onclick: () => openSendDialog(study) }) : null,
     can("share") ? actionButton("button", "share", "Share...", "Share with somebody outside (link + password)", { class: "btn small", type: "button", onclick: () => openShareDialog(study) }) : null,
     can("download") ? downloadMenu("studies", study.id) : null,
+    can("visualize") && opts().instances && study.modalities.includes("DOC")
+      ? actionButton("button", "pdf", "PDF report", "Open the PDF report of this study", { class: "btn small", type: "button", onclick: (e) => openStudyPdf(study, e.currentTarget) })
+      : null,
+    studyManageMenu(study),
   ];
 }
 
 /** Small table with the series of one study (shown under the study row). */
-function renderSeriesBox(seriesList) {
+function renderSeriesBox(seriesList, study = null) {
   if (!seriesList.length) return h("div", { class: "series-empty muted" }, "This study contains no series.");
   return h("div", { class: "series-box" },
     h("table", { class: "data" },
@@ -1369,7 +1450,18 @@ function renderSeriesBox(seriesList) {
         h("td", null, s.description || dash()),
         h("td", null, s.body_part || dash()),
         h("td", { class: "num" }, s.instances_count),
-        h("td", null, h("div", { class: "actions" }, can("download") ? downloadMenu("series", s.id) : null)))))));
+        h("td", null, h("div", { class: "actions" }, seriesActions(s, study))))))));
+}
+
+/** Buttons of one series: its images and tags, the slide viewer, download, manage. */
+function seriesActions(s, study) {
+  return [
+    opts().instances && can("read") ? actionButton("button", "images", "Images", "The images of this series, their DICOM tags (and PDF reports)", { class: "btn small", type: "button", onclick: () => openInstancesDialog(s) }) : null,
+    can("visualize") && viewersOpt().wsi && s.modality === "SM"
+      ? actionButton("a", "viewers", "Slide viewer", "Open in the whole-slide viewer (microscopy)", { class: "btn small", href: `/wsi/app/viewer.html?series=${s.id}`, target: "_blank", rel: "noopener" }) : null,
+    can("download") ? downloadMenu("series", s.id) : null,
+    seriesManageMenu(s, study),
+  ];
 }
 
 
@@ -1404,7 +1496,9 @@ function seriesRow(s) {
     h("td", null, h("div", { class: "actions" }, [
       can("visualize") && study ? viewButtons(study) : null,
       study ? actionButton("button", "patient", "Other studies of this patient", "All the studies of this patient", { class: "btn small", type: "button", onclick: () => openPatientStudies(study) }) : null,
+      opts().instances ? actionButton("button", "images", "Images", "The images of this series and their DICOM tags", { class: "btn small", type: "button", onclick: () => openInstancesDialog(s) }) : null,
       can("download") ? downloadMenu("series", s.id) : null,
+      seriesManageMenu(s, study),
     ])));
 }
 
@@ -1453,12 +1547,14 @@ function viewButtons(study) {
     weasis.addEventListener("click", () => openInWeasis(study.study_instance_uid, weasis));
     buttons.push(weasis);
   }
-  if (hasOhif()) {
+  if (hasOhif() && (viewersOpt().ohif_modes || ["viewer"]).includes("viewer")) {
     buttons.push(actionButton("a", "ohif", "OHIF", "Open in the browser viewer (OHIF): new tab, nothing to install", {
       class: "btn small", href: ohifUrl(study.study_instance_uid), target: "_blank", rel: "noopener",
       title: "Open in the browser viewer (OHIF): new tab, nothing to install",
     }));
   }
+  const more = moreViewersMenu([study]);
+  if (more) buttons.push(more);
   return buttons;
 }
 
@@ -1472,14 +1568,17 @@ function downloadMenu(kind, id) {
     actionButton("summary", "download", "Download", kind === "series" ? "Download this series (ZIP)" : "Download the study (ZIP)", { class: "btn small" }),
     h("div", { class: "menu-list" },
       h("a", { class: "menu-item", href: `/api/${kind}/${id}/download`, onclick: closeMenu }, "ZIP", h("small", null, "DICOM files in folders")),
-      h("a", { class: "menu-item", href: `/api/${kind}/${id}/download?dicomdir=true`, onclick: closeMenu }, "ZIP with DICOMDIR", h("small", null, "Adds an index, like a CD/DVD"))));
+      h("a", { class: "menu-item", href: `/api/${kind}/${id}/download?dicomdir=true`, onclick: closeMenu }, "ZIP with DICOMDIR", h("small", null, "Adds an index, like a CD/DVD")),
+      kind === "series" && opts().nifti ? h("a", { class: "menu-item", href: `/api/series/${id}/nifti`, onclick: closeMenu }, "NIfTI", h("small", null, "One 3D volume file (.nii.gz)")) : null));
 }
 
 /**
  * Dialog to send a whole study to a remote DICOM node (an Orthanc "modality").
  * The transfer runs as an Orthanc job; follow it in the Transfers tab.
  */
-async function openSendDialog(study) {
+async function openSendDialog(studyOrList) {
+  const studies = [].concat(studyOrList);
+  const study = studies[0];
   let nodes;
   try {
     nodes = await api("GET", "/api/modalities");
@@ -1490,9 +1589,10 @@ async function openSendDialog(study) {
   }
 
   const error = h("div", { class: "form-error", role: "alert", hidden: true });
+  const kindName = { peer: " [Orthanc peer]", dicomweb: " [DICOMweb]" };
   const target = h("select", null, nodes.map((n) =>
-    h("option", { value: n.id }, [n.description ? `${n.description}: ${n.id}` : n.id, n.aet ? `  (${n.aet} at ${n.host}:${n.port})` : ""].join(""))));
-  const submit = h("button", { class: "btn primary", type: "submit" }, "Send study");
+    h("option", { value: n.id }, [n.description ? `${n.description}: ${n.id}` : n.id, n.aet ? `  (${n.aet} at ${n.host}:${n.port})` : n.url ? `  (${n.url})` : "", kindName[n.kind] || ""].join(""))));
+  const submit = h("button", { class: "btn primary", type: "submit" }, studies.length > 1 ? `Send ${studies.length} studies` : "Send study");
 
   const dialog = h("dialog", null, h("form", {
     onsubmit: async (event) => {
@@ -1500,7 +1600,12 @@ async function openSendDialog(study) {
       error.hidden = true;
       submit.disabled = true;
       try {
-        await api("POST", `/api/studies/${study.id}/send`, { target: target.value });
+        if (studies.length > 1) {
+          const r = await api("POST", "/api/send", { target: target.value, studies: studies.map((s) => s.id) });
+          if (r.errors.length) toast(`${r.errors.length} could not be sent: ${r.errors[0]}`, "error", 10000);
+        } else {
+          await api("POST", `/api/studies/${study.id}/send`, { target: target.value });
+        }
         dialog.close();
         toast(`Transfer to ${target.value} started. Follow it on the Transfers page.`, "info", 7000);
       } catch (e) {
@@ -1510,11 +1615,13 @@ async function openSendDialog(study) {
       }
     },
   },
-    h("h2", null, "Send study to a DICOM destination"),
-    h("p", null, h("b", null, formatName(study.patient_name)), " ", formatDicomDate(study.study_date), study.study_description ? `, ${study.study_description}` : ""),
+    h("h2", null, studies.length > 1 ? `Send ${studies.length} studies` : "Send study to a DICOM destination"),
+    studies.length > 1
+      ? h("ul", null, studies.slice(0, 8).map((s) => h("li", null, studyLine(s))), studies.length > 8 ? h("li", null, `and ${studies.length - 8} more`) : null)
+      : h("p", null, h("b", null, formatName(study.patient_name)), " ", formatDicomDate(study.study_date), study.study_description ? `, ${study.study_description}` : ""),
     error,
     h("label", null, "Destination", target),
-    h("p", { class: "muted" }, "Orthanc sends every image of the study to the chosen node using DICOM C-STORE."),
+    h("p", { class: "muted" }, "Orthanc sends every image to the chosen destination (DICOM C-STORE, or the Orthanc / DICOMweb protocol). Each study is one transfer."),
     h("div", { class: "dialog-actions" },
       h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Cancel"),
       submit)));
@@ -1917,14 +2024,16 @@ function buildTransfersView() {
   let nodes = new Map();
   const nodesLoaded = api("GET", "/api/modalities").then((list) => { nodes = new Map(list.map((n) => [n.id, n])); }).catch(() => {});
 
+  let polling = null; // the quick follow-up of a running transfer
   async function load() {
+    clearTimeout(polling);
     try {
       await nodesLoaded;
       const rows = await api("GET", "/api/transfers");
       container.replaceChildren(rows.length ? renderTransfers(rows) : h("div", { class: "empty" }, 'Nothing sent yet. Use "Send to..." on a study.'));
-      // Keep polling only while something is still in progress and this tab is visible.
+      // Follow a transfer closely while it is still in progress.
       if (rows.some((r) => ["Pending", "Running", "Retry"].includes(r.state))) {
-        setTimeout(() => { if (document.body.contains(container)) load(); }, 3000);
+        polling = setTimeout(() => { if (document.body.contains(container)) load(); }, 3000);
       }
     } catch (e) {
       container.replaceChildren(h("div", { class: "empty" }, e.message));
@@ -1950,6 +2059,8 @@ function buildTransfersView() {
     fill.style.width = `${r.progress}%`;
     const images = r.instances;
     const ran = r.runtime ? formatDuration(r.runtime) : "";
+    // The same words for both directions: sent to another system, or retrieved from it.
+    const retrieved = r.direction === "retrieve";
     let detail;
     if (r.state === "Pending") detail = "Waiting to start";
     else if (r.state === "Running" || r.state === "Retry") {
@@ -1957,9 +2068,10 @@ function buildTransfersView() {
       if (images) parts.push(`${Math.round((images * r.progress) / 100)} of ${images} images`);
       if (ran) parts.push(ran);
       if (r.runtime && r.progress > 0 && r.progress < 100) parts.push(`about ${formatDuration((r.runtime * (100 - r.progress)) / r.progress)} left`);
-      detail = parts.join(" · ") || "Sending";
-    } else if (r.state === "Success") detail = images ? `${images} images in ${ran || "a moment"}` : "Sent";
-    else if (r.state === "Failure") detail = images && r.failed ? `${r.failed} of ${images} images could not be sent` : "";
+      detail = parts.join(" · ") || (retrieved ? "Retrieving" : "Sending");
+    } else if (r.state === "Success") {
+      detail = images ? `${images} images ${retrieved ? "retrieved" : "sent"} in ${ran || "a moment"}` : (retrieved ? "Retrieved" : "Sent");
+    } else if (r.state === "Failure") detail = images && r.failed ? `${r.failed} of ${images} images could not be ${retrieved ? "retrieved" : "sent"}` : "";
     else if (r.state === "Unknown") detail = "Orthanc no longer remembers this transfer";
     else if (r.state === "Unavailable") detail = "Orthanc did not answer: trying again";
     const running = ["Pending", "Running", "Retry"].includes(r.state);
@@ -1974,8 +2086,13 @@ function buildTransfersView() {
       h("thead", null, h("tr", null, ["Started", "Study", "Destination", "By", "Progress", "State"].map((t) => h("th", null, t)))),
       h("tbody", null, rows.map((r) => h("tr", null,
         h("td", { class: "nowrap" }, formatTimestamp(r.ts)),
-        h("td", null, r.label.replaceAll(" | ", " - ")),
-        destinationCell(r.target),
+        h("td", null, r.label.replaceAll(" | ", " - "),
+          r.direction === "retrieve" && r.state === "Success" && r.study_uid
+            ? h("div", null, h("button", { class: "btn small", type: "button", onclick: () => openSearchWith("studies", { study_uid: r.study_uid }) }, "Open the study"))
+            : null),
+        r.direction === "retrieve"
+          ? h("td", null, h("span", { class: "chip" }, "from"), " ", destinationCell(r.target).firstChild || r.target)
+          : destinationCell(r.target),
         h("td", null, r.username),
         progressCell(r),
         h("td", null, h("span", { class: `chip state-${r.state.toLowerCase()}` }, r.state)))))));
@@ -1983,7 +2100,10 @@ function buildTransfersView() {
 
   load();
   return h("div", { class: "view" },
-    h("div", { class: "page-head" }, h("h1", null, "Transfers"), actionButton("button", "refresh", "Refresh", "Refresh the list", { class: "btn", type: "button", onclick: load })),
+    h("div", { class: "page-head" }, h("h1", null, "Transfers"),
+      h("div", { class: "head-actions" },
+        simpleOptions().transfers_auto_refresh ? autoRefresh("transfers", container, load) : null,
+        actionButton("button", "refresh", "Refresh", "Refresh the list", { class: "btn", type: "button", onclick: load }))),
     container);
 }
 
@@ -2278,13 +2398,18 @@ function emailOutcome(email) {
 }
 
 /** Dialog to invite somebody outside to look at a study (the "Share..." button of a study). */
-function openShareDialog(study) {
+function openShareDialog(studyOrList) {
+  const studies = [].concat(studyOrList);
+  const study = studies[0];
+  const several = studies.length > 1;
   const feature = state.user.features.share;
   const dialog = h("dialog", { class: "share-dialog" });
   dialog.addEventListener("close", () => dialog.remove());
   document.body.append(dialog);
   const close = h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Close");
-  const who = h("p", null, h("b", null, formatName(study.patient_name)), " ", formatDicomDate(study.study_date), study.study_description ? `, ${study.study_description}` : "");
+  const who = several
+    ? h("ul", null, studies.slice(0, 8).map((s) => h("li", null, studyLine(s))), studies.length > 8 ? h("li", null, `and ${studies.length - 8} more`) : null)
+    : h("p", null, h("b", null, formatName(study.patient_name)), " ", formatDicomDate(study.study_date), study.study_description ? `, ${study.study_description}` : "");
 
   /** Step 1: how long and how many downloads. */
   function showForm() {
@@ -2312,9 +2437,10 @@ function openShareDialog(study) {
         if (problem) { error.textContent = problem; error.hidden = false; return; }
         submit.disabled = true;
         try {
-          showResult(await api("POST", `/api/studies/${study.id}/share`, {
-            minutes: duration.minutes, downloads: Number(downloads.value), note: note.value, email: emailOptions.value,
-          }));
+          const body = { minutes: duration.minutes, downloads: Number(downloads.value), note: note.value, email: emailOptions.value };
+          showResult(several
+            ? await api("POST", "/api/shares", { ...body, studies: studies.map((s) => s.id) })
+            : await api("POST", `/api/studies/${study.id}/share`, body));
         } catch (e) {
           error.textContent = e.message;
           error.hidden = false;
@@ -2322,7 +2448,7 @@ function openShareDialog(study) {
         }
       },
     },
-      h("h2", null, "Share this study with somebody outside"),
+      h("h2", null, several ? `Share ${studies.length} studies with somebody outside (one link)` : "Share this study with somebody outside"),
       who, error,
       duration.node,
       h("label", null, `Downloads allowed as ZIP (0 = online viewing only, up to ${feature.max_downloads})`, downloads),
@@ -2595,6 +2721,8 @@ function helpSections() {
           can("upload") ? [helpIcon("upload"), " ", h("b", null, "Uploads"), ": add images to the archive and follow the uploads."] : null,
           can("send") ? [helpIcon("transfers"), " ", h("b", null, "Transfers"), ": follow the studies you sent to another system."] : null,
           can("share") ? [helpIcon("share"), " ", h("b", null, "Shares"), ": the links you created to show a study to someone outside."] : null,
+          opts().retrieve ? [helpIcon("retrieve"), " ", h("b", null, "Retrieve"), ": find studies on another system and bring them here."] : null,
+          opts().worklists ? [helpIcon("worklist"), " ", h("b", null, "Worklists"), ": the examinations the scanners have to do."] : null,
           [helpIcon("help"), " ", h("b", null, "Help"), ": this page."],
         ),
         h("p", { class: "muted" }, "You only see the parts your account gives access to. If you need something that is not here, ask your administrator."),
@@ -2604,7 +2732,8 @@ function helpSections() {
       id: "home", title: "The home page", show: true,
       body: () => [
         h("p", null, `It lists the ${f.simplified && f.simplified.recent_count ? f.simplified.recent_count : ""} most recent studies, ${f.simplified && f.simplified.recent_order === "study_date" ? "the newest examination dates" : "the last ones received by the archive"} first. `,
-          helpButton("refresh", "Refresh"), " updates the list."),
+          helpButton("refresh", "Refresh"), " updates the list.",
+          f.simplified && f.simplified.recent_auto_refresh ? ` It also refreshes itself every ${f.simplified.refresh_seconds} seconds; click "Auto-refresh" next to it to pause that (or start it again). It waits while a window is open or the series of a study are shown.` : ""),
         can("read") ? h("p", null, "Each study has the same buttons as on the Search page (see below). The small arrow ▸ at the start of a row shows the series of the study.") : null,
         can("upload") ? h("p", null, "At the bottom, drag files or a whole folder onto the upload area to add them to the archive (see Uploading images).") : null,
       ],
@@ -2630,13 +2759,13 @@ function helpSections() {
           "Rest the mouse on a modality tag (CT, MR...) to see its full name.",
           [helpButton("patient", "Other studies of this patient"), ": every study of the same patient, in the Search page."],
           [helpButton("link", "Copy link"), " (next to the title): a link to this search with its filters, to bookmark or to send to a colleague."],
-          [h("b", null, "Labels"), ": click labels to see only the studies that have them (several: any or all of them), or ", h("b", null, "Without labels"), "."],
+          labelsOn() ? [h("b", null, "Labels"), ": click labels to see only the studies that have them (several: any or all of them), or ", h("b", null, "Without labels"), "."] : null,
           [h("b", null, "Series"), " (the second tab of the Search page): the same search, one row per series, with a ", h("b", null, "Body part"), " box (CHEST, KNEE...)."],
         ),
       ],
     },
     {
-      id: "labels", title: "Labels", show: can("read") && canEditLabels(),
+      id: "labels", title: "Labels", show: can("read") && labelsOn() && canEditLabels(),
       body: () => [
         h("p", null, "Labels are short words you put on studies to find them again: urgent, insurance, second-opinion, teaching... Everyone sees them, in the Labels column and in the study window, and can search by them."),
         ul(
@@ -2652,7 +2781,60 @@ function helpSections() {
         ul(
           hasOhif() ? [helpButton("ohif", "OHIF"), ": opens the study in a new tab of your browser. Nothing to install; works on any computer of the practice."] : null,
           hasWeasis() ? [helpButton("weasis", "Weasis"), ": opens the study in the Weasis program, which must be installed on your computer. The first time, your browser asks whether it may open Weasis: allow it."] : null,
+          viewerLinks([{ id: "x", study_instance_uid: "1" }]).some(([t]) => t !== "OHIF")
+            ? [helpButton("viewers", "More viewers"), ": the other viewers of this portal (", viewerLinks([{ id: "x", study_instance_uid: "1" }]).map(([t]) => t).filter((t) => t !== "OHIF").join(", "), "), each in a new tab."] : null,
         ),
+      ],
+    },
+    {
+      id: "several", title: "Working on several studies at once", show: can("read") && bulkOn(),
+      body: () => [
+        h("p", null, "Tick the box at the start of each study (or the box in the title row for the whole page). A bar appears above the list with what you can do with them:"),
+        ul(
+          can("visualize") ? [h("b", null, "Open together"), ": the studies side by side in the viewer, to compare them."] : null,
+          can("download") ? [h("b", null, "Download (one ZIP)"), ": every ticked study in one file."] : null,
+          can("send") ? [h("b", null, "Send..."), ": to another system, one transfer per study."] : null,
+          can("share") && opts().multi_share ? [h("b", null, "Share (one link)..."), ": one link and one password for all of them."] : null,
+          canEditLabels() ? [h("b", null, "Labels..."), ": put a label on all of them, or take it off."] : null,
+          opts().delete ? [h("b", null, "Delete..."), ": removes them for good, after a confirmation."] : null,
+        ),
+      ],
+    },
+    {
+      id: "images", title: "Images, DICOM tags and reports", show: can("read") && !!opts().instances,
+      body: () => [
+        h("p", null, helpButton("images", "Images"), " on a series (open a study's series with ▸) lists its images. Choose one to see it, its ", h("b", null, "DICOM tags"),
+          " (every piece of information stored in the file, with a filter box)", can("download") && opts().single_file ? ", or to download that one file" : "", "."),
+        can("visualize") ? h("p", null, helpButton("pdf", "PDF report"), " on a study that contains a report (a DOC series) opens the PDF in a new tab.") : null,
+      ],
+    },
+    {
+      id: "manage", title: "Changing or deleting a study", show: !!(opts().modify || opts().anonymize || opts().add_series || opts().delete),
+      body: () => [
+        h("p", null, helpButton("more", "Manage"), " on a study (and on a series) offers:"),
+        ul(
+          opts().modify ? [h("b", null, "Change details"), ": correct the patient name, ID, birth date, description... The images are rewritten; tick \"Keep the DICOM identifiers\" if the study must stay the same study for other systems."] : null,
+          opts().modify ? [h("b", null, "Move"), ": a study to another patient (for a study filed under the wrong patient), a series to another study or to a new one."] : null,
+          opts().anonymize ? [h("b", null, "Anonymize"), ": a copy without the patient's identity (for teaching, research...). Give it a name and ID, or let the portal make them up."] : null,
+          opts().add_series ? [h("b", null, "Add a series"), ": PDF files (reports) or pictures (PNG, JPEG) become a new series of the study."] : null,
+          opts().delete ? [h("b", null, "Delete"), ": removes the study, series or image for good. There is no undo."] : null,
+        ),
+        h("p", { class: "muted" }, "These changes run in the background: a message says when they are done, and the lists update. Every change is recorded in the audit log."),
+      ],
+    },
+    {
+      id: "retrieve", title: "Bringing in studies from another system", show: !!opts().retrieve,
+      body: () => [
+        h("p", null, "On the ", helpIcon("retrieve"), " ", h("b", null, "Retrieve"), " page, choose the other system (another archive, a scanner...), fill in a name, an ID, an accession number or dates, and press ", h("b", null, "Search there"), "."),
+        h("p", null, h("b", null, "Retrieve"), " brings a study into this archive; follow it on the Transfers page, which then offers ", h("b", null, "Open the study"), ". Studies that are already here say so and can be opened at once."),
+      ],
+    },
+    {
+      id: "worklists", title: "Worklists", show: !!opts().worklists,
+      body: () => [
+        h("p", null, "The ", helpIcon("worklist"), " ", h("b", null, "Worklists"), " page lists the examinations the scanners see when they ask for their worklist: patient, modality, date and time, description. ",
+          h("b", null, "Add a worklist"), " creates one; the buttons of a row change or delete it."),
+        h("p", { class: "muted" }, "Type the patient name as DOE^JANE (family name, ^, given name), like the scanners expect."),
       ],
     },
     {
@@ -2675,6 +2857,7 @@ function helpSections() {
           "Follow it on the ", helpIcon("transfers"), " ", h("b", null, "Transfers"), " page",
           ": while it runs it shows the percentage, how many images were sent, how long it has been running and about how long is left (the list updates itself); then how many images were sent, or why it failed."),
         h("p", null, "Rest the mouse on the name of a destination (for example \"ris\") to see what it is and where it is."),
+        f.simplified && f.simplified.transfers_auto_refresh ? h("p", null, `The Transfers page also refreshes itself every ${f.simplified.refresh_seconds} seconds, to show transfers started by colleagues; "Auto-refresh" next to Refresh pauses it.`) : null,
       ],
     },
     {
@@ -2847,8 +3030,49 @@ const SETTINGS_FIELDS = {
   labels: [
     { key: "available_labels", label: "Allowed labels", type: "list", wide: true, placeholder: "urgent, insurance, second-opinion, teaching",
       hint: "Separate them with commas. Empty = staff may create any label. Letters, digits, - and _ only. Labels already on studies can always be taken off." },
+    { key: "labels_enabled", label: "Use labels", type: "checkbox", wide: true,
+      hint: "Untick to hide labels everywhere: no Labels column, filter, button or Help section (the labels stay in Orthanc)." },
     { key: "label_counts", label: "Show how many studies have each label", type: "checkbox", wide: true,
       hint: "Orthanc counts them each time the labels are shown: switch it off if that is slow on a very large archive." },
+  ],
+  features: [
+    { key: "bulk_actions", label: "Tick boxes on the studies lists, to act on several studies at once", type: "checkbox", wide: true,
+      hint: "Download them in one ZIP, send them, share them with one link, put a label on them, open them together, delete them: what each person may do." },
+    { key: "multi_study_shares", label: "One share link for several studies", type: "checkbox", wide: true },
+    { key: "instance_browser", label: "Images, DICOM tags and PDF reports", type: "checkbox", wide: true,
+      hint: "An Images button on each series: the list of images, a picture of each, all their DICOM tags; and a PDF button on studies that contain a report." },
+    { key: "single_file_download", label: "Download one image (a single DICOM file)", type: "checkbox", wide: true, hint: "Needs the download permission." },
+    { key: "nifti_export", label: "Download a series as NIfTI", type: "checkbox", wide: true, hint: "Needs Orthanc's neuro plugin." },
+    { key: "download_name_template", label: "Name of downloaded ZIP files", maxlength: 120, placeholder: "{patient_id}_{study_date}_{id}",
+      hint: "With {patient_id}, {patient_name}, {study_date}, {description}, {accession}, {modality} and {id} (the start of Orthanc's id)." },
+    { key: "allow_delete", label: "Delete studies, series and images", type: "checkbox", wide: true,
+      hint: "For people with the delete permission (and administrators). Every deletion is in the audit log. It cannot be undone." },
+    { key: "allow_modify", label: "Change patient, study and series details; move studies and series", type: "checkbox", wide: true,
+      hint: "For people with the edit permission. Moves a study to another patient, a series to another (or a new) study." },
+    { key: "allow_anonymize", label: "Anonymize studies and series", type: "checkbox", wide: true, hint: "Edit permission. Makes an anonymized copy (or replaces the original)." },
+    { key: "allow_add_series", label: "Add a series to a study (PDF files, pictures)", type: "checkbox", wide: true, hint: "Edit permission." },
+    { key: "send_to_peers", label: "Send to the other Orthanc servers (Orthanc peers)", type: "checkbox", wide: true, hint: "As configured in Orthanc (OrthancPeers)." },
+    { key: "send_to_dicomweb", label: "Send to DICOMweb servers", type: "checkbox", wide: true, hint: "As configured in Orthanc's DICOMweb plugin (DicomWeb.Servers)." },
+    { key: "query_retrieve", label: "Retrieve: search other systems and bring studies in", type: "checkbox", wide: true,
+      hint: "A Retrieve page for people with the retrieve permission: search a DICOM node (C-FIND / C-MOVE) or a DICOMweb server, then bring the study here." },
+    { key: "worklists_enabled", label: "Worklists (what the scanners have to do)", type: "checkbox", wide: true,
+      hint: "A Worklists page for people with the worklists permission. Needs Orthanc 1.12.10+ with the worklists plugin and \"SaveInOrthancDatabase\": true." },
+    { key: "jobs_page", label: "Configuration > Jobs: every Orthanc job", type: "checkbox", wide: true },
+    { key: "system_page", label: "Configuration > System: Orthanc's version, storage, plugins, log level, metrics", type: "checkbox", wide: true },
+    { key: "raw_api", label: "System: read Orthanc's REST API (GET only)", type: "checkbox", wide: true, hint: "For troubleshooting. Never files; each read is in the audit log." },
+  ],
+  moreviewers: [
+    { key: "stone_viewer", label: "Stone Web Viewer", type: "select", options: [["auto", "Automatic (when Orthanc has the plugin)"], ["on", "Always"], ["off", "Never"]] },
+    { key: "volview_viewer", label: "VolView (3D)", type: "select", options: [["auto", "Automatic (when Orthanc has the plugin)"], ["on", "Always"], ["off", "Never"]], hint: "Opens a downloaded copy of the study: needs the download permission." },
+    { key: "wsi_viewer", label: "Whole-slide viewer (microscopy, SM series)", type: "select", options: [["auto", "Automatic (when Orthanc has the plugin)"], ["on", "Always"], ["off", "Never"]] },
+    { key: "meddream_url", label: "MedDream address (optional)", placeholder: "https://meddream.example.com/?study={study_uid}", wide: true,
+      hint: "A MedDream viewer of your own: its address with {study_uid} where the study goes. Empty = no MedDream button." },
+  ],
+  formatting: [
+    { key: "date_format", label: "Dates", type: "select", options: [["iso", "2024-05-17"], ["dmy", "17/05/2024"], ["mdy", "05/17/2024"], ["dmy_dots", "17.05.2024"], ["long", "17 May 2024"]] },
+    { key: "name_format", label: "Patient names", type: "select", options: [["last_first", "DOE, JOHN"], ["first_last", "JOHN DOE"], ["dicom", "DOE^JOHN (as stored)"]] },
+    { key: "custom_css", label: "Custom CSS (advanced)", type: "textarea", wide: true, maxlength: 50000, rows: 6, placeholder: ".simple-head { border-bottom: 3px solid #c00; }",
+      hint: "Extra style rules for the portal and the invitation page. No @import or url(...): everything stays on this server." },
   ],
   simplified: [
     { key: "simplified_recent_count", label: "Recent studies on the home page", type: "number", min: 1, max: 100 },
@@ -2859,6 +3083,9 @@ const SETTINGS_FIELDS = {
     { key: "simplified_upload_text", label: "Text of the upload area", placeholder: "Drag a file to upload it", maxlength: 120 },
     { key: "simplified_show_total", label: "Show the total number of studies in the header", type: "checkbox", wide: true },
     { key: "simplified_show_labels", label: "Write the name under each icon", type: "checkbox", wide: true, hint: "Otherwise the name pops up when the mouse rests on an icon." },
+    { key: "auto_refresh_seconds", label: "Auto-refresh every (seconds)", type: "number", min: 5, max: 3600, hint: "30 seconds by default. Each user can pause it on the page." },
+    { key: "recent_auto_refresh", label: "Refresh the recent studies automatically", type: "checkbox", wide: true },
+    { key: "transfers_auto_refresh", label: "Refresh the Transfers page automatically", type: "checkbox", wide: true, hint: "While a transfer is running, the page follows it every 3 seconds anyway." },
   ],
 };
 
@@ -3058,18 +3285,22 @@ function buildModalityButtonsEditor(buttons, defaults) {
  */
 const SETTINGS_TABS = [
   { id: "general", label: "General", sections: ["branding", "viewers"] },
-  { id: "appearance", label: "Appearance", sections: ["theme", "simplified"] },
+  { id: "appearance", label: "Appearance", sections: ["theme", "simplified", "formatting"] },
   { id: "search", label: "Search & labels", sections: ["search", "lists", "labels"] },
+  { id: "features", label: "Features", sections: ["features", "moreviewers"] },
   { id: "orthanc", label: "Orthanc", sections: ["orthanc"] },
   { id: "network", label: "Network & sharing", sections: ["network", "sharing", "email"] },
   { id: "security", label: "Security & roles", sections: ["security", "roles"] },
   { id: "users", label: "Users", build: buildUsersView },
   { id: "nodes", label: "DICOM nodes", build: buildNodesView },
   { id: "audit", label: "Audit log", build: buildAuditView },
+  { id: "jobs", label: "Jobs", build: buildJobsView, when: () => !!opts().jobs_page },
+  { id: "system", label: "System", build: buildSystemView, when: () => !!opts().system_page },
 ];
 
 /** The "Settings" tab: the complete configuration of the portal, organised in tabs. */
 function buildSettingsView() {
+  const tabs = SETTINGS_TABS.filter((t) => !t.when || t.when());
   let doc = null; // { settings, listeners, defaults, permissions } from the server
   const noticeSlot = h("div", { class: "notice", role: "status", hidden: true });
   const tabBar = h("div", { class: "subtabs", role: "tablist", "aria-label": "Settings" });
@@ -3078,14 +3309,14 @@ function buildSettingsView() {
   const view = h("div", { class: "view" },
     h("div", { class: "page-head" }, h("h1", null, "Settings")), noticeSlot, tabBar, formHost, screenHost);
 
-  if (!SETTINGS_TABS.some((t) => t.id === state.settingsTab)) state.settingsTab = SETTINGS_TABS[0].id;
+  if (!tabs.some((t) => t.id === state.settingsTab)) state.settingsTab = tabs[0].id;
 
   /**
    * Shows the current tab. Form tabs only hide the other sections, so values typed in one
    * tab are kept (and saved) when switching to another. The other screens are rebuilt each
    * time they are opened, so they always show fresh data.
    */
-  const currentTab = () => SETTINGS_TABS.find((t) => t.id === state.settingsTab);
+  const currentTab = () => tabs.find((t) => t.id === state.settingsTab);
 
   /** Shows only the form sections of the current tab (the whole form is hidden on the other screens). */
   function showSections() {
@@ -3111,17 +3342,17 @@ function buildSettingsView() {
     const keys = { ArrowLeft: -1, ArrowRight: 1, Home: "first", End: "last" };
     if (!(event.key in keys)) return;
     event.preventDefault();
-    const index = SETTINGS_TABS.findIndex((t) => t.id === state.settingsTab);
+    const index = tabs.findIndex((t) => t.id === state.settingsTab);
     const step = keys[event.key];
-    const next = step === "first" ? 0 : step === "last" ? SETTINGS_TABS.length - 1 : (index + step + SETTINGS_TABS.length) % SETTINGS_TABS.length;
-    state.settingsTab = SETTINGS_TABS[next].id;
+    const next = step === "first" ? 0 : step === "last" ? tabs.length - 1 : (index + step + tabs.length) % tabs.length;
+    state.settingsTab = tabs[next].id;
     showTab();
     tabBar.querySelector(`[data-tab="${state.settingsTab}"]`).focus();
   });
 
-  SETTINGS_TABS.forEach((t, i) => {
+  tabs.forEach((t, i) => {
     // A thin divider between the settings form and the separate screens.
-    if (i > 0 && t.build && !SETTINGS_TABS[i - 1].build) tabBar.append(h("span", { class: "subtabs-divider", "aria-hidden": "true" }));
+    if (i > 0 && t.build && !tabs[i - 1].build) tabBar.append(h("span", { class: "subtabs-divider", "aria-hidden": "true" }));
     tabBar.append(h("button", {
       type: "button", role: "tab", "data-tab": t.id,
       onclick: () => { state.settingsTab = t.id; showTab(); },
@@ -3160,7 +3391,7 @@ function buildSettingsView() {
         return h("div", { class: def.wide ? "setting wide" : "setting" }, h("label", null, def.label, area), def.hint ? h("p", { class: "hint" }, def.hint) : null);
       }
       if (def.type === "textarea") {
-        input = h("textarea", { rows: 3, maxlength: 500 }, value);
+        input = h("textarea", { rows: def.rows || 3, maxlength: def.maxlength || 500, placeholder: def.placeholder }, value);
       } else if (def.type === "select") {
         input = h("select", null, def.options.map(([v, text]) => h("option", { value: v, selected: v === value }, text)));
       } else if (def.type === "checkbox") {
@@ -3173,7 +3404,7 @@ function buildSettingsView() {
       return h("div", { class: def.wide ? "setting wide" : "setting" }, control, def.hint ? h("p", { class: "hint" }, def.hint) : null);
     };
 
-    /** A titled card of the form. `id` says which tab shows it (SETTINGS_TABS). */
+    /** A titled card of the form. `id` says which tab shows it (tabs). */
     const section = (id, title, intro, ...children) => h("section", { class: "panel settings-section", "data-section": id },
       h("h2", null, title), intro ? h("p", { class: "muted" }, intro) : null, h("div", { class: "settings-grid" }, children));
 
@@ -3293,6 +3524,8 @@ function buildSettingsView() {
     const modalityEditor = buildModalityButtonsEditor(s.modality_buttons, doc.defaults.modality_buttons);
     const columnsEditor = buildPickList("columns", Object.entries(STUDY_COLUMNS).map(([k, c]) => [k, c.title]), s.study_columns, doc.defaults.study_columns);
     const fieldsEditor = buildPickList("search boxes", Object.entries(STUDY_FIELDS).map(([k, f]) => [k, f.title]), s.study_search_fields, doc.defaults.study_search_fields);
+    const detailEditor = buildPickList("fields", Object.entries(STUDY_DETAIL_TITLES), s.study_detail_fields || [], doc.defaults.study_detail_fields || []);
+    const ohifModesEditor = buildPickList("modes", Object.entries(OHIF_MODES).map(([k, [title]]) => [k, title]), s.ohif_modes || ["viewer"], ["viewer"]);
 
     // Docker (LISTENERS_FROM_ENV): the addresses must match the published ports, so they are
     // set in the .env file of docker-compose and only shown here.
@@ -3337,6 +3570,8 @@ function buildSettingsView() {
         body.modality_buttons = modalityEditor.get();
         body.study_columns = columnsEditor.get();
         body.study_search_fields = fieldsEditor.get();
+        body.study_detail_fields = detailEditor.get();
+        body.ohif_modes = ohifModesEditor.get();
         if (smtpPassword.value) body.smtp_password = smtpPassword.value;
         if (clearSmtpPassword.checked) body.clear_smtp_password = true;
         if (withoutAccount()) {
@@ -3373,6 +3608,7 @@ function buildSettingsView() {
       section("lists", "Studies lists and search", "Which columns the studies tables show (Search and home page), which boxes the Studies search offers, in which order, and how searching and paging behave. A column with its title underlined can be sorted by clicking it.",
         h("div", { class: "setting" }, h("span", { class: "field-label" }, "Columns of the studies tables"), columnsEditor.node),
         h("div", { class: "setting" }, h("span", { class: "field-label" }, "Boxes of the Studies search"), fieldsEditor.node),
+        h("div", { class: "setting" }, h("span", { class: "field-label" }, "Fields of the study window (a click on a card)"), detailEditor.node),
         SETTINGS_FIELDS.lists.map(field)),
       section("labels", "Labels", "Short words staff put on studies to find them again (urgent, insurance, teaching...). Everyone who can search sees them and can search by them; people with the labels permission (and administrators) put them on and take them off. They are Orthanc's own labels.",
         SETTINGS_FIELDS.labels.map(field)),
@@ -3380,6 +3616,13 @@ function buildSettingsView() {
         themeFields),
       section("simplified", "Home page and icons", "The portal shows the logo, the practice name and the total of studies at the top, a column of icons (Home, Search, Shares, Uploads, Transfers, Help, Configuration, Log out) on the left, and a home page with the most recent studies and an area to drop files into. Each person sees only the icons their permissions allow.",
         SETTINGS_FIELDS.simplified.map(field)),
+      section("formatting", "Dates, names and style", "How dates and patient names are written everywhere (also on the invitation page), and extra style rules.",
+        SETTINGS_FIELDS.formatting.map(field)),
+      section("features", "Optional features", "Switch on only what your practice needs. Each feature also needs its permission (Security & roles, Users): delete, edit, retrieve, worklists... Administrators may use all of them.",
+        SETTINGS_FIELDS.features.map(field)),
+      section("moreviewers", "More viewers", "Viewers of Orthanc's plugins, offered in a \"More viewers\" menu next to OHIF, and the OHIF modes. Several ticked studies can be opened together in OHIF and Stone.",
+        SETTINGS_FIELDS.moreviewers.map(field),
+        h("div", { class: "setting" }, h("span", { class: "field-label" }, "OHIF modes offered"), ohifModesEditor.node)),
       section("orthanc", "Orthanc connection", "The PACS this portal works with. Saved changes apply immediately, without restarting.",
         urlField, modeField, userField, passwordField,
         h("div", { class: "setting wide" }, testButton, testBox)),
@@ -3391,7 +3634,7 @@ function buildSettingsView() {
       section("roles", "Roles", "Shortcuts that pre-tick permissions when you create or edit a user (Users tab). Users keep their own permissions: changing a role does not change existing users.", rolesEditor.node),
       h("div", { class: "settings-actions" },
         save,
-        h("span", { class: "muted" }, "Saves the General, Appearance, Search & labels, Orthanc, Network & sharing and Security & roles tabs together.")));
+        h("span", { class: "muted" }, "Saves the General, Appearance, Search & labels, Features, Orthanc, Network & sharing and Security & roles tabs together.")));
 
     formHost.replaceChildren(form);
     showNotices(notices);
@@ -3503,6 +3746,700 @@ function openNodeDialog(node, reload) {
   dialog.addEventListener("close", () => dialog.remove());
   document.body.append(dialog);
   dialog.showModal();
+}
+
+/* ====================================================================
+   9b. OPTIONAL FEATURES (Settings > Features)
+   Each part shows only when an administrator switched it on AND the user may use it (the
+   server sends both in features.options; it enforces them too).
+   ==================================================================== */
+
+/** The optional features of this user (features.options), the other viewers (features.viewers). */
+const opts = () => (state.user && state.user.features && state.user.features.options) || {};
+const viewersOpt = () => (state.user && state.user.features && state.user.features.viewers) || {};
+/** Labels can be switched off altogether (Settings > Search & labels). */
+const labelsOn = () => opts().labels !== false;
+
+/** A small "..." menu (details element) of a study or series: `items` = [label, onclick, danger?]. */
+function actionMenu(iconName, name, tip, items) {
+  const list = items.filter(Boolean);
+  if (!list.length) return null;
+  return h("details", { class: "menu" },
+    actionButton("summary", iconName, name, tip, { class: "btn small" }),
+    h("div", { class: "menu-list" }, list.map(([label, onclick, danger]) => h("button", {
+      type: "button", class: danger ? "menu-item danger-text" : "menu-item",
+      onclick: (event) => { closeMenu(event); onclick(); },
+    }, label))));
+}
+
+/** Something changed in the archive (deleted, modified...): the lists on the page search again. */
+function archiveChanged() {
+  if (typeof reloadRecentStudies === "function") reloadRecentStudies();
+  window.dispatchEvent(new Event("portal-archive-changed"));
+  totalStudies.at = 0;
+  refreshTotalStudies(true);
+}
+
+/**
+ * Follows an Orthanc job (modify, anonymize...) until it ends, then says so and refreshes the
+ * lists. Orthanc does the work in the background: leaving the page does not stop it.
+ */
+async function followJob(jobId, what) {
+  toast(`${what}: started. It continues even if you leave the page.`, "info", 5000);
+  for (let i = 0; i < 600; i++) {
+    await new Promise((r) => setTimeout(r, i < 5 ? 1000 : 3000));
+    let job;
+    try { job = await api("GET", `/api/jobs/${encodeURIComponent(jobId)}`); } catch (e) { toastError(e); return; }
+    if (job.state === "Success") { toast(`${what}: done.`, "info", 6000); archiveChanged(); return; }
+    if (job.state === "Failure") { toast(`${what} failed: ${job.error || "see the Jobs page"}`, "error", 10000); return; }
+  }
+}
+
+/** A simple window with a form: `fields` are nodes, `submit(close)` does the work. */
+function formDialog(title, intro, fields, submitLabel, submit, danger = false) {
+  const error = h("div", { class: "form-error", role: "alert", hidden: true });
+  const button = h("button", { class: danger ? "btn danger" : "btn primary", type: "submit" }, submitLabel);
+  const dialog = h("dialog", null, h("form", {
+    class: "dialog-form",
+    onsubmit: async (event) => {
+      event.preventDefault();
+      error.hidden = true;
+      button.disabled = true;
+      try { await submit(); dialog.close(); } catch (e) { error.textContent = e.message; error.hidden = false; button.disabled = false; }
+    },
+  },
+    h("h2", null, title), intro ? h("p", { class: "muted" }, intro) : null, error, fields,
+    h("div", { class: "dialog-actions" }, h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Cancel"), button)));
+  dialog.addEventListener("close", () => dialog.remove());
+  document.body.append(dialog);
+  dialog.showModal();
+  return dialog;
+}
+
+/** "DOE, JOHN 2024-05-17, CT CHEST": a study in one line. */
+const studyLine = (s) => [formatName(s.patient_name), formatDicomDate(s.study_date), s.study_description].filter(Boolean).join("  ");
+
+/* ---- More viewers ---- */
+
+/** The OHIF modes: button text and address (the study UIDs are added at the end). */
+const OHIF_MODES = {
+  viewer: ["OHIF", "/ohif/viewer?StudyInstanceUIDs="],
+  mpr: ["OHIF: MPR", "/ohif/viewer?hangingprotocolId=mpr&StudyInstanceUIDs="],
+  volume: ["OHIF: 3D volume", "/ohif/viewer?hangingprotocolId=mprAnd3DVolumeViewport&StudyInstanceUIDs="],
+  tmtv: ["OHIF: total metabolic tumor volume", "/ohif/tmtv?StudyInstanceUIDs="],
+  segmentation: ["OHIF: segmentation", "/ohif/segmentation?StudyInstanceUIDs="],
+  microscopy: ["OHIF: microscopy", "/ohif/microscopy?StudyInstanceUIDs="],
+};
+
+/**
+ * Every browser viewer that can open these studies: [text, address]. Several studies open
+ * together in OHIF and Stone; VolView and MedDream take one study.
+ */
+function viewerLinks(studies) {
+  const v = viewersOpt();
+  const uids = studies.map((s) => s.study_instance_uid).filter(Boolean);
+  if (!uids.length) return [];
+  const list = [];
+  if (hasOhif()) {
+    for (const mode of v.ohif_modes || ["viewer"]) {
+      if (OHIF_MODES[mode]) list.push([OHIF_MODES[mode][0], OHIF_MODES[mode][1] + uids.map(encodeURIComponent).join(",")]);
+    }
+  }
+  if (v.stone) list.push(["Stone Web Viewer", `/stone-webviewer/index.html?study=${uids.map(encodeURIComponent).join(",")}`]);
+  if (studies.length === 1) {
+    if (v.volview && can("download")) list.push(["VolView (3D)", `/volview/index.html?names=[archive.zip]&urls=[../api/studies/${studies[0].id}/download]`]);
+    if (v.meddream_url) list.push(["MedDream", v.meddream_url.replaceAll("{study_uid}", encodeURIComponent(uids[0]))]);
+  }
+  return list;
+}
+
+/** The viewers beyond the main OHIF button, as a menu of links (new tab each). */
+function moreViewersMenu(studies) {
+  const links = viewerLinks(studies).filter(([text]) => text !== "OHIF");
+  if (!links.length) return null;
+  return h("details", { class: "menu" },
+    actionButton("summary", "viewers", "More viewers", "Open in another viewer", { class: "btn small" }),
+    h("div", { class: "menu-list" }, links.map(([text, href]) =>
+      h("a", { class: "menu-item", href, target: "_blank", rel: "noopener", onclick: closeMenu }, text))));
+}
+
+/* ---- Bulk actions: tick several studies ---- */
+
+/** Can this user do anything with several studies at once? */
+function bulkOn() {
+  if (!opts().bulk) return false;
+  return can("download") || can("send") || can("share") || canEditLabels() || !!opts().delete || (can("visualize") && viewerLinks([{ study_instance_uid: "1" }]).length > 0);
+}
+
+/** The ticked studies of the list that contains `node`. */
+const pickedStudies = (block) => Array.from(block.querySelectorAll("input.pick:checked")).map((box) => box.study).filter(Boolean);
+
+/** The bar above a studies table: "3 selected" and what can be done with them. */
+function buildBulkBar(block) {
+  const bar = h("div", { class: "bulk-bar", hidden: true });
+  const draw = () => {
+    const picked = pickedStudies(block);
+    bar.hidden = picked.length === 0;
+    if (!picked.length) return;
+    const clear = () => { block.querySelectorAll("input.pick").forEach((b) => { b.checked = false; }); draw(); };
+    const viewers = can("visualize") ? viewerLinks(picked) : [];
+    bar.replaceChildren(
+      h("b", null, `${picked.length} selected`),
+      viewers.length ? h("details", { class: "menu" },
+        h("summary", { class: "btn small" }, "Open together"),
+        h("div", { class: "menu-list" }, viewers.map(([text, href]) => h("a", { class: "menu-item", href, target: "_blank", rel: "noopener", onclick: closeMenu }, text)))) : null,
+      can("download") ? h("details", { class: "menu" },
+        h("summary", { class: "btn small", "data-name": "Download selected" }, "Download (one ZIP)"),
+        h("div", { class: "menu-list" },
+          h("a", { class: "menu-item", href: `/api/download?studies=${picked.map((s) => s.id).join(",")}`, onclick: closeMenu }, "ZIP", h("small", null, "DICOM files in folders")),
+          h("a", { class: "menu-item", href: `/api/download?studies=${picked.map((s) => s.id).join(",")}&dicomdir=true`, onclick: closeMenu }, "ZIP with DICOMDIR", h("small", null, "Adds an index, like a CD/DVD")))) : null,
+      can("send") ? h("button", { class: "btn small", type: "button", onclick: () => openSendDialog(picked) }, "Send...") : null,
+      can("share") && (opts().multi_share || picked.length === 1) ? h("button", { class: "btn small", type: "button", onclick: () => openShareDialog(picked) }, "Share (one link)...") : null,
+      canEditLabels() ? h("button", { class: "btn small", type: "button", onclick: () => openBulkLabelDialog(picked) }, "Labels...") : null,
+      opts().delete ? h("button", { class: "btn small danger", type: "button", onclick: () => deleteStudies(picked, clear) }, "Delete...") : null,
+      h("button", { class: "btn small", type: "button", onclick: clear }, "Clear"));
+  };
+  block.addEventListener("change", (event) => { if (event.target.classList.contains("pick")) draw(); });
+  return bar;
+}
+
+/** The tick box of one study row (it carries the study). */
+function pickBox(study) {
+  const box = h("input", { type: "checkbox", class: "pick", "aria-label": `Select ${formatName(study.patient_name)}` });
+  box.study = study;
+  return box;
+}
+
+/** "Select all" of a table head. */
+function pickAllBox() {
+  return h("input", {
+    type: "checkbox", class: "pick-all", "aria-label": "Select all",
+    onchange: (event) => {
+      const block = event.target.closest(".studies-block");
+      block.querySelectorAll("input.pick").forEach((b) => { b.checked = event.target.checked; });
+      const first = block.querySelector("input.pick");
+      if (first) first.dispatchEvent(new Event("change", { bubbles: true })); // redraws the bar
+    },
+  });
+}
+
+/** Puts one label on (or takes it off) every selected study. */
+function openBulkLabelDialog(studies) {
+  const allowed = searchOptions().allowed_labels || [];
+  const label = h("input", { required: true, maxlength: 64, list: "bulk-label-list", placeholder: "urgent" });
+  const datalist = h("datalist", { id: "bulk-label-list" });
+  loadLabels().then((list) => datalist.replaceChildren(...[...new Set([...allowed, ...list.map((l) => l.name)])].map((n) => h("option", { value: n }))));
+  const action = h("select", null, h("option", { value: "add" }, "Put this label on them"), h("option", { value: "remove" }, "Take this label off"));
+  formDialog(`Labels of ${studies.length} studies`, null,
+    [h("label", null, "Label", label, datalist), h("label", null, "What to do", action)], "Apply", async () => {
+      const name = label.value.trim();
+      for (const s of studies) {
+        const labels = await api(action.value === "add" ? "PUT" : "DELETE", `/api/studies/${s.id}/labels/${encodeURIComponent(name)}`);
+        s.labels = labels.labels || labels;
+      }
+      labelsCache = null;
+      toast(`Label ${name} ${action.value === "add" ? "put on" : "taken off"} ${studies.length} studies.`);
+      archiveChanged();
+    });
+}
+
+/** Deletes studies after a clear confirmation. */
+function deleteStudies(studies, done = () => {}) {
+  const many = studies.length > 1;
+  formDialog(many ? `Delete ${studies.length} studies?` : "Delete this study?",
+    "The images are removed from the archive for good. This cannot be undone.",
+    h("ul", null, studies.slice(0, 10).map((s) => h("li", null, studyLine(s))), studies.length > 10 ? h("li", null, `and ${studies.length - 10} more`) : null),
+    many ? `Delete ${studies.length} studies` : "Delete the study", async () => {
+      for (const s of studies) await api("DELETE", `/api/studies/${s.id}`);
+      toast(many ? `${studies.length} studies deleted.` : "Study deleted.");
+      done();
+      archiveChanged();
+    }, true);
+}
+
+/* ---- Images, DICOM tags, PDF reports ---- */
+
+/** Opens the first PDF report of a study (its DOC series). */
+async function openStudyPdf(study, button) {
+  if (button) button.disabled = true;
+  const tab = window.open("about:blank", "_blank");
+  try {
+    const series = await api("GET", `/api/studies/${study.id}/series`);
+    for (const s of series.filter((x) => x.modality === "DOC")) {
+      const images = await api("GET", `/api/series/${s.id}/instances`);
+      const pdf = images.find((i) => i.is_pdf);
+      if (pdf) { if (tab) tab.location.href = `/api/instances/${pdf.id}/pdf`; return; }
+    }
+    if (tab) tab.close();
+    toast("This study has no PDF report.", "info");
+  } catch (e) {
+    if (tab) tab.close();
+    toastError(e);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+/** The images of a series: a list on the left, the picture (or the PDF / tags) on the right. */
+async function openInstancesDialog(series) {
+  let images;
+  try { images = await api("GET", `/api/series/${series.id}/instances`); } catch (e) { toastError(e); return; }
+  const viewer = h("div", { class: "instance-view" }, h("p", { class: "muted" }, "Choose an image."));
+  const dialog = h("dialog", { class: "wide-dialog" });
+
+  function showImage(image) {
+    const actions = h("div", { class: "actions" },
+      image.is_pdf && can("visualize") ? h("a", { class: "btn small", href: `/api/instances/${image.id}/pdf`, target: "_blank", rel: "noopener" }, "Open the PDF") : null,
+      h("button", { class: "btn small", type: "button", onclick: () => showTags(image) }, "DICOM tags"),
+      can("download") && opts().single_file ? h("a", { class: "btn small", href: `/api/instances/${image.id}/download` }, "Download this file") : null,
+      opts().delete ? h("button", {
+        class: "btn small danger", type: "button",
+        onclick: () => formDialog("Delete this image?", "It is removed from the archive for good.", null, "Delete the image", async () => {
+          await api("DELETE", `/api/instances/${image.id}`);
+          toast("Image deleted.");
+          dialog.close();
+          archiveChanged();
+        }, true),
+      }, "Delete") : null);
+    const picture = h("div", { class: "instance-picture" });
+    if (can("visualize") && !image.is_pdf) {
+      picture.append(h("div", { class: "loading" }, "Loading the picture..."));
+      fetch(`/api/instances/${image.id}/preview?width=1024`, { credentials: "same-origin" })
+        .then(async (r) => {
+          if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || "No picture for this image.");
+          const url = URL.createObjectURL(await r.blob());
+          picture.replaceChildren(h("img", { src: url, alt: `Image ${image.number}` }));
+        })
+        .catch((e) => picture.replaceChildren(h("p", { class: "muted" }, e.message)));
+    } else if (image.is_pdf) {
+      picture.append(h("p", { class: "muted" }, "A PDF report."));
+    }
+    viewer.replaceChildren(h("h3", null, `Image ${image.number || ""}`), actions, picture);
+  }
+
+  async function showTags(image) {
+    viewer.replaceChildren(h("div", { class: "loading" }, "Loading the tags..."));
+    try {
+      const tags = await api("GET", `/api/instances/${image.id}/tags`);
+      const filter = h("input", { placeholder: "Filter: name, tag or value", "aria-label": "Filter the tags" });
+      const body = h("tbody");
+      const rows = flattenTags(tags);
+      const draw = () => {
+        const q = filter.value.trim().toLowerCase();
+        body.replaceChildren(...rows.filter((r) => !q || r.join(" ").toLowerCase().includes(q)).map(([tag, name, value, depth]) =>
+          h("tr", null, h("td", { class: "mono nowrap" }, tag), h("td", { class: depth ? "tag-nested" : null }, name), h("td", { class: "tag-value" }, value))));
+      };
+      filter.addEventListener("input", draw);
+      draw();
+      viewer.replaceChildren(h("h3", null, `DICOM tags of image ${image.number || ""}`),
+        h("div", { class: "actions" }, filter, h("button", { class: "btn small", type: "button", onclick: () => showImage(image) }, "Back to the image")),
+        h("div", { class: "table-wrap tags-table" }, h("table", { class: "data" },
+          h("thead", null, h("tr", null, h("th", null, "Tag"), h("th", null, "Name"), h("th", null, "Value"))), body)));
+    } catch (e) {
+      viewer.replaceChildren(h("p", { class: "form-error" }, e.message));
+    }
+  }
+
+  const list = h("div", { class: "instance-list" }, images.length ? images.map((image) => h("button", {
+    type: "button", class: "btn small", onclick: () => showImage(image),
+  }, image.is_pdf ? `PDF ${image.number || ""}` : `Image ${image.number || "?"}`)) : h("p", { class: "muted" }, "No image."));
+  dialog.append(h("div", { class: "dialog-form" },
+    h("h2", null, `${series.description || "Series"} (${series.modality || "?"}): ${images.length} images`),
+    h("div", { class: "instances" }, list, viewer),
+    h("div", { class: "dialog-actions" }, h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Close"))));
+  dialog.addEventListener("close", () => dialog.remove());
+  document.body.append(dialog);
+  dialog.showModal();
+  if (images.length) showImage(images[0]);
+}
+
+/** Orthanc's `/tags` (nested sequences) as rows [tag, name, value, depth]. */
+function flattenTags(tags, depth = 0, out = []) {
+  for (const [tag, item] of Object.entries(tags || {})) {
+    const name = `${"  ".repeat(depth)}${item.Name || ""}`;
+    if (item.Type === "Sequence") {
+      out.push([tag, name, `${(item.Value || []).length} item(s)`, depth]);
+      (item.Value || []).forEach((child) => flattenTags(child, depth + 1, out));
+    } else {
+      const value = item.Type === "String" ? item.Value : item.Type === "TooLong" ? "(too long to show)" : item.Type === "Null" ? "" : `(${item.Type || "binary"})`;
+      out.push([tag, name, value == null ? "" : String(value), depth]);
+    }
+  }
+  return out;
+}
+
+/* ---- Modify, move, anonymize, add a series ---- */
+
+/** The tags that can be changed, as [DICOM keyword, label, value of the study / series]. */
+const STUDY_EDIT_TAGS = [
+  ["PatientName", "Patient name (DOE^JOHN)", (s) => s.patient_name], ["PatientID", "Patient ID", (s) => s.patient_id],
+  ["PatientBirthDate", "Birth date (YYYYMMDD)", (s) => s.patient_birth_date], ["PatientSex", "Sex (M, F, O)", (s) => s.patient_sex],
+  ["OtherPatientIDs", "Other patient IDs", (s) => s.other_patient_ids], ["StudyDescription", "Study description", (s) => s.study_description],
+  ["StudyDate", "Study date (YYYYMMDD)", (s) => s.study_date], ["AccessionNumber", "Accession number", (s) => s.accession_number],
+  ["ReferringPhysicianName", "Referring physician", (s) => s.referring_physician], ["RequestingPhysician", "Requesting physician", (s) => s.requesting_physician],
+  ["InstitutionName", "Institution", (s) => s.institution],
+];
+const SERIES_EDIT_TAGS = [
+  ["SeriesDescription", "Series description", (s) => s.description], ["SeriesNumber", "Series number", (s) => s.series_number],
+  ["BodyPartExamined", "Body part", (s) => s.body_part],
+];
+
+/** Changes tags of a study or series (only the boxes that were changed are sent). */
+function openModifyDialog(kind, item) {
+  const tags = kind === "studies" ? STUDY_EDIT_TAGS : SERIES_EDIT_TAGS;
+  const inputs = tags.map(([key, label, get]) => {
+    const input = h("input", { value: get(item) || "", maxlength: 64, "data-tag": key });
+    input.original = get(item) || "";
+    return h("label", null, label, input);
+  });
+  const keep = h("input", { type: "checkbox" });
+  formDialog(kind === "studies" ? "Change the study" : "Change the series",
+    "The images are rewritten with the new values; the original is replaced. Other systems that already have this study keep the old values.",
+    [h("div", { class: "settings-grid" }, inputs),
+      h("label", { class: "check" }, keep, "Keep the DICOM identifiers (UIDs): it stays \"the same study\" for other systems")],
+    "Save the changes", async () => {
+      const replace = {};
+      for (const label of inputs) {
+        const input = label.querySelector("input");
+        if (input.value.trim() !== input.original) replace[input.dataset.tag] = input.value.trim();
+      }
+      if (!Object.keys(replace).length) throw new Error("Nothing was changed.");
+      const r = await api("POST", `/api/${kind}/${item.id}/modify`, { replace, keep_uids: keep.checked });
+      followJob(r.job_id, kind === "studies" ? "Changing the study" : "Changing the series");
+    });
+}
+
+/** Moves a study to another patient: search that patient's studies, pick one. */
+function openMoveStudyDialog(study) {
+  const query = h("input", { placeholder: "Patient name or ID", "aria-label": "Find the patient" });
+  const results = h("div", { class: "move-results" }, h("p", { class: "muted" }, "Search the patient the study belongs to."));
+  let chosen = null;
+  const find = async () => {
+    const v = query.value.trim();
+    if (!v) return;
+    results.replaceChildren(h("div", { class: "loading" }, "Searching..."));
+    try {
+      const [byName, byId] = await Promise.all([
+        api("GET", `/api/studies?patient_name=${encodeURIComponent(v)}&limit=20`), api("GET", `/api/studies?patient_id=${encodeURIComponent(v)}&limit=20`)]);
+      const seen = new Map();
+      [...byName.items, ...byId.items].filter((s) => s.patient_id !== study.patient_id).forEach((s) => { if (!seen.has(s.patient_id)) seen.set(s.patient_id, s); });
+      results.replaceChildren(...(seen.size ? [...seen.values()].map((s) => h("label", { class: "check" },
+        h("input", { type: "radio", name: "move-target", onchange: () => { chosen = s; } }),
+        `${formatName(s.patient_name)} (${s.patient_id})`)) : [h("p", { class: "muted" }, "No other patient found.")]));
+    } catch (e) { results.replaceChildren(h("p", { class: "form-error" }, e.message)); }
+  };
+  query.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); find(); } });
+  formDialog("Move the study to another patient", studyLine(study),
+    [h("div", { class: "actions" }, query, h("button", { class: "btn small", type: "button", onclick: find }, "Find")), results],
+    "Move the study", async () => {
+      if (!chosen) throw new Error("Choose the patient first.");
+      const r = await api("POST", `/api/studies/${study.id}/move`, { patient_from_study: chosen.id });
+      followJob(r.job_id, "Moving the study");
+    });
+}
+
+/** Moves a series to another study of the same patient, or to a new study. */
+async function openMoveSeriesDialog(series, study) {
+  let others = [];
+  try { others = (await api("GET", `/api/studies?patient_id=${encodeURIComponent(`"${study.patient_id}"`)}&limit=50`)).items.filter((s) => s.id !== study.id); } catch { /* only "new study" */ }
+  const target = h("select", null, h("option", { value: "new" }, "A new study of this patient"), others.map((s) => h("option", { value: s.id }, studyLine(s))));
+  const description = h("input", { maxlength: 64, placeholder: "Description of the new study" });
+  target.addEventListener("change", () => { description.parentElement.hidden = target.value !== "new"; });
+  formDialog("Move the series", `${series.description || "Series"} (${series.modality})`,
+    [h("label", null, "Move it to", target), h("label", null, "Description of the new study", description)],
+    "Move the series", async () => {
+      const r = await api("POST", `/api/series/${series.id}/move`, { study: target.value, description: description.value });
+      followJob(r.job_id, "Moving the series");
+    });
+}
+
+/** Anonymizes a study or a series (a copy, by default). */
+function openAnonymizeDialog(kind, item) {
+  const name = h("input", { maxlength: 64, placeholder: "Anonymous (empty = generated)" });
+  const id = h("input", { maxlength: 64, placeholder: "Empty = generated" });
+  const keep = h("input", { type: "checkbox", checked: true });
+  formDialog(kind === "studies" ? "Anonymize the study" : "Anonymize the series",
+    "Names, IDs, dates of birth and the other identifying tags are removed or replaced. The anonymized copy appears as a new study.",
+    [h("label", null, "New patient name", name), h("label", null, "New patient ID", id), h("label", { class: "check" }, keep, "Keep the original too")],
+    "Anonymize", async () => {
+      const r = await api("POST", `/api/${kind}/${item.id}/anonymize`, { patient_name: name.value, patient_id: id.value, keep_source: keep.checked });
+      followJob(r.job_id, "Anonymizing");
+    });
+}
+
+/** Adds a series made of PDF files or pictures to a study. */
+function openAddSeriesDialog(study) {
+  const files = h("input", { type: "file", multiple: true, accept: "application/pdf,image/png,image/jpeg", required: true });
+  const description = h("input", { maxlength: 64, placeholder: "Report, Photos..." });
+  formDialog("Add a series to the study", `${studyLine(study)}. PDF files become reports (one per file); PNG and JPEG pictures become one series of images.`,
+    [h("label", null, "Files", files), h("label", null, "Series description", description)], "Add the series", async () => {
+      const list = Array.from(files.files || []);
+      if (!list.length) throw new Error("Choose the files first.");
+      const read = (f) => new Promise((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(r.result); r.onerror = () => reject(new Error(`Cannot read ${f.name}`)); r.readAsDataURL(f); });
+      const data = await Promise.all(list.map(read));
+      const r = await api("POST", `/api/studies/${study.id}/add-series`, { description: description.value, files: data });
+      toast(`Series added (${r.created} ${r.created === 1 ? "file" : "files"}).`);
+      archiveChanged();
+    });
+}
+
+/** The "..." menu of a study: change, move, anonymize, add a series, delete. */
+function studyManageMenu(study) {
+  const o = opts();
+  return actionMenu("more", "Manage", "Change, move, anonymize or delete this study", [
+    o.modify ? ["Change patient / study details...", () => openModifyDialog("studies", study)] : null,
+    o.modify ? ["Move to another patient...", () => openMoveStudyDialog(study)] : null,
+    o.anonymize ? ["Anonymize...", () => openAnonymizeDialog("studies", study)] : null,
+    o.add_series ? ["Add a series (PDF, pictures)...", () => openAddSeriesDialog(study)] : null,
+    o.delete ? ["Delete...", () => deleteStudies([study]), true] : null,
+  ]);
+}
+
+/** The "..." menu of a series. */
+function seriesManageMenu(series, study) {
+  const o = opts();
+  return actionMenu("more", "Manage", "Change, move, anonymize or delete this series", [
+    o.modify ? ["Change the series details...", () => openModifyDialog("series", series)] : null,
+    o.modify && study ? ["Move to another study...", () => openMoveSeriesDialog(series, study)] : null,
+    o.anonymize ? ["Anonymize...", () => openAnonymizeDialog("series", series)] : null,
+    o.delete ? ["Delete...", () => formDialog("Delete this series?", "Its images are removed from the archive for good.", null, "Delete the series", async () => {
+      await api("DELETE", `/api/series/${series.id}`);
+      toast("Series deleted.");
+      archiveChanged();
+    }, true), true] : null,
+  ]);
+}
+
+/* ---- Query / retrieve ---- */
+
+function buildRetrieveView() {
+  const results = h("section", { class: "panel" }, h("p", { class: "muted" }, "Choose a system and search: its studies appear here, and you can bring them into this archive."));
+  const source = h("select", { name: "source", "aria-label": "System" }, h("option", { value: "" }, "Loading..."));
+  api("GET", "/api/retrieve/sources").then((list) => {
+    source.replaceChildren(...(list.length ? list.map((n) => h("option", { value: n.id },
+      [n.description || n.id, n.kind === "dicomweb" ? " (DICOMweb)" : n.aet ? ` (${n.aet} at ${n.host}:${n.port})` : ""].join(""))) : [h("option", { value: "" }, "No other system is set up in Orthanc")]));
+  }).catch(toastError);
+  const box = (name, label, type = "text") => h("label", null, label, h("input", { name, type }));
+  const form = h("form", {
+    class: "panel filters",
+    onsubmit: async (event) => {
+      event.preventDefault();
+      const body = { source: source.value };
+      form.querySelectorAll("input").forEach((i) => { if (i.value.trim()) body[i.name] = i.value.trim(); });
+      results.replaceChildren(h("div", { class: "loading" }, "Asking the other system..."));
+      try {
+        const r = await api("POST", "/api/retrieve/query", body);
+        results.replaceChildren(r.answers.length ? renderAnswers(r.answers, body.source) : h("div", { class: "empty" }, "Nothing found there."));
+      } catch (e) { results.replaceChildren(h("div", { class: "empty" }, e.message)); }
+    },
+  },
+    h("div", { class: "filter-grid" },
+      h("label", null, "System", source),
+      box("patient_name", "Patient name"), box("patient_id", "Patient ID"), box("accession", "Accession number"),
+      box("description", "Study description"), box("modality", "Modality (CT, MR...)"),
+      box("date_from", "Study date from", "date"), box("date_to", "Study date to", "date")),
+    h("div", { class: "filter-actions" }, h("button", { class: "btn primary", type: "submit" }, "Search there")));
+
+  function renderAnswers(answers, sourceId) {
+    return h("div", { class: "table-wrap" }, h("table", { class: "data" },
+      h("thead", null, h("tr", null, ["Patient", "Patient ID", "Study date", "Description", "Modality", "Images", ""].map((t) => h("th", null, t)))),
+      h("tbody", null, answers.map((a) => {
+        const cell = h("td", null);
+        const label = [formatName(a.patient_name), a.study_date, a.description].join(" | ");
+        if (a.local_id) {
+          cell.append(h("span", { class: "chip status-on" }, "Already here"), " ",
+            h("button", { class: "btn small", type: "button", onclick: () => openSearchWith("studies", { study_uid: a.study_uid }) }, "Open"));
+        } else {
+          cell.append(h("button", {
+            class: "btn small primary", type: "button",
+            onclick: async (event) => {
+              event.currentTarget.disabled = true;
+              try {
+                await api("POST", "/api/retrieve/retrieve", { source: sourceId, study_uid: a.study_uid, label });
+                toast("Retrieving. Follow it on the Transfers page; the study then appears in the lists.", "info", 7000);
+              } catch (e) { toastError(e); event.currentTarget.disabled = false; }
+            },
+          }, "Retrieve"));
+        }
+        return h("tr", null,
+          h("td", null, formatName(a.patient_name)), h("td", { class: "mono" }, a.patient_id || dash()),
+          h("td", { class: "nowrap" }, formatDicomDate(a.study_date) || dash()), h("td", null, a.description || dash()),
+          h("td", null, a.modalities.length ? a.modalities.map(chip) : dash()), h("td", { class: "num" }, a.images || dash()), cell);
+      }))));
+  }
+
+  return h("div", { class: "view" }, h("div", { class: "page-head" }, h("h1", null, "Retrieve from another system")), form, results);
+}
+
+/* ---- Worklists ---- */
+
+function buildWorklistsView() {
+  const container = h("section", { class: "panel" }, h("div", { class: "loading" }, "Loading..."));
+  async function load() {
+    try {
+      const list = await api("GET", "/api/worklists");
+      container.replaceChildren(list.length ? h("div", { class: "table-wrap" }, h("table", { class: "data" },
+        h("thead", null, h("tr", null, ["Date", "Time", "Patient", "Patient ID", "Modality", "Description", "Station", "Accession", ""].map((t) => h("th", null, t)))),
+        h("tbody", null, list.map((w) => h("tr", null,
+          h("td", { class: "nowrap" }, formatDicomDate(w.date) || dash()), h("td", null, w.time ? `${w.time.slice(0, 2)}:${w.time.slice(2, 4)}` : dash()),
+          h("td", null, formatName(w.patient_name)), h("td", { class: "mono" }, w.patient_id), h("td", null, chip(w.modality)),
+          h("td", null, w.description || w.requested_procedure || dash()), h("td", { class: "mono" }, w.station_aet || dash()), h("td", { class: "mono" }, w.accession || dash()),
+          h("td", null, h("div", { class: "actions" },
+            actionButton("button", "edit", "Edit", "Change this worklist", { class: "btn small", type: "button", onclick: () => openWorklistDialog(w, load) }),
+            actionButton("button", "revoke", "Delete", "Delete this worklist", {
+              class: "btn small danger", type: "button",
+              onclick: () => formDialog("Delete this worklist?", `${formatName(w.patient_name)}, ${w.modality} ${formatDicomDate(w.date)}`, null, "Delete", async () => {
+                await api("DELETE", `/api/worklists/${encodeURIComponent(w.id)}`); toast("Worklist deleted."); load();
+              }, true),
+            })))))))) : h("div", { class: "empty" }, "No worklist. Add the examinations the scanners should see."));
+    } catch (e) { container.replaceChildren(h("div", { class: "empty" }, e.message)); }
+  }
+  load();
+  return h("div", { class: "view" },
+    h("div", { class: "page-head" }, h("h1", null, "Worklists"),
+      h("div", { class: "head-actions" },
+        actionButton("button", "refresh", "Refresh", "Refresh the list", { class: "btn", type: "button", onclick: load }),
+        h("button", { class: "btn primary", type: "button", onclick: () => openWorklistDialog(null, load) }, "Add a worklist"))),
+    h("p", { class: "muted" }, "The examinations the scanners find when they ask the archive for their worklist (DICOM Modality Worklist). Needs Orthanc's worklists plugin with its REST API."),
+    container);
+}
+
+function openWorklistDialog(w, reload) {
+  const fields = [["patient_name", "Patient name (DOE^JANE)"], ["patient_id", "Patient ID"], ["birth_date", "Birth date", "date"], ["sex", "Sex (M, F, O)"],
+    ["modality", "Modality (CT, MR, US...)"], ["date", "Date", "date"], ["time", "Time", "time"], ["description", "Procedure step description"],
+    ["requested_procedure", "Requested procedure"], ["station_aet", "Station AE title"], ["physician", "Performing physician"], ["accession", "Accession number"]];
+  const toInput = (key, type, value) => type === "date" && /^\d{8}$/.test(value || "") ? `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6)}`
+    : type === "time" && /^\d{4}/.test(value || "") ? `${value.slice(0, 2)}:${value.slice(2, 4)}` : value || "";
+  const inputs = fields.map(([key, label, type]) => h("label", null, label, h("input", { name: key, type: type || "text", value: toInput(key, type, w && w[key]) })));
+  formDialog(w ? "Change the worklist" : "Add a worklist", null, h("div", { class: "settings-grid" }, inputs), w ? "Save" : "Add", async () => {
+    const body = {};
+    for (const label of inputs) {
+      const input = label.querySelector("input");
+      body[input.name] = input.type === "date" || input.type === "time" ? input.value.replace(/[-:]/g, "") : input.value.trim();
+    }
+    body.modality = (body.modality || "").toUpperCase();
+    body.sex = (body.sex || "").toUpperCase();
+    await api(w ? "PUT" : "POST", w ? `/api/worklists/${encodeURIComponent(w.id)}` : "/api/worklists", body);
+    toast(w ? "Worklist changed." : "Worklist added.");
+    reload();
+  });
+}
+
+/* ---- Configuration > Jobs and System ---- */
+
+function buildJobsView() {
+  const container = h("section", { class: "panel" }, h("div", { class: "loading" }, "Loading..."));
+  async function load() {
+    try {
+      const jobs = await api("GET", "/api/admin/jobs");
+      const act = (j, action, label) => h("button", {
+        class: "btn small", type: "button",
+        onclick: async () => { try { await api("POST", `/api/admin/jobs/${j.id}/${action}`); toast(`${label}: ${j.type}`); load(); } catch (e) { toastError(e); } },
+      }, label);
+      container.replaceChildren(jobs.length ? h("div", { class: "table-wrap" }, h("table", { class: "data" },
+        h("thead", null, h("tr", null, ["Created", "Type", "State", "Progress", "Run time", "Details", ""].map((t) => h("th", null, t)))),
+        h("tbody", null, jobs.map((j) => h("tr", null,
+          h("td", { class: "nowrap" }, orthancTime(j.created)), h("td", null, j.type), h("td", null, h("span", { class: `chip state-${String(j.state).toLowerCase()}` }, j.state)),
+          h("td", { class: "num" }, `${j.progress ?? 0}%`), h("td", null, j.runtime != null ? formatDuration(j.runtime) : dash()),
+          h("td", { class: "job-details" }, j.error && j.state === "Failure" ? j.error : jobSummary(j.content)),
+          h("td", null, h("div", { class: "actions" },
+            ["Pending", "Running"].includes(j.state) ? act(j, "pause", "Pause") : null,
+            j.state === "Paused" ? act(j, "resume", "Resume") : null,
+            ["Pending", "Running", "Paused", "Retry"].includes(j.state) ? act(j, "cancel", "Cancel") : null,
+            j.state === "Failure" ? act(j, "resubmit", "Retry") : null))))))) : h("div", { class: "empty" }, "No job: Orthanc has nothing running and remembers no recent job."));
+    } catch (e) { container.replaceChildren(h("div", { class: "empty" }, e.message)); }
+  }
+  load();
+  return h("div", { class: "view" },
+    h("div", { class: "page-head" }, h("h2", null, "Jobs"), actionButton("button", "refresh", "Refresh", "Refresh the list", { class: "btn", type: "button", onclick: load })),
+    h("p", { class: "muted" }, "Everything Orthanc does in the background: sending, retrieving, modifying, anonymizing, archives... Orthanc keeps the recent ones only."),
+    container);
+}
+
+/** Orthanc's "20261118T101500.123" as a local date and time. */
+function orthancTime(text) {
+  const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})/.exec(text || "");
+  return m ? `${formatDicomDate(m[1] + m[2] + m[3])} ${m[4]}:${m[5]}:${m[6]}` : text || "";
+}
+
+/** A few words about what a job works on. */
+function jobSummary(content) {
+  if (!content || typeof content !== "object") return "";
+  const parts = [];
+  if (content.RemoteAet) parts.push(`to ${content.RemoteAet}`);
+  if (content.Peer) parts.push(`to ${[].concat(content.Peer).join(", ")}`);
+  if (content.InstancesCount != null) parts.push(`${content.InstancesCount} images`);
+  if (content.FailedInstancesCount) parts.push(`${content.FailedInstancesCount} failed`);
+  if (content.Description) parts.push(content.Description);
+  return parts.join(", ");
+}
+
+function buildSystemView() {
+  const container = h("div", null, h("section", { class: "panel" }, h("div", { class: "loading" }, "Loading...")));
+  async function load() {
+    let info;
+    try { info = await api("GET", "/api/admin/system"); } catch (e) { container.replaceChildren(h("section", { class: "panel empty" }, e.message)); return; }
+    const s = info.system || {};
+    const st = info.statistics || {};
+    const row = (label, value) => (value === null || value === undefined || value === "" ? null : [h("dt", null, label), h("dd", null, String(value))]);
+    const mb = (v) => (v == null ? null : formatBytes(Number(v) * 1024 * 1024));
+    const level = h("select", { "aria-label": "Log level" }, ["default", "verbose", "trace"].map((l) => h("option", { value: l, selected: l === info.log_level }, l)));
+    level.addEventListener("change", async () => {
+      try { await api("PUT", "/api/admin/system/log-level", { level: level.value }); toast(`Orthanc's log level is now ${level.value}.`); } catch (e) { toastError(e); }
+    });
+    const metrics = h("pre", { class: "raw-box", hidden: true });
+    const panels = [
+      h("section", { class: "panel" }, h("h2", null, "Orthanc"),
+        h("dl", { class: "share-details" },
+          row("Name", s.name), row("Version", s.version), row("REST API version", s.api_version), row("Database version", s.database_version),
+          row("Database", s.database_backend ? "plugin" : "SQLite (built in)"), row("DICOM AE title and port", s.dicom_aet ? `${s.dicom_aet} : ${s.dicom_port}` : null),
+          row("HTTP port", s.http_port), row("Overwrite instances", s.overwrite_instances), row("Ingest transcoding", s.ingest_transcoding),
+          row("Maximum storage", s.maximum_storage_size ? `${s.maximum_storage_size} MB` : "no limit"),
+          row("Maximum patients", s.maximum_patient_count || "no limit"), row("When full", s.maximum_storage_mode)),
+        h("label", null, "Log level (until Orthanc restarts)", level)),
+      h("section", { class: "panel" }, h("h2", null, "Storage and counts"),
+        h("dl", { class: "share-details" },
+          row("Patients", st.CountPatients), row("Studies", st.CountStudies), row("Series", st.CountSeries), row("Images", st.CountInstances),
+          row("Disk used", st.TotalDiskSizeMB != null ? mb(st.TotalDiskSizeMB) : st.TotalDiskSize != null ? formatBytes(Number(st.TotalDiskSize)) : null),
+          row("Uncompressed size", st.TotalUncompressedSizeMB != null ? mb(st.TotalUncompressedSizeMB) : null))),
+      h("section", { class: "panel" }, h("h2", null, `Plugins (${(info.plugins || []).length})`),
+        h("div", { class: "table-wrap" }, h("table", { class: "data" },
+          h("thead", null, h("tr", null, h("th", null, "Plugin"), h("th", null, "Version"), h("th", null, "Description"))),
+          h("tbody", null, (info.plugins || []).map((p) => h("tr", null, h("td", { class: "mono" }, p.name), h("td", null, p.version || dash()), h("td", null, p.description || dash()))))))),
+      h("section", { class: "panel" }, h("h2", null, "Metrics"),
+        h("p", { class: "muted" }, "Orthanc's counters in the Prometheus format (they need \"MetricsEnabled\" in Orthanc's configuration)."),
+        h("button", {
+          class: "btn small", type: "button",
+          onclick: async () => {
+            try { const r = await fetch("/api/admin/system/metrics", { credentials: "same-origin" }); metrics.textContent = r.ok ? await r.text() : (await r.json()).error; } catch (e) { metrics.textContent = e.message; }
+            metrics.hidden = false;
+          },
+        }, "Show the metrics"), metrics),
+    ];
+    if (info.raw_api) {
+      const path = h("input", { value: "/system", "aria-label": "Address", class: "mono" });
+      const out = h("pre", { class: "raw-box" });
+      const read = async () => {
+        out.textContent = "...";
+        try {
+          const r = await fetch(`/api/admin/orthanc?path=${encodeURIComponent(path.value.trim())}`, { credentials: "same-origin" });
+          const text = await r.text();
+          let shown = text;
+          try { shown = JSON.stringify(JSON.parse(text), null, 2); } catch { /* text */ }
+          out.textContent = r.ok ? shown : (JSON.parse(text).error || text);
+        } catch (e) { out.textContent = e.message; }
+      };
+      path.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); read(); } });
+      panels.push(h("section", { class: "panel" }, h("h2", null, "Orthanc's REST API (read only)"),
+        h("p", { class: "muted" }, "Read any address of Orthanc's API, for example /patients, /tools/labels or /studies/<id>. Only GET requests, never files; every read is in the audit log."),
+        h("div", { class: "actions" }, path, h("button", { class: "btn small", type: "button", onclick: read }, "Read")), out));
+    }
+    container.replaceChildren(...panels);
+  }
+  load();
+  return h("div", { class: "view" },
+    h("div", { class: "page-head" }, h("h2", null, "System"), actionButton("button", "refresh", "Refresh", "Refresh", { class: "btn", type: "button", onclick: load })),
+    container);
 }
 
 /* ====================================================================

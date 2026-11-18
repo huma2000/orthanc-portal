@@ -22,6 +22,7 @@ A web front-end for an **Orthanc PACS** (recent releases), written in Rust. One 
 | **Send a study to a remote DICOM node** and follow the transfer | yes | no |
 | User management, audit log | yes | no |
 | **Configuration from the web**: Orthanc connection, ports, share links, sessions, upload limit, roles, **DICOM nodes**, portal name | yes (admins) | no |
+| **Optional features**, each switched on or off by an administrator: actions on several studies, images / DICOM tags / PDF reports, delete, modify, anonymize, add a series, more viewers (Stone, VolView, WSI, MedDream, OHIF modes), one link for several studies, sending to Orthanc peers and DICOMweb servers, query / retrieve, worklists, Jobs and System pages, date / name formats and custom CSS (section 9b) | yes (with the permissions) | the multi-study links |
 | Talks to Orthanc **with an account or without one** (an Orthanc that only accepts a list of allowed computers) | choose in Settings | - |
 
 One self-contained executable: the web UI is compiled into it, users and settings live in a SQLite file,
@@ -210,8 +211,10 @@ screens whose changes apply at once.
 | **General > Branding** | **Browser window title**, **website icon**, **logo**, portal name, whether the name is shown next to the logo, notice shown on the login page (see below) |
 | **Search & labels > Modality buttons** | The quick modality filters of the Studies and Series pages: order, shown / hidden, label, DICOM codes, description; add, remove, restore defaults (the *Other codes* box is always shown) |
 | **Appearance > Colours** | Light / dark / automatic, and the **accent**, **header**, **icon column** and **page background** colours (each can go back to the built-in one). Previewed at once, kept when saved (see [The layout and the colours](#the-layout-and-the-colours)) |
-| **Search & labels** | The modality buttons; the columns of the studies tables and the boxes of the Studies search (which ones, in which order); live search on or off and its minimum number of letters; endless lists on or off; the allowed labels and whether their counts are shown |
-| **Appearance > Home page and icons** | How many recent studies the home page shows, which ones (last received / newest study date) and how (the Studies table, or cards with big previews), card size, the two texts of the home page, the total of studies in the header, names under the icons |
+| **Search & labels** | The modality buttons; the columns of the studies tables and the boxes of the Studies search (which ones, in which order); the fields of the study window; live search on or off and its minimum number of letters; endless lists on or off; **labels on or off altogether**, the allowed labels and whether their counts are shown |
+| **Features** | Every optional feature of section 9b, each on or off, the name of downloaded ZIP files, and the **More viewers** (Stone Web Viewer, VolView, whole-slide viewer: automatic / always / never; a MedDream address; the OHIF modes offered) |
+| **Appearance > Dates, names and style** | How dates (2024-05-17, 17/05/2024, 05/17/2024, 17.05.2024, 17 May 2024) and patient names (DOE, JOHN / JOHN DOE / DOE^JOHN) are written everywhere, and **custom CSS** added after the portal's own (also on the invitation page; no `@import` or `url(...)`) |
+| **Appearance > Home page and icons** | How many recent studies the home page shows, which ones (last received / newest study date) and how (the Studies table, or cards with big previews), card size, the two texts of the home page, the total of studies in the header, names under the icons; auto-refresh of the recent studies and of Transfers (each on or off) and its interval (30 s by default, 5 s to 1 hour) |
 | **General > Viewers and uploads** | Show the **Weasis** button (on / off), show the **OHIF** button (automatic / always / never), largest uploaded file, preview thumbnails on/off and their cache size |
 | **Orthanc > Orthanc connection** | Address; **with an account** (user name + password, write-only: never sent back to the browser) **or without an account** (for an Orthanc that only accepts a list of allowed computers); **Test connection** (mode used, version, DICOMweb/OHIF plugins, number of DICOM nodes; works on values you have typed but not yet saved) |
 | **Network & sharing > Network** | Intranet address, enable/disable the internet listener (invitation links only) and its address, optional fixed public address for Weasis |
@@ -222,6 +225,8 @@ screens whose changes apply at once.
 | **Users** | Accounts, permissions, enable/disable, password reset |
 | **DICOM nodes** | Remote DICOM systems Orthanc sends studies to: add, edit (with a description shown to the staff), delete, **Test** (DICOM ping) |
 | **Audit log** | Every change above is recorded (setting names only, never values or passwords) |
+| **Jobs** | Every Orthanc job (sending, retrieving, modifying, archives...): state, progress, run time, what it works on; **Pause**, **Resume**, **Cancel**, **Retry** |
+| **System** | Orthanc's version, database, DICOM AE title and port, storage limits; the numbers of patients, studies, series and images and the disk used; every plugin with its version; Orthanc's **log level** (default / verbose / trace); its Prometheus **metrics**; and, when switched on, a read-only view of **any address of Orthanc's REST API** |
 
 In the rest of this document *Settings > Share links* means the **Share links** section (here in the
 *Network & sharing* tab), and so on. The red "Orthanc" notice and the *Share...* dialog open the right tab.
@@ -282,6 +287,10 @@ Every staff member uses the same layout, showing only what their permissions all
   with the same buttons and its series). How many studies, and whether "recent" means *last received by the PACS*
   or *newest study date*, are settings (*Appearance > Home page and icons*). Below them, files and whole folders
   can be **dropped** to upload them; the list and the total refresh when the upload ends.
+* **Auto-refresh**: the recent studies and the Transfers page refresh themselves every 30 seconds (the interval
+  and each switch are settings). An *Auto-refresh · 30 s* button next to *Refresh* lets each person pause it
+  (remembered in their browser). A refresh waits while a window is open, while the series of a study are
+  unfolded, and while the browser tab is in the background. A running transfer is still followed every 3 seconds.
 * **Help** explains how to use the portal, in plain words for staff who are not administrators. It is written
   for the person reading it: only the parts their account can use (no word about uploading for someone who cannot
   upload), only the features switched on (Weasis, OHIF, thumbnails, email invitations...), with the limits of this
@@ -365,6 +374,10 @@ with an invitation have no account and no permissions, only their link (section 
 | `share` | **Invite somebody outside to look at a study** (create links), see and revoke their own links |
 | `admin` | Manage users, settings, DICOM nodes, branding, read the audit log; see and revoke **everyone's** links |
 | `labels` | Put labels on studies and take them off (administrators can too; everyone who can search sees them) |
+| `delete` | Delete studies, series and images, when *Settings > Features* allows it (administrators can too) |
+| `edit` | Change tags, move studies and series, anonymize, add a series, when allowed (administrators can too) |
+| `retrieve` | Search other systems and bring studies in (query / retrieve), when allowed (administrators can too) |
+| `worklists` | See, create, change and delete modality worklists, when allowed (administrators can too) |
 
 Rules: `visualize`, `download`, `send` and `share` require `read`. The last active administrator cannot be
 removed or disabled, and nobody can delete or demote their own account.
@@ -596,13 +609,47 @@ other side.
 3. The **Transfers** page shows each transfer with the live Orthanc job
    state (Pending / Running / Success / Failure) and its **progress**: a bar with the percentage, how many images
    were sent out of how many, how long it has been running and about how long is left, refreshing every 3 seconds
-   while a job is active. Once finished: "120 images in 2 min", or why it failed and how many images could not
+   while a job is active. Once finished: "120 images sent in 2 min" (or "Retrieved" for a study brought in from another system), or why it failed and how many images could not
    be sent (kept by the portal, so it is still shown after Orthanc forgets the job). Resting the mouse on a
    destination shows its description, AE title and address. Users see their own transfers; administrators see
    everyone's.
 
 Needs the `send` permission. Destinations with `"AllowStore": false` are not offered. Every transfer is
 written to the audit log.
+
+---
+
+## 9b. Optional features
+
+Everything below is switched on or off in **Settings > Features** (the formats in *Appearance*, labels in
+*Search & labels*). What changes the archive is **off** until an administrator switches it on, needs its own
+permission (administrators may always) and is written to the audit log. The server enforces every switch and
+permission: hiding a button is only the visible part.
+
+| Feature | Default | What it does |
+|---|---|---|
+| **Labels** | on | Off = no Labels column, filter, button or Help section (the labels stay in Orthanc, label filters in old links are ignored) |
+| **Several studies at once** | on | A tick box on each study (and *select all*): **Open together** (OHIF / Stone), **Download** in one ZIP (or with DICOMDIR), **Send** (one transfer each), **Share** with one link, **Labels** (put on / take off), **Delete**: whatever the person may do |
+| **Images, DICOM tags, PDF reports** | on | An *Images* button on each series: the list of images, a picture of each, every DICOM tag (sequences included, with a filter); a *PDF report* button on studies with a DOC series |
+| **Download one image** | on | One DICOM file (`download` permission) |
+| **NIfTI** | off | A series as one `.nii.gz` volume (needs Orthanc's neuro plugin) |
+| **Name of downloaded ZIPs** | `{patient_id}_{study_date}_{id}` | With `{patient_id}`, `{patient_name}`, `{study_date}`, `{description}`, `{accession}`, `{modality}`, `{id}` |
+| **Delete** | off | Studies, series and images, after a confirmation (`delete`) |
+| **Modify** | off | Change patient / study / series tags (a fixed list, values checked), keeping the DICOM UIDs or not; **move** a study to another patient, a series to another study or to a new one (`edit`). Orthanc rewrites the files in a background job; the portal follows it and refreshes the lists |
+| **Anonymize** | off | A study or series, with a chosen (or generated) name and ID, keeping the original or not (`edit`) |
+| **Add a series** | off | PDF files (one report each, modality DOC) or PNG / JPEG pictures (one series, modality OT) added to a study through `/tools/create-dicom` (`edit`) |
+| **More viewers** | automatic | A *More viewers* menu next to OHIF: the **OHIF modes** chosen (MPR, 3D volume, TMTV, segmentation, microscopy), the **Stone Web Viewer**, **VolView** (opens a counted download of the study, so it needs `download`), a **MedDream** address of your own, and the **whole-slide viewer** on microscopy (SM) series. Each plugin viewer is offered when Orthanc has the plugin (or always / never) and is reached through the portal like OHIF, for staff only |
+| **One link for several studies** | on | *Share* on ticked studies: one link and one password; the guest sees each study, can open them all together, and each study downloaded uses one download |
+| **Send to Orthanc peers / DICOMweb servers** | off | The `OrthancPeers` and `DicomWeb.Servers` of Orthanc's configuration join the DICOM nodes in *Send to...* (their address is shown, never their account); transfers show on the Transfers page as usual |
+| **Query / retrieve** | off | A **Retrieve** page (`retrieve`): search a DICOM node (C-FIND) or a DICOMweb server (QIDO-RS) by name, ID, accession number, description, modality and dates; studies already here say so and open at once; **Retrieve** brings one in (C-MOVE, or WADO-RS) and shows it on the Transfers page, with *Open the study* when it is done. The node must know Orthanc's AE title for C-MOVE |
+| **Worklists** | off | A **Worklists** page (`worklists`): the examinations the scanners see (patient, modality, date and time, description, station, accession number); add, change, delete. Needs Orthanc 1.12.10+ and its worklists plugin with `"SaveInOrthancDatabase": true` (its REST API has no "edit": a change deletes the worklist and creates it again) |
+| **Jobs page** | on | *Configuration > Jobs*, see section 4 |
+| **System page** | on | *Configuration > System*, see section 4 |
+| **Read Orthanc's REST API** | off | On the System page: GET only, addresses checked (no `..`, no files, archives or pictures), each read audited |
+| **Dates, names, custom CSS** | ISO, DOE, JOHN, none | *Appearance > Dates, names and style* |
+
+Not included on purpose: an "inbox" processing page, administrator-defined custom buttons, single sign-on and
+translations.
 
 ---
 
@@ -755,7 +802,23 @@ All JSON. State-changing calls need the header `X-Requested-With: portal`.
 
 | Method & path | Permission | Purpose |
 |---|---|---|
-| `GET /api/public` | none | Branding: name, window title, logo, icon, login notice, `theme` (colours) |
+| `GET /api/series/{id}/instances`, `GET /api/instances/{id}/tags` | read (+ feature) | The images of a series; the DICOM tags of one |
+| `GET /api/instances/{id}/preview`, `/pdf` | visualize (+ feature) | A picture of one image; its encapsulated PDF |
+| `GET /api/instances/{id}/download`, `GET /api/series/{id}/nifti` | download (+ feature) | One DICOM file; a series as NIfTI |
+| `GET /api/download?studies=a,b&dicomdir=` | download (+ bulk) | Several studies in one ZIP |
+| `POST /api/send` `{target, studies}` | send (+ bulk) | Send several studies (one transfer each); targets `alias`, `peer:<name>`, `dicomweb:<name>` |
+| `POST /api/shares` `{studies, minutes, downloads, ...}` | share | One link for several studies |
+| `DELETE /api/studies\|series\|instances/{id}` | delete (+ feature) | Delete |
+| `POST /api/studies\|series/{id}/modify` `{replace, keep_uids}`, `.../move`, `.../anonymize` | edit (+ feature) | Modify, move, anonymize: answers an Orthanc job id |
+| `POST /api/studies/{id}/add-series` `{description, files: [data URLs]}` | edit (+ feature) | Add a series of PDF files or pictures |
+| `GET /api/jobs/{id}` | edit, delete, send or retrieve | Follow a job started from the portal |
+| `GET /api/retrieve/sources`, `POST /api/retrieve/query`, `POST /api/retrieve/retrieve` | retrieve (+ feature) | Query / retrieve |
+| `GET/POST /api/worklists`, `PUT/DELETE /api/worklists/{id}` | worklists (+ feature) | Modality worklists |
+| `GET /api/admin/system`, `PUT /api/admin/system/log-level`, `GET /api/admin/system/metrics`, `GET /api/admin/orthanc?path=` | admin (+ feature) | The System page |
+| `GET /api/admin/jobs`, `POST /api/admin/jobs/{id}/cancel\|pause\|resume\|resubmit` | admin (+ feature) | The Jobs page |
+| `GET /stone-webviewer/*`, `/volview/*`, `/wsi/*` | visualize | The other viewers of Orthanc's plugins (staff only) |
+| `GET /api/public` | none | Branding: name, window title, logo, icon, login notice, `theme` (colours), `format` (dates and names) |
+| `GET /branding/custom.css` | none | The custom CSS of Settings > Appearance |
 | `GET /branding/logo`, `GET /branding/favicon` | none | The uploaded logo / website icon (or the built-in mark) |
 | `GET /healthz` | none | Liveness probe |
 
@@ -775,7 +838,7 @@ src/config.rs         the few bootstrap values from the environment
 src/settings.rs       every web-editable setting: defaults, validation, saved copy, roles
 src/server.rs         runs / re-opens the two listeners while the program runs
 src/error.rs          AppError -> HTTP status + JSON
-src/permissions.rs    the eight permissions and the rules between them
+src/permissions.rs    the twelve permissions and the rules between them
 src/db.rs             SQLite: users, audit log, transfers, share links, saved settings
 src/auth.rs           passwords, sessions, tokens, Cloudflare detection, request guards (staff and guest)
 src/sharing.rs        invitation rules: password and link generation, what a guest may read (with unit tests)
@@ -785,7 +848,9 @@ src/orthanc.rs        Orthanc REST client (find, upload, archive, nodes/jobs, vi
 src/models.rs         study / series / DICOM-node JSON shapes sent to the browser
 src/util.rs           validation and helpers
 src/state.rs          shared application state
-src/routes/           session, studies, thumbnails, upload, download, send, viewer (Weasis + proxy), shares (staff: create/list/revoke), guest (invitation page and API), admin, settings, branding, router
+src/routes/           session, studies, thumbnails, upload, download, send (DICOM nodes, peers, DICOMweb), viewer (Weasis + proxy), shares (staff: create/list/revoke), guest (invitation page and API), admin, settings, branding, labels, router;
+                      files (images, tags, PDF, single files, NIfTI, ZIP of several), manage (delete, modify, move, anonymize, add a series),
+                      retrieve (query / retrieve), worklists, system (Configuration > System and Jobs)
 ```
 
 ---
@@ -796,7 +861,7 @@ The code compiles without warnings on Rust 1.91, passes `cargo clippy --all-targ
 formatted with `rustfmt` (see `rustfmt.toml`), and its dependencies were checked against the RustSec advisory
 database (no known vulnerable version in `Cargo.lock`). The automated tests live in the **`tests/`** folder:
 
-* `tests/server_tests.sh`: **463 checks** of the server against a fake Orthanc (`tests/mock_orthanc.py`) and a
+* `tests/server_tests.sh`: **582 checks** of the server against a fake Orthanc (`tests/mock_orthanc.py`) and a
   fake mail server (`tests/mock_smtp.py`):
   the two doors (staff portal vs invitation links only, Cloudflare headers refused on the intranet port), creating
   links with the default and the limited validity/downloads, the password gate and its throttling, what a guest
@@ -807,10 +872,10 @@ database (no known vulnerable version in `Cargo.lock`). The automated tests live
   login hardening, caps, ETag/headers, concurrent administrators, and **talking to Orthanc with an account, without
   one, and when it refuses the portal** (what is sent, what is not, the message for each case), and an
   administrator changing their own password (every other session of that account is signed out);
-* `tests/ui_tests.js`: **129 checks** of both web pages in a simulated browser (jsdom): the Share dialog and the
+* `tests/ui_tests.js`: **169 checks** of both web pages in a simulated browser (jsdom): the Share dialog and the
   Shares tab, the guest page (password, study, series, countdown, downloads left, expiry, revoked, 0-download
   links, no OHIF), what each kind of staff account sees, search, the with/without-account choice in Settings;
-* `cargo test`: **30 unit tests** (image validation; password and link generation; the rules that confine a guest
+* `cargo test`: **40 unit tests** (image validation; password and link generation; the rules that confine a guest
   to one study; account / no account and the wording of Orthanc refusals; the thumbnail cache; tokens and sessions;
   the role of a user, settings saved by earlier versions, the appearance settings; email addresses, invitation texts, the hourly email limit and
   the rule that the mail server password never travels unencrypted).

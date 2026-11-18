@@ -112,6 +112,9 @@ enum Area {
     Wado,
     /// Files of the OHIF web application itself.
     Ohif,
+    /// The other viewer applications of Orthanc's plugins (staff only): Stone Web Viewer,
+    /// VolView and the whole-slide-imaging viewer (whose tiles are under `/wsi/` too).
+    App(&'static str),
 }
 
 /// Accepts only harmless relative paths: `studies/{uid}/series/...`, `metadata`,
@@ -162,18 +165,18 @@ async fn forward(
     // Who is asking? Staff: the session cookie or a Weasis token, with the `visualize`
     // permission. Guest: the cookie set by an invitation's password; the viewer then only
     // gets what belongs to that invitation's study (checked below).
-    let guest_study_uid: Option<String> = match audience {
+    let guest_study_uids: Option<Vec<String>> = match audience {
         Audience::Staff => {
             authenticate_viewer(state, headers)?;
             None
         }
-        Audience::Guest => Some(authenticate_share(state, headers)?.study_uid),
+        Audience::Guest => Some(authenticate_share(state, headers)?.study_uids()),
     };
 
     // Where the request goes inside Orthanc.
     let mut upstream = match area {
         Area::Wado => "/wado".to_string(),
-        Area::DicomWeb | Area::Ohif => {
+        Area::DicomWeb | Area::Ohif | Area::App(_) => {
             if !path.is_empty() && !is_safe_path(path) {
                 return Err(AppError::BadRequest("Invalid path".into()));
             }
@@ -183,17 +186,22 @@ async fn forward(
             if area == Area::DicomWeb && !matches!(path.split('/').next(), Some("studies" | "series" | "instances")) {
                 return Err(AppError::NotFound);
             }
-            let root = if area == Area::DicomWeb { "/dicom-web" } else { "/ohif" };
+            let root = match area {
+                Area::DicomWeb => "/dicom-web",
+                Area::App(root) => root,
+                _ => "/ohif",
+            };
             format!("{root}/{path}")
         }
     };
     // A guest may only read THEIR study, and never whole DICOM files: the only way to get the
     // files is the counted ZIP download (see sharing.rs for the rules and the reasons).
-    if let Some(study_uid) = &guest_study_uid {
+    if let Some(study_uids) = &guest_study_uids {
         let allowed = match area {
-            Area::DicomWeb => sharing::guest_may_read_dicomweb(path, query.as_deref(), study_uid),
-            Area::Wado => sharing::guest_may_read_wado(query.as_deref(), study_uid),
-            Area::Ohif => true, // the viewer application itself (static files)
+            Area::DicomWeb => sharing::guest_may_read_dicomweb(path, query.as_deref(), study_uids),
+            Area::Wado => sharing::guest_may_read_wado(query.as_deref(), study_uids),
+            Area::Ohif => true,    // the viewer application itself (static files)
+            Area::App(_) => false, // guests only get OHIF
         };
         if !allowed {
             return Err(AppError::Denied("This link only gives access to the shared study.".into()));
@@ -210,8 +218,8 @@ async fn forward(
     let answer = state.orthanc.proxy_get(&upstream, headers, host, proto).await?;
 
     let cache_control = match area {
-        Area::Ohif if is_static_asset(path) => "private, max-age=3600",
-        Area::Ohif => "private, no-cache",
+        Area::Ohif | Area::App(_) if is_static_asset(path) => "private, max-age=3600",
+        Area::Ohif | Area::App(_) => "private, no-cache",
         // Images and patient data: never cached by browsers or proxies.
         Area::DicomWeb | Area::Wado => "private, no-store",
     };
@@ -272,4 +280,30 @@ pub async fn ohif_index(
 /// `GET /ohif` -> `/ohif/` (OHIF's relative links need the trailing slash).
 pub async fn ohif_redirect() -> Redirect {
     Redirect::permanent("/ohif/")
+}
+
+/// `/stone-webviewer/*`, `/volview/*` and `/wsi/*`: the other viewers, for staff with `visualize`.
+pub async fn app_proxy(
+    State(state): State<AppState>,
+    Extension(audience): Extension<Audience>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+    RawQuery(query): RawQuery,
+) -> AppResult<Response> {
+    let full = uri.path();
+    let (root, rest) = ["/stone-webviewer", "/volview", "/wsi"]
+        .into_iter()
+        .find_map(|root| full.strip_prefix(root).map(|rest| (root, rest.trim_start_matches('/'))))
+        .ok_or(AppError::NotFound)?;
+    let settings = state.settings.get();
+    let mode = match root {
+        "/stone-webviewer" => settings.stone_viewer,
+        "/volview" => settings.volview_viewer,
+        _ => settings.wsi_viewer,
+    };
+    if mode == crate::settings::OhifMode::Off {
+        return Err(AppError::NotFound);
+    }
+    let rest = if rest.is_empty() { "index.html" } else { rest };
+    forward(&state, &headers, audience, Area::App(root), rest, query).await
 }

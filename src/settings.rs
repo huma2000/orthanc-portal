@@ -56,6 +56,57 @@ pub enum OhifMode {
     Off,
 }
 
+/// How dates are written in the portal (Settings > Appearance).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DateFormat {
+    /// 2024-05-17
+    #[default]
+    Iso,
+    /// 17/05/2024
+    Dmy,
+    /// 05/17/2024
+    Mdy,
+    /// 17.05.2024
+    DmyDots,
+    /// 17 May 2024
+    Long,
+}
+
+/// How patient names are written (DICOM stores `DOE^JOHN`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NameFormat {
+    /// DOE, JOHN
+    #[default]
+    LastFirst,
+    /// JOHN DOE
+    FirstLast,
+    /// DOE^JOHN, as stored
+    Dicom,
+}
+
+/// The OHIF modes that can be offered (each one a button), with the address of each.
+pub const OHIF_MODES: [&str; 6] = ["viewer", "mpr", "volume", "tmtv", "segmentation", "microscopy"];
+
+/// The fields the study window can show (Settings > Search & labels), in the order offered.
+pub const STUDY_DETAIL_FIELDS: [&str; 14] = [
+    "patient_id",
+    "birth_date",
+    "sex",
+    "other_ids",
+    "study_date",
+    "description",
+    "accession",
+    "referring",
+    "requesting",
+    "institution",
+    "modalities",
+    "series",
+    "labels",
+    "study_uid",
+];
+
 /// A secret string. It serialises normally (it must be stored in the database to
 /// be usable) but prints as `***` in `Debug`, so it can never leak into a log by accident.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,6 +187,10 @@ pub struct Role {
 }
 
 /// Value of a switch missing from an older stored copy of the settings.
+fn default_auto_refresh_seconds() -> u64 {
+    30
+}
+
 fn default_true() -> bool {
     true
 }
@@ -357,6 +412,14 @@ pub struct Settings {
     pub simplified_recent_title: String,
     #[serde(default = "default_upload_text")]
     pub simplified_upload_text: String,
+    /// Automatic refresh of the recent studies (home page) and of the Transfers page.
+    #[serde(default = "default_true")]
+    pub recent_auto_refresh: bool,
+    #[serde(default = "default_true")]
+    pub transfers_auto_refresh: bool,
+    /// Seconds between two automatic refreshes.
+    #[serde(default = "default_auto_refresh_seconds")]
+    pub auto_refresh_seconds: u64,
 
     // ---- Search and lists (Settings > Search & labels) --------------------------------
     /// Columns of the studies tables, in order (keys of [`STUDY_COLUMNS`]).
@@ -381,6 +444,121 @@ pub struct Settings {
     /// Show how many studies carry each label (one count per label for Orthanc).
     #[serde(default = "default_true")]
     pub label_counts: bool,
+    /// Labels at all: when off, no labels column, filter, button or Help section.
+    #[serde(default = "default_true")]
+    pub labels_enabled: bool,
+    /// The fields of the study window, in order (keys of [`STUDY_DETAIL_FIELDS`]).
+    #[serde(default = "default_study_detail_fields")]
+    pub study_detail_fields: Vec<String>,
+
+    // ---- Optional features (Settings > Features) ------------------------------------
+    /// Tick boxes on the lists, to download, send, share, label, view or delete several studies at once.
+    #[serde(default = "default_true")]
+    pub bulk_actions: bool,
+    /// The images of a series, their DICOM tags, a preview of one image and PDF reports.
+    #[serde(default = "default_true")]
+    pub instance_browser: bool,
+    /// Download a single DICOM file (needs the `download` permission).
+    #[serde(default = "default_true")]
+    pub single_file_download: bool,
+    /// Export a series as NIfTI (needs Orthanc's neuro plugin).
+    #[serde(default)]
+    pub nifti_export: bool,
+    /// Delete studies, series and images (needs the `delete` permission).
+    #[serde(default)]
+    pub allow_delete: bool,
+    /// Change tags, move a study to another patient or a series to another study (`edit`).
+    #[serde(default)]
+    pub allow_modify: bool,
+    /// Anonymize a study or series (`edit`).
+    #[serde(default)]
+    pub allow_anonymize: bool,
+    /// Add a series made from PDF files or pictures to a study (`edit`).
+    #[serde(default)]
+    pub allow_add_series: bool,
+    /// One invitation link for several studies.
+    #[serde(default = "default_true")]
+    pub multi_study_shares: bool,
+    /// Send to the Orthanc peers and the DICOMweb servers configured in Orthanc, not only to DICOM nodes.
+    #[serde(default)]
+    pub send_to_peers: bool,
+    #[serde(default)]
+    pub send_to_dicomweb: bool,
+    /// Search other systems and bring studies in (`retrieve`).
+    #[serde(default)]
+    pub query_retrieve: bool,
+    /// Modality worklists (Orthanc's worklists plugin, `worklists`).
+    #[serde(default)]
+    pub worklists_enabled: bool,
+    /// Configuration > Jobs: every Orthanc job, with cancel / pause / resume / retry.
+    #[serde(default = "default_true")]
+    pub jobs_page: bool,
+    /// Configuration > System: version, storage, counts, plugins, log level, metrics.
+    #[serde(default = "default_true")]
+    pub system_page: bool,
+    /// Configuration > System: read any address of Orthanc's REST API (GET only).
+    #[serde(default)]
+    pub raw_api: bool,
+    /// More viewers, each offered when its Orthanc plugin is there (auto), always or never.
+    #[serde(default = "default_ohif_mode")]
+    pub stone_viewer: OhifMode,
+    #[serde(default = "default_ohif_mode")]
+    pub volview_viewer: OhifMode,
+    #[serde(default = "default_ohif_mode")]
+    pub wsi_viewer: OhifMode,
+    /// Address of a MedDream viewer, with `{study_uid}` where the study goes. Empty = no MedDream button.
+    #[serde(default)]
+    pub meddream_url: String,
+    /// The OHIF modes offered (keys of [`OHIF_MODES`]).
+    #[serde(default = "default_ohif_modes")]
+    pub ohif_modes: Vec<String>,
+    /// Name of downloaded ZIP files, with {patient_id}, {patient_name}, {study_date}, {description},
+    /// {accession}, {modality}, {id}.
+    #[serde(default = "default_download_name")]
+    pub download_name_template: String,
+
+    // ---- Formatting (Settings > Appearance) -------------------------------------------
+    #[serde(default)]
+    pub date_format: DateFormat,
+    #[serde(default)]
+    pub name_format: NameFormat,
+    /// Extra CSS rules added after the portal's own (staff portal and invitation page).
+    #[serde(default)]
+    pub custom_css: String,
+}
+
+fn default_ohif_mode() -> OhifMode {
+    OhifMode::Auto
+}
+
+fn default_ohif_modes() -> Vec<String> {
+    vec!["viewer".into()]
+}
+
+fn default_download_name() -> String {
+    "{patient_id}_{study_date}_{id}".into()
+}
+
+fn default_study_detail_fields() -> Vec<String> {
+    ["patient_id", "sex", "birth_date", "study_date", "description", "modalities", "series", "labels"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// The download name of a study: the template filled in, made safe for every file system.
+pub fn download_name(template: &str, values: &[(&str, &str)]) -> String {
+    let mut name = template.to_string();
+    for (key, value) in values {
+        name = name.replace(&format!("{{{key}}}"), value);
+    }
+    let clean = crate::util::sanitize_filename(&name);
+    let clean: String = clean.chars().take(120).collect();
+    if clean.trim_matches(|c| c == '_' || c == '.').is_empty() {
+        "study".into()
+    } else {
+        clean
+    }
 }
 
 /// Every column the studies tables can show (Settings > Search & labels), in the order offered.
@@ -515,6 +693,9 @@ impl Settings {
             simplified_show_labels: false,
             simplified_recent_title: default_recent_title(),
             simplified_upload_text: default_upload_text(),
+            recent_auto_refresh: true,
+            transfers_auto_refresh: true,
+            auto_refresh_seconds: default_auto_refresh_seconds(),
             study_columns: default_study_columns(),
             study_search_fields: default_study_search_fields(),
             search_as_you_type: false,
@@ -522,6 +703,33 @@ impl Settings {
             infinite_scroll: false,
             available_labels: Vec::new(),
             label_counts: true,
+            labels_enabled: true,
+            study_detail_fields: default_study_detail_fields(),
+            bulk_actions: true,
+            instance_browser: true,
+            single_file_download: true,
+            nifti_export: false,
+            allow_delete: false,
+            allow_modify: false,
+            allow_anonymize: false,
+            allow_add_series: false,
+            multi_study_shares: true,
+            send_to_peers: false,
+            send_to_dicomweb: false,
+            query_retrieve: false,
+            worklists_enabled: false,
+            jobs_page: true,
+            system_page: true,
+            raw_api: false,
+            stone_viewer: OhifMode::Auto,
+            volview_viewer: OhifMode::Auto,
+            wsi_viewer: OhifMode::Auto,
+            meddream_url: String::new(),
+            ohif_modes: default_ohif_modes(),
+            download_name_template: default_download_name(),
+            date_format: DateFormat::Iso,
+            name_format: NameFormat::LastFirst,
+            custom_css: String::new(),
         }
     }
 
@@ -670,6 +878,8 @@ impl Settings {
         self.available_labels.retain(|l| !l.is_empty());
         self.available_labels.dedup();
         self.simplified_upload_text = self.simplified_upload_text.trim().to_string();
+        self.meddream_url = self.meddream_url.trim().to_string();
+        self.download_name_template = self.download_name_template.trim().to_string();
         for role in &mut self.roles {
             role.key = role.key.trim().to_string();
             role.label = role.label.trim().to_string();
@@ -877,6 +1087,47 @@ impl Settings {
             }
         }
         range("Recent studies on the home page", self.simplified_recent_count, 1, 100)?;
+        range("Auto-refresh interval (seconds)", self.auto_refresh_seconds, 5, 3600)?;
+        // --- optional features and formatting
+        let mut seen_fields = Vec::new();
+        for f in &self.study_detail_fields {
+            if !STUDY_DETAIL_FIELDS.contains(&f.as_str()) || seen_fields.contains(f) {
+                return bad(format!("'{f}' is not a field of the study window (or appears twice)"));
+            }
+            seen_fields.push(f.clone());
+        }
+        let mut seen_modes = Vec::new();
+        for m in &self.ohif_modes {
+            if !OHIF_MODES.contains(&m.as_str()) || seen_modes.contains(m) {
+                return bad(format!("'{m}' is not an OHIF mode (or appears twice)"));
+            }
+            seen_modes.push(m.clone());
+        }
+        if !self.meddream_url.is_empty()
+            && (!(self.meddream_url.starts_with("https://") || self.meddream_url.starts_with("http://"))
+                || !self.meddream_url.contains("{study_uid}")
+                || self.meddream_url.len() > 300
+                || self
+                    .meddream_url
+                    .chars()
+                    .any(|c| c.is_whitespace() || c.is_control() || c == '"' || c == '<' || c == '>'))
+        {
+            return bad("The MedDream address must start with http:// or https:// and contain {study_uid}".into());
+        }
+        if self.download_name_template.is_empty()
+            || self.download_name_template.chars().count() > 120
+            || has_control(&self.download_name_template)
+        {
+            return bad("The name of downloaded files needs 1 to 120 characters".into());
+        }
+        if self.custom_css.len() > 50_000 {
+            return bad("The custom CSS can have at most 50,000 characters".into());
+        }
+        // The rules stay inside a <link>ed style sheet; still, nothing that could close a tag or load from elsewhere.
+        let css = self.custom_css.to_lowercase();
+        if css.contains("</") || css.contains("@import") || css.contains("url(") || css.contains("expression(") {
+            return bad("The custom CSS cannot contain @import, url(...), expression(...) or HTML tags".into());
+        }
         if self.simplified_recent_title.chars().count() > 60 || has_control(&self.simplified_recent_title) {
             return bad("The title of the recent studies can have at most 60 characters".into());
         }
@@ -1171,11 +1422,39 @@ mod tests {
         assert!(!ok(json!({ "color_background": "url(x)" })));
         assert!(!ok(json!({ "simplified_recent_count": 0 })));
         assert!(!ok(json!({ "simplified_recent_count": 101 })));
+        assert_eq!(base.auto_refresh_seconds, 30);
+        assert!(ok(json!({ "auto_refresh_seconds": 5, "recent_auto_refresh": false })));
+        assert!(!ok(json!({ "auto_refresh_seconds": 4 })));
+        assert!(!ok(json!({ "auto_refresh_seconds": 3601 })));
+        assert!(ok(json!({ "date_format": "dmy", "name_format": "first_last", "custom_css": ".x { color: red }" })));
+        assert!(!ok(json!({ "custom_css": "@import 'http://evil';" })));
+        assert!(!ok(json!({ "custom_css": "body { background: url(http://x) }" })));
+        assert!(!ok(json!({ "date_format": "yyyy" })));
+        assert!(ok(json!({ "meddream_url": "https://md.example.com/?study={study_uid}" })));
+        assert!(!ok(json!({ "meddream_url": "javascript:alert(1)//{study_uid}" })));
+        assert!(!ok(json!({ "meddream_url": "https://md.example.com/" })), "no {{study_uid}}");
+        assert!(ok(json!({ "ohif_modes": ["viewer", "tmtv"] })));
+        assert!(!ok(json!({ "ohif_modes": ["teleport"] })));
+        assert!(!ok(json!({ "study_detail_fields": ["shoe_size"] })));
+        assert!(!ok(json!({ "download_name_template": "" })));
         assert!(!ok(json!({ "theme_mode": "neon" })));
         assert!(!ok(json!({ "simplified_recent_layout": "list" })));
         assert!(ok(json!({ "simplified_recent_order": "study_date" })));
         assert!(ok(
             json!({ "theme_mode": "dark", "simplified_card_size": "large", "simplified_recent_layout": "cards" })
         ));
+    }
+
+    #[test]
+    fn download_names_follow_the_template() {
+        let values = [("patient_id", "P-001"), ("study_date", "20240517"), ("description", "CT/CHEST"), ("id", "aaaa")];
+        assert_eq!(download_name("{patient_id}_{study_date}_{id}", &values), "P-001_20240517_aaaa");
+        assert!(!download_name("{description}", &values).contains('/'));
+        assert_eq!(download_name("{nothing}", &[]), sanitize("{nothing}"));
+        assert_eq!(download_name("___", &[]), "download");
+    }
+
+    fn sanitize(s: &str) -> String {
+        crate::util::sanitize_filename(s)
     }
 }

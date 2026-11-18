@@ -69,9 +69,7 @@ pub async fn download_study(
         state.orthanc.archive(ArchiveKind::Study, &id, dicomdir)
     )?;
     let study = StudySummary::from_orthanc(&study);
-    let who = if study.patient_id.is_empty() { &study.patient_name } else { &study.patient_id };
-    let file_name =
-        format!("{}_{}_{}.zip", sanitize_filename(who), sanitize_filename(&study.study_date), short_id(&id));
+    let file_name = crate::routes::files::study_file_name(&state.settings.get().download_name_template, &study, &id);
 
     state.db.audit(&user.username, "download_study", &format!("{id} ({file_name})"));
     zip_response(upstream, &file_name)

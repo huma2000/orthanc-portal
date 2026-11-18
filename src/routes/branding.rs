@@ -55,7 +55,8 @@ pub fn render_template(state: &AppState, template: &str) -> Response {
     let html = template
         .replace("{{TITLE}}", &html_escape(settings.window_title()))
         .replace("{{FAVICON_URL}}", &html_escape(favicon_url))
-        .replace("{{FAVICON_TYPE}}", &html_escape(favicon_type));
+        .replace("{{FAVICON_TYPE}}", &html_escape(favicon_type))
+        .replace("{{CUSTOM_CSS}}", &custom_css_link(&settings.custom_css));
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-cache")], html).into_response()
 }
 
@@ -71,6 +72,23 @@ fn image_response(image: Option<Arc<BrandImage>>) -> Response {
         None => ([(header::CONTENT_TYPE, "image/svg+xml"), (header::CACHE_CONTROL, CACHE)], DEFAULT_MARK_SVG)
             .into_response(),
     }
+}
+
+/// The `<link>` of the administrator's CSS (Settings > Appearance), or nothing. Its address
+/// changes with its content, so browsers never keep an old version.
+fn custom_css_link(css: &str) -> String {
+    if css.trim().is_empty() {
+        return String::new();
+    }
+    let hash = css.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
+    format!("<link rel=\"stylesheet\" href=\"/branding/custom.css?v={hash:016x}\" />")
+}
+
+/// `GET /branding/custom.css`: the extra CSS of Settings > Appearance (both listeners).
+pub async fn custom_css(State(state): State<AppState>) -> Response {
+    let css = state.settings.get().custom_css.clone();
+    ([(header::CONTENT_TYPE, "text/css; charset=utf-8"), (header::CACHE_CONTROL, "public, max-age=3600")], css)
+        .into_response()
 }
 
 pub async fn logo_image(State(state): State<AppState>) -> Response {

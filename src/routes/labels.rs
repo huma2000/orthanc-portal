@@ -41,8 +41,18 @@ pub async fn all_labels(state: &AppState) -> AppResult<Vec<String>> {
 
 /// The labels to offer: those in Orthanc plus the allowed ones not used yet, with the number of
 /// studies of each (when counting is switched on and Orthanc can count).
+/// Labels can be switched off altogether (Settings > Search & labels).
+fn labels_on(state: &AppState) -> AppResult<()> {
+    if state.settings.get().labels_enabled {
+        Ok(())
+    } else {
+        Err(AppError::Denied("Labels are switched off (Settings > Search & labels)".into()))
+    }
+}
+
 pub async fn list_labels(State(state): State<AppState>, AuthUser(user): AuthUser) -> AppResult<Json<Value>> {
     user.require(Permission::Read)?;
+    labels_on(&state)?;
     let settings = state.settings.get();
     let mut names = all_labels(&state).await?;
     for allowed in &settings.available_labels {
@@ -101,6 +111,7 @@ pub async fn add_label(
     Path((id, label)): Path<(String, String)>,
 ) -> AppResult<Json<Value>> {
     check_target(&user, &id, &label)?;
+    labels_on(&state)?;
     let allowed = &state.settings.get().available_labels;
     if !allowed.is_empty() && !allowed.contains(&label) {
         return Err(AppError::BadRequest(format!(
@@ -119,6 +130,7 @@ pub async fn remove_label(
     Path((id, label)): Path<(String, String)>,
 ) -> AppResult<Json<Value>> {
     check_target(&user, &id, &label)?;
+    labels_on(&state)?;
     state.orthanc.delete(&format!("/studies/{id}/labels/{label}")).await?;
     state.db.audit(&user.username, "label_removed", &format!("{label} from study {id}"));
     labels_of(&state, &id).await

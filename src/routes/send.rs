@@ -1,20 +1,24 @@
 //! # routes/send.rs
 //!
-//! Sending a study to a **remote DICOM node** (what Orthanc calls a *DICOM
-//! modality*, declared in Orthanc's `DicomModalities` configuration). All routes
-//! require the `send` permission and exist on the intranet listener only.
+//! Sending studies to **other systems**: the remote DICOM nodes (what Orthanc calls *DICOM
+//! modalities*, `DicomModalities`), and, when switched on in Settings > Features, the other
+//! Orthanc servers (`OrthancPeers`) and the DICOMweb servers (`DicomWeb.Servers`) configured in
+//! Orthanc. All routes require the `send` permission and exist on the intranet listener only.
 //!
-//! * `GET  /api/modalities`          destinations Orthanc can send to
-//! * `POST /api/studies/{id}/send`   start sending a study: body `{ "target": "alias" }`
-//! * `GET  /api/transfers`           recent transfers with their live state
+//! * `GET  /api/modalities`          destinations: `{ id, kind, aet, host, port, url, description }`.
+//!   A DICOM node's id is its alias; a peer is `peer:<name>`, a DICOMweb server `dicomweb:<name>`.
+//! * `POST /api/studies/{id}/send`   start sending a study: body `{ "target": "<id>" }`
+//! * `POST /api/send`                send several studies: `{ "target", "studies": [...] }` (one transfer each)
+//! * `GET  /api/transfers`           recent transfers (and retrievals) with their live state
 //!
-//! How it works: the portal asks Orthanc to run a C-STORE job
-//! (`POST /modalities/{alias}/store` with `"Synchronous": false`). Orthanc answers
-//! at once with a **job id**; the portal stores it and, when the Transfers tab is
+//! How it works: the portal asks Orthanc to run a job (`POST /modalities/{alias}/store`,
+//! `/peers/{name}/store` or `/dicom-web/servers/{name}/stow`, all with `"Synchronous": false`).
+//! Orthanc answers at once with a **job id**; the portal stores it and, when the Transfers tab is
 //! open, reads `GET /jobs/{id}` to show Pending / Running / Success / Failure, the progress,
 //! the number of images, the time it has been running and the images that failed.
 
 use crate::auth::AuthUser;
+use crate::db::User;
 use crate::error::{AppError, AppResult};
 use crate::models::{ModalityNode, StudySummary};
 use crate::permissions::Permission;
@@ -23,30 +27,88 @@ use crate::util::is_valid_orthanc_id;
 use axum::extract::{Path, State};
 use axum::Json;
 use futures_util::{stream, StreamExt};
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-/// Lists the remote DICOM nodes the study can be sent to.
+/// A peer or DICOMweb server of Orthanc, as a destination.
+fn named_target(kind: &'static str, name: &str, cfg: &Value) -> ModalityNode {
+    let mut node = ModalityNode::bare(&format!("{kind}:{name}"));
+    node.kind = kind;
+    // Only the address: never the user name or password Orthanc keeps for it.
+    node.url = cfg["Url"].as_str().or_else(|| cfg.as_array().and_then(|a| a.first()?.as_str())).unwrap_or("").into();
+    node
+}
+
+/// Every destination the user may send to (DICOM nodes, and peers / DICOMweb servers when switched on).
+pub async fn destinations(state: &AppState) -> AppResult<Vec<ModalityNode>> {
+    let settings = state.settings.get();
+    let mut nodes = state.orthanc.list_modalities().await?;
+    if settings.send_to_peers {
+        let peers = state.orthanc.named_targets("/peers").await;
+        nodes.extend(peers.iter().map(|(name, cfg)| named_target("peer", name, cfg)));
+    }
+    if settings.send_to_dicomweb {
+        let servers = state.orthanc.named_targets("/dicom-web/servers").await;
+        nodes.extend(servers.iter().map(|(name, cfg)| named_target("dicomweb", name, cfg)));
+    }
+    let descriptions = state.db.node_descriptions()?;
+    for node in &mut nodes {
+        node.description = descriptions.get(&node.id).cloned().unwrap_or_default();
+    }
+    Ok(nodes)
+}
+
+/// Lists the destinations a study can be sent to.
 pub async fn list_modalities(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
 ) -> AppResult<Json<Vec<ModalityNode>>> {
     user.require(Permission::Send)?;
-    let mut nodes = state.orthanc.list_modalities().await?;
-    let descriptions = state.db.node_descriptions()?;
-    for node in &mut nodes {
-        node.description = descriptions.get(&node.id).cloned().unwrap_or_default();
-    }
-    Ok(Json(nodes))
+    Ok(Json(destinations(&state).await?))
 }
 
 #[derive(Deserialize)]
 pub struct SendRequest {
-    /// Alias of the destination, as returned by `GET /api/modalities`.
     target: String,
 }
 
-/// Starts sending the whole study to the chosen node and returns immediately.
+/// Starts the job that sends one study to `node`; records it in the Transfers list.
+async fn start_send(state: &AppState, user: &User, node: &ModalityNode, id: &str) -> AppResult<(i64, String)> {
+    if !is_valid_orthanc_id(id) {
+        return Err(AppError::BadRequest("Invalid study id".into()));
+    }
+    let study = StudySummary::from_orthanc(&state.orthanc.get_json(&format!("/studies/{id}")).await?);
+    let label: String =
+        format!("{} | {} | {}", study.patient_name.replace('^', " "), study.study_date, study.study_description)
+            .chars()
+            .take(160)
+            .collect();
+
+    let job_id = match node.kind {
+        "dicom" => state.orthanc.store_to_modality(&node.id, id).await?,
+        kind => {
+            let name = node.id.split_once(':').map(|(_, n)| n).unwrap_or_default();
+            let name = utf8_percent_encode(name, NON_ALPHANUMERIC);
+            let path =
+                if kind == "peer" { format!("/peers/{name}/store") } else { format!("/dicom-web/servers/{name}/stow") };
+            state.orthanc.start_job(&path, &json!({ "Resources": [id], "Synchronous": false })).await?
+        }
+    };
+    let transfer_id = state.db.add_transfer(&user.username, id, &label, &node.id, &job_id, "send")?;
+    state.db.audit(&user.username, "send_study", &format!("{label} -> {} (job {job_id})", node.id));
+    Ok((transfer_id, job_id))
+}
+
+/// The destination called `target`, if the user may send there.
+async fn find_destination(state: &AppState, target: &str) -> AppResult<ModalityNode> {
+    destinations(state)
+        .await?
+        .into_iter()
+        .find(|n| n.id == target)
+        .ok_or_else(|| AppError::BadRequest("Unknown destination".into()))
+}
+
 pub async fn send_study(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -57,31 +119,45 @@ pub async fn send_study(
     if !is_valid_orthanc_id(&id) {
         return Err(AppError::BadRequest("Invalid study id".into()));
     }
-
-    // The destination must be one Orthanc really offers: the user's text is only
-    // used to PICK an entry, never to build a URL. Reading the study checks it exists
-    // (404 otherwise) and gives a readable label. Both questions are asked at once.
-    let study_path = format!("/studies/{id}");
-    let (nodes, study) = tokio::try_join!(state.orthanc.list_modalities(), state.orthanc.get_json(&study_path))?;
-    let node = nodes
-        .iter()
-        .find(|n| n.id == req.target)
-        .ok_or_else(|| AppError::BadRequest("Unknown DICOM destination".into()))?;
-
-    let study = StudySummary::from_orthanc(&study);
-    let label: String =
-        format!("{} | {} | {}", study.patient_name.replace('^', " "), study.study_date, study.study_description)
-            .chars()
-            .take(160)
-            .collect();
-
-    let job_id = state.orthanc.store_to_modality(&node.id, &id).await?;
-    let transfer_id = state.db.add_transfer(&user.username, &id, &label, &node.id, &job_id)?;
-    state.db.audit(&user.username, "send_study", &format!("{label} -> {} (job {job_id})", node.id));
+    let node = find_destination(&state, &req.target).await?;
+    let (transfer_id, job_id) = start_send(&state, &user, &node, &id).await?;
     Ok(Json(json!({ "transfer_id": transfer_id, "job_id": job_id })))
 }
 
-/// One row of the Transfers tab: what was sent, where, and the live job state.
+#[derive(Deserialize)]
+pub struct BulkSendRequest {
+    target: String,
+    studies: Vec<String>,
+}
+
+/// Sends several studies (the tick boxes of the lists): one transfer per study.
+pub async fn send_many(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Json(req): Json<BulkSendRequest>,
+) -> AppResult<Json<Value>> {
+    user.require(Permission::Send)?;
+    if !state.settings.get().bulk_actions {
+        return Err(AppError::Denied("Actions on several studies are switched off (Settings > Features)".into()));
+    }
+    if req.studies.is_empty() || req.studies.len() > 100 {
+        return Err(AppError::BadRequest("Choose 1 to 100 studies".into()));
+    }
+    if req.studies.iter().any(|id| !is_valid_orthanc_id(id)) {
+        return Err(AppError::BadRequest("Invalid study id".into()));
+    }
+    let node = find_destination(&state, &req.target).await?;
+    let mut started = 0;
+    let mut errors = Vec::new();
+    for id in &req.studies {
+        match start_send(&state, &user, &node, id).await {
+            Ok(_) => started += 1,
+            Err(e) => errors.push(format!("{id}: {e}")),
+        }
+    }
+    Ok(Json(json!({ "started": started, "errors": errors })))
+}
+
 #[derive(Serialize)]
 pub struct TransferView {
     id: i64,
@@ -89,17 +165,15 @@ pub struct TransferView {
     username: String,
     label: String,
     target: String,
-    /// `Pending`, `Running`, `Success`, `Failure`, `Paused`, `Retry`, or
-    /// `Unknown` when Orthanc no longer remembers the job.
+    /// `send` or `retrieve`.
+    direction: String,
+    /// A retrieval: the StudyInstanceUID brought in (to open it once it is here).
+    study_uid: Option<String>,
     state: String,
-    /// 0-100.
     progress: u64,
-    /// Orthanc's explanation when the state is `Failure`.
     error: Option<String>,
-    /// Images of the study being sent, and how many could not be sent (when Orthanc says).
     instances: Option<u64>,
     failed: Option<u64>,
-    /// Seconds the job has been running (or ran, once finished).
     runtime: Option<f64>,
 }
 
@@ -114,7 +188,9 @@ pub async fn list_transfers(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
 ) -> AppResult<Json<Vec<TransferView>>> {
-    user.require(Permission::Send)?;
+    if !(user.may(Permission::Send) || user.may(Permission::Retrieve)) {
+        return Err(AppError::Forbidden("send"));
+    }
     let only_user = if user.permissions.contains(Permission::Admin) { None } else { Some(user.username.as_str()) };
     let transfers = state.db.recent_transfers(only_user, 40)?;
 
@@ -132,6 +208,8 @@ pub async fn list_transfers(
                     t.final_info.as_deref().and_then(|i| serde_json::from_str(i).ok()).unwrap_or_default();
                 return TransferView {
                     id: t.id,
+                    study_uid: (t.direction == "retrieve").then(|| t.study_id.clone()),
+                    direction: t.direction.clone(),
                     ts: t.ts,
                     username: t.username,
                     label: t.label,
@@ -162,6 +240,8 @@ pub async fn list_transfers(
             }
             TransferView {
                 id: t.id,
+                study_uid: (t.direction == "retrieve").then(|| t.study_id.clone()),
+                direction: t.direction.clone(),
                 ts: t.ts,
                 username: t.username,
                 label: t.label,

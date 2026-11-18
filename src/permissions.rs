@@ -14,6 +14,10 @@
 //! | `share`     | Invite somebody OUTSIDE: password-protected link to ONE study          |
 //! | `admin`     | Manage users and settings, read the audit log                          |
 //! | `labels`    | Put labels on studies and take them off (administrators can too)       |
+//! | `delete`    | Delete studies, series and images (when switched on in Settings)       |
+//! | `edit`      | Modify tags, anonymize, add a series (when switched on in Settings)    |
+//! | `retrieve`  | Search other systems and bring studies in (query / retrieve)           |
+//! | `worklists` | See, create and delete modality worklists                              |
 //!
 //! All accounts live on the **intranet**. People outside never have an account: they get a
 //! one-study invitation link (see `routes/shares.rs` and `routes/guest.rs`), which has its
@@ -39,11 +43,15 @@ pub enum Permission {
     Share,
     Admin,
     Labels,
+    Delete,
+    Edit,
+    Retrieve,
+    Worklists,
 }
 
 impl Permission {
     /// Every permission, in the order shown in the admin screen.
-    pub const ALL: [Permission; 8] = [
+    pub const ALL: [Permission; 12] = [
         Permission::Read,
         Permission::Visualize,
         Permission::Upload,
@@ -52,6 +60,10 @@ impl Permission {
         Permission::Share,
         Permission::Admin,
         Permission::Labels,
+        Permission::Delete,
+        Permission::Edit,
+        Permission::Retrieve,
+        Permission::Worklists,
     ];
 
     /// Stable machine name, used in the database, in the JSON API and in error messages.
@@ -65,6 +77,10 @@ impl Permission {
             Permission::Share => "share",
             Permission::Admin => "admin",
             Permission::Labels => "labels",
+            Permission::Delete => "delete",
+            Permission::Edit => "edit",
+            Permission::Retrieve => "retrieve",
+            Permission::Worklists => "worklists",
         }
     }
 
@@ -81,6 +97,10 @@ impl Permission {
             }
             Permission::Admin => "Manage users and settings, view the audit log",
             Permission::Labels => "Put labels on studies and take them off (to organise and find them)",
+            Permission::Delete => "Delete studies, series and images (if switched on in Settings > Features)",
+            Permission::Edit => "Change tags, anonymize, add a series (if switched on in Settings > Features)",
+            Permission::Retrieve => "Search other DICOM systems and bring studies in",
+            Permission::Worklists => "See, create and delete modality worklists",
         }
     }
 
@@ -126,12 +146,15 @@ impl PermissionSet {
     pub fn validate(&self) -> Result<(), AppError> {
         let needs_read = self.contains(Permission::Visualize)
             || self.contains(Permission::Labels)
+            || self.contains(Permission::Delete)
+            || self.contains(Permission::Edit)
+            || self.contains(Permission::Retrieve)
             || self.contains(Permission::Download)
             || self.contains(Permission::Send)
             || self.contains(Permission::Share);
         if needs_read && !self.contains(Permission::Read) {
             return Err(AppError::BadRequest(
-                "The 'visualize', 'labels', 'download', 'send' and 'share' permissions require the 'read' permission"
+                "The 'visualize', 'labels', 'delete', 'edit', 'retrieve', 'download', 'send' and 'share' permissions require the 'read' permission"
                     .into(),
             ));
         }

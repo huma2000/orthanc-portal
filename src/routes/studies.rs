@@ -203,6 +203,9 @@ fn series_order(p: &SearchParams) -> AppResult<Option<Value>> {
 
 /// The label part of a studies search: `(labels, "Any" | "All" | "None")`, or nothing.
 async fn label_filter(state: &AppState, p: &SearchParams) -> AppResult<Option<(Vec<String>, &'static str)>> {
+    if !state.settings.get().labels_enabled {
+        return Ok(None); // switched off: the label filters of old links are ignored
+    }
     let wanted: Vec<String> = p
         .labels
         .as_deref()
