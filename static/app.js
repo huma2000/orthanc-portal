@@ -3651,7 +3651,10 @@ function buildSettingsView() {
         h("div", { class: "setting" }, h("span", { class: "field-label" }, "OHIF modes offered"), ohifModesEditor.node)),
       section("orthanc", "Orthanc connection", "The PACS this portal works with. Saved changes apply immediately, without restarting.",
         urlField, modeField, userField, passwordField,
-        h("div", { class: "setting wide" }, testButton, testBox)),
+        h("div", { class: "setting wide" }, testButton, testBox),
+        field({ key: "orthanc_log_dir", label: "Folder of Orthanc's log files (optional)", wide: true,
+          placeholder: "/var/log/orthanc   or   C:\\Program Files\\Orthanc Server\\Logs",
+          hint: "Where Orthanc writes its log (its --logdir option), as seen from the computer or container running the portal. Orthanc cannot send its log over its API: with this folder, Configuration > System shows it. Empty = not shown." })),
       section("network", "Network", networkIntro, networkFields, listenerInfo),
       section("sharing", "Share links (invitations for people outside)", "A staff member with the share permission can invite somebody outside: a link plus a generated password that opens ONE study, to look at online and to download a limited number of times, until the link expires. These are the defaults offered when creating a link, and the limits nobody can exceed.", SETTINGS_FIELDS.sharing.map(field)),
       section("email", "Email (sending share invitations)", "The Share windows can send the invitation by email (optional, for each link) when a mail server is set here. The emails are plain text; the password is included only when the staff member ticks it.",
@@ -4360,6 +4363,74 @@ function openWorklistDialog(w, reload) {
 
 /* ---- Configuration > Jobs and System ---- */
 
+/**
+ * "Orthanc log" at the bottom of the System page: the end of one of Orthanc's log files (read by the
+ * portal from the folder set in Settings > Orthanc: Orthanc's API cannot send it), with the file,
+ * the number of lines, the levels shown and a search box. Lines are coloured by level (E, W, I, T).
+ */
+function buildOrthancLogPanel() {
+  const panel = h("section", { class: "panel", id: "orthanc-log" }, h("h2", null, "Orthanc log"), h("div", { class: "loading" }, "Loading..."));
+  const fileSelect = h("select", { "aria-label": "Log file" });
+  const lineCount = h("select", { "aria-label": "Lines" }, [200, 500, 2000, 5000].map((n) => h("option", { value: n, selected: n === 500 }, `last ${n} lines`)));
+  const level = h("select", { "aria-label": "Levels" },
+    h("option", { value: "" }, "every level"), h("option", { value: "EW" }, "warnings and errors"), h("option", { value: "E" }, "errors only"));
+  const search = h("input", { type: "search", placeholder: "Search the lines", "aria-label": "Search the lines" });
+  const info = h("p", { class: "muted" });
+  const box = h("pre", { class: "raw-box log-box", tabindex: "0", "aria-label": "Orthanc log" });
+  const download = h("a", { class: "btn small", href: "#" }, "Download the file");
+  let lines = [];
+
+  /** The level of an Orthanc log line: its first letter (E1118 10:15:00.123456 ...). */
+  const levelOf = (line) => (/^[EWIT]\d{4} /.test(line) ? line[0] : "");
+
+  function draw() {
+    const q = search.value.trim().toLowerCase();
+    const shown = lines.filter((l) => (!level.value || level.value.includes(levelOf(l))) && (!q || l.toLowerCase().includes(q)));
+    box.replaceChildren(...shown.map((l) => h("span", { class: `log-line log-${levelOf(l) || "x"}` }, l, "\n")));
+    if (!shown.length) box.textContent = lines.length ? "No line matches." : "The file is empty.";
+    box.scrollTop = box.scrollHeight; // the newest lines
+  }
+
+  async function load(file = fileSelect.value) {
+    const params = new URLSearchParams({ lines: lineCount.value });
+    if (file) params.set("file", file);
+    let r;
+    try { r = await api("GET", `/api/admin/system/log?${params}`); } catch (e) {
+      panel.replaceChildren(h("h2", null, "Orthanc log"), h("p", { class: "form-error" }, e.message));
+      return;
+    }
+    if (!r.configured) {
+      panel.replaceChildren(h("h2", null, "Orthanc log"),
+        h("p", { class: "muted" }, "Orthanc's API can change the log level but cannot send the log itself. Enter the folder where Orthanc writes its log files in Settings > Orthanc, and it appears here."),
+        h("button", { class: "btn small", type: "button", onclick: () => openSettings("orthanc") }, "Open Settings > Orthanc"));
+      return;
+    }
+    if (!r.file) {
+      panel.replaceChildren(h("h2", null, "Orthanc log"), h("p", { class: "muted" }, `No log file in ${r.folder}. Orthanc writes them there only when it is started with --logdir (or --logfile).`));
+      return;
+    }
+    fileSelect.replaceChildren(...r.files.map((f) => h("option", { value: f.name, selected: f.name === r.file },
+      `${f.name} (${formatBytes(f.size)}, ${formatTimestamp(f.modified)})`)));
+    lines = r.lines;
+    info.textContent = `${r.lines.length} lines${r.truncated ? " (the end of the file)" : ""} of ${r.file}, ${formatBytes(r.size)}, last written ${formatTimestamp(r.modified)}. Every read is recorded in the audit log: the log can contain patient names and IDs.`;
+    download.href = `/api/admin/system/log/download?file=${encodeURIComponent(r.file)}`;
+    if (!panel.contains(box)) {
+      panel.replaceChildren(h("h2", null, "Orthanc log"),
+        h("div", { class: "actions log-controls" }, fileSelect, lineCount, level, search,
+          h("button", { class: "btn small", type: "button", onclick: () => load() }, "Refresh"), download),
+        info, box);
+    }
+    draw();
+  }
+
+  fileSelect.addEventListener("change", () => load());
+  lineCount.addEventListener("change", () => load());
+  level.addEventListener("change", draw);
+  search.addEventListener("input", draw);
+  load("");
+  return panel;
+}
+
 function buildJobsView() {
   const container = h("section", { class: "panel" }, h("div", { class: "loading" }, "Loading..."));
   async function load() {
@@ -4467,6 +4538,7 @@ function buildSystemView() {
         h("p", { class: "muted" }, "Read any address of Orthanc's API, for example /patients, /tools/labels or /studies/<id>. Only GET requests, never files; every read is in the audit log."),
         h("div", { class: "actions" }, path, h("button", { class: "btn small", type: "button", onclick: read }, "Read")), out));
     }
+    panels.push(buildOrthancLogPanel());
     container.replaceChildren(...panels);
   }
   load();

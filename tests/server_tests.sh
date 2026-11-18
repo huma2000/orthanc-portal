@@ -860,6 +860,24 @@ ok "...the log level can be changed" "$(body $F $A /api/admin/system/log-level -
 ok "...only to known levels (400)" "$(code $F $A PUT /api/admin/system/log-level -H "$J" -d '{"level":"loud"}')" "400"
 ok "...metrics as text" "$(body $F $A /api/admin/system/metrics)" "orthanc_count_studies 1"
 ok "...administrators only (403)" "$(code $F $V GET /api/admin/system)" "403"
+# Orthanc's log: read by the portal from the folder of Settings > Orthanc (Orthanc's API cannot send it)
+ok "Orthanc log: not set up, the page says so" "$(body $F $A /api/admin/system/log | py "str(d['configured'])")" "False"
+LOGDIR="$WORK/orthanc-logs"; mkdir -p "$LOGDIR"
+printf 'I1118 10:00:00.000001 MAIN main.cpp:1] Orthanc version: 1.12.10\nW1118 10:00:01.000001 MAIN x.cpp:2] A warning\nE1118 10:00:02.000001 HTTP-1 y.cpp:3] An error\n' > "$LOGDIR/Orthanc.log.20261118-100000.1"
+printf 'I1117 old start\n' > "$LOGDIR/Orthanc.log.20261117-090000.1"; touch -d '2026-11-17 09:00' "$LOGDIR/Orthanc.log.20261117-090000.1" 2>/dev/null
+printf 'secret' > "$LOGDIR/notes.txt"
+LOGDIR_NATIVE=$(cd "$LOGDIR" && (pwd -W 2>/dev/null || pwd))
+put $A "{\"orthanc_log_dir\":\"$LOGDIR_NATIVE\"}" > /dev/null
+ok "...set up: the newest file, its last lines" "$(body $F $A /api/admin/system/log | py "d['file']+' '+str(len(d['lines']))+' '+d['lines'][-1][:1]")" "Orthanc.log.20261118-100000.1 3 E"
+ok "...the log files of the folder only (not notes.txt)" "$(body $F $A /api/admin/system/log | py "','.join(f['name'] for f in d['files'])")" "Orthanc.log.20261118-100000.1,Orthanc.log.20261117-090000.1"
+ok "...another file of the list can be chosen" "$(body $F $A '/api/admin/system/log?file=Orthanc.log.20261117-090000.1' | py "d['lines'][0]")" "I1117 old start"
+ok "...but nothing else (404)" "$(code $F $A GET '/api/admin/system/log?file=notes.txt')/$(code $F $A GET '/api/admin/system/log?file=..%2F..%2Fportal.db')" "404/404"
+ok "...the number of lines is limited to what was asked" "$(body $F $A '/api/admin/system/log?lines=10' | py "str(len(d['lines']))")" "3"
+has "...download of the whole file" "$(body $F $A '/api/admin/system/log/download?file=Orthanc.log.20261118-100000.1')" "An error"
+has "...each read is in the audit log" "$(body $F $A '/api/admin/audit?limit=5')" "orthanc_log_read"
+ok "...administrators only (403)" "$(code $F $V GET /api/admin/system/log)" "403"
+ok "...a folder that does not exist: a clear 400" "$(put $A '{"orthanc_log_dir":"/no/such/folder"}' > /dev/null; code $F $A GET /api/admin/system/log)" "400"
+put $A '{"orthanc_log_dir":""}' > /dev/null
 ok "reading Orthanc's API is off by default (403)" "$(code $F $A GET '/api/admin/orthanc?path=/system')" "403"
 put $A '{"raw_api":true}' > /dev/null
 ok "...switched on: GET of an address" "$(body $F $A '/api/admin/orthanc?path=/system' | py "d['Version']")" "1.12.10"

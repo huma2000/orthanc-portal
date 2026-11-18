@@ -216,7 +216,7 @@ screens whose changes apply at once.
 | **Appearance > Dates, names and style** | How dates (2024-05-17, 17/05/2024, 05/17/2024, 17.05.2024, 17 May 2024) and patient names (DOE, JOHN / JOHN DOE / DOE^JOHN) are written everywhere, and **custom CSS** added after the portal's own (also on the invitation page; no `@import` or `url(...)`) |
 | **Appearance > Home page and icons** | How many recent studies the home page shows, which ones (last received / newest study date) and how (the Studies table, or cards with big previews), card size, the two texts of the home page, the total of studies in the header, names under the icons; auto-refresh of the recent studies and of Transfers (each on or off) and its interval (30 s by default, 5 s to 1 hour) |
 | **General > Viewers and uploads** | Show the **Weasis** button (on / off), show the **OHIF** button (automatic / always / never), largest uploaded file, preview thumbnails on/off and their cache size |
-| **Orthanc > Orthanc connection** | Address; **with an account** (user name + password, write-only: never sent back to the browser) **or without an account** (for an Orthanc that only accepts a list of allowed computers); **Test connection** (mode used, version, DICOMweb/OHIF plugins, number of DICOM nodes; works on values you have typed but not yet saved) |
+| **Orthanc > Orthanc connection** | Address; **with an account** (user name + password, write-only: never sent back to the browser) **or without an account** (for an Orthanc that only accepts a list of allowed computers); **Test connection** (mode used, version, DICOMweb/OHIF plugins, number of DICOM nodes; works on values you have typed but not yet saved); the optional **folder of Orthanc's log files**, for the System page |
 | **Network & sharing > Network** | Intranet address, enable/disable the internet listener (invitation links only) and its address, optional fixed public address for Weasis |
 | **Network & sharing > Share links** | **The public address of the share links** (your Cloudflare hostname; sharing stays off until it is set), the default and maximum validity (hours) and the default and maximum number of ZIP downloads |
 | **Network & sharing > Email** | The mail server that sends share invitations (optional): server, port, encryption (STARTTLS / TLS / none), user name and password (write-only), sender address, a text added at the end of every email, and **Send a test email** |
@@ -226,10 +226,28 @@ screens whose changes apply at once.
 | **DICOM nodes** | Remote DICOM systems Orthanc sends studies to: add, edit (with a description shown to the staff), delete, **Test** (DICOM ping) |
 | **Audit log** | Every change above is recorded (setting names only, never values or passwords) |
 | **Jobs** | Every Orthanc job (sending, retrieving, modifying, archives...): state, progress, run time, what it works on; **Pause**, **Resume**, **Cancel**, **Retry** |
-| **System** | Orthanc's version, database, DICOM AE title and port, storage limits; the numbers of patients, studies, series and images and the disk used; every plugin with its version; Orthanc's **log level** (default / verbose / trace); its Prometheus **metrics**; and, when switched on, a read-only view of **any address of Orthanc's REST API** |
+| **System** | Orthanc's version, database, DICOM AE title and port, storage limits; the numbers of patients, studies, series and images and the disk used; every plugin with its version; Orthanc's **log level** (default / verbose / trace); its Prometheus **metrics**; when switched on, a read-only view of **any address of Orthanc's REST API**; and at the bottom **Orthanc's log** (see below) |
 
 In the rest of this document *Settings > Share links* means the **Share links** section (here in the
 *Network & sharing* tab), and so on. The red "Orthanc" notice and the *Share...* dialog open the right tab.
+
+### Orthanc's log on the System page
+
+Orthanc's REST API can change its log level but cannot send the log itself, so the portal reads Orthanc's
+**log files**. Orthanc writes them only when it is started with `--logdir=<folder>` (one file per start,
+`Orthanc.log.YYYYMMDD-hhmmss.ffff`; the Windows installer uses `C:\Program Files\Orthanc Server\Logs`,
+Linux packages `/var/log/orthanc`). Enter that folder, **as the portal sees it**, in *Settings > Orthanc >
+Folder of Orthanc's log files*. *Configuration > System* then shows, at the bottom, the last 200 to 5,000 lines
+of the newest file (or of another file of the folder), coloured by level, with *warnings and errors* / *errors
+only*, a search box, *Refresh* and *Download the file*. Only plain log-file names of that folder are read
+(never another path, never a link), and every read is in the audit log: the log can contain patient names and IDs.
+
+* **Option B (everything in Docker)** does it already: Orthanc runs with `--logdir=/var/log/orthanc` on a shared
+  `orthanc-logs` volume that the portal mounts read-only at `/orthanc-logs` (`ORTHANC_LOG_DIR`). The log then no
+  longer appears in `docker compose logs orthanc`.
+* **Option A** (your own Orthanc in Docker): start Orthanc with `--logdir`, mount that folder into the portal
+  container read-only and enter its path in the setting (or set `ORTHANC_LOG_DIR` before the first start).
+* **Option C** (bare metal): enter Orthanc's log folder; the portal's account must be allowed to read it.
 
 ### Branding: make it yours
 
@@ -816,6 +834,7 @@ All JSON. State-changing calls need the header `X-Requested-With: portal`.
 | `GET /api/retrieve/sources`, `POST /api/retrieve/query`, `POST /api/retrieve/retrieve` | retrieve (+ feature) | Query / retrieve |
 | `GET/POST /api/worklists`, `PUT/DELETE /api/worklists/{id}` | worklists (+ feature) | Modality worklists |
 | `GET /api/admin/system`, `PUT /api/admin/system/log-level`, `GET /api/admin/system/metrics`, `GET /api/admin/orthanc?path=` | admin (+ feature) | The System page |
+| `GET /api/admin/system/log?file=&lines=`, `GET /api/admin/system/log/download?file=` | admin (+ feature) | The end of one of Orthanc's log files (from the folder of Settings > Orthanc); one whole file |
 | `GET /api/admin/jobs`, `POST /api/admin/jobs/{id}/cancel\|pause\|resume\|resubmit` | admin (+ feature) | The Jobs page |
 | `GET /stone-webviewer/*`, `/volview/*`, `/wsi/*` | visualize | The other viewers of Orthanc's plugins (staff only) |
 | `GET /api/public` | none | Branding: name, window title, logo, icon, login notice, `theme` (colours), `format` (dates and names) |
@@ -862,7 +881,7 @@ The code compiles without warnings on Rust 1.91, passes `cargo clippy --all-targ
 formatted with `rustfmt` (see `rustfmt.toml`), and its dependencies were checked against the RustSec advisory
 database (no known vulnerable version in `Cargo.lock`). The automated tests live in the **`tests/`** folder:
 
-* `tests/server_tests.sh`: **582 checks** of the server against a fake Orthanc (`tests/mock_orthanc.py`) and a
+* `tests/server_tests.sh`: **592 checks** of the server against a fake Orthanc (`tests/mock_orthanc.py`) and a
   fake mail server (`tests/mock_smtp.py`):
   the two doors (staff portal vs invitation links only, Cloudflare headers refused on the intranet port), creating
   links with the default and the limited validity/downloads, the password gate and its throttling, what a guest
@@ -873,10 +892,10 @@ database (no known vulnerable version in `Cargo.lock`). The automated tests live
   login hardening, caps, ETag/headers, concurrent administrators, and **talking to Orthanc with an account, without
   one, and when it refuses the portal** (what is sent, what is not, the message for each case), and an
   administrator changing their own password (every other session of that account is signed out);
-* `tests/ui_tests.js`: **174 checks** of both web pages in a simulated browser (jsdom): the Share dialog and the
+* `tests/ui_tests.js`: **178 checks** of both web pages in a simulated browser (jsdom): the Share dialog and the
   Shares tab, the guest page (password, study, series, countdown, downloads left, expiry, revoked, 0-download
   links, no OHIF), what each kind of staff account sees, search, the with/without-account choice in Settings;
-* `cargo test`: **40 unit tests** (image validation; password and link generation; the rules that confine a guest
+* `cargo test`: **42 unit tests** (image validation; password and link generation; the rules that confine a guest
   to one study; account / no account and the wording of Orthanc refusals; the thumbnail cache; tokens and sessions;
   the role of a user, settings saved by earlier versions, the appearance settings; email addresses, invitation texts, the hourly email limit and
   the rule that the mail server password never travels unencrypted).

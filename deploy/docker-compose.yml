@@ -39,9 +39,14 @@ services:
     environment:
       # Read by orthanc.json ("portal" account): the same value the portal uses below.
       ORTHANC_PORTAL_PASSWORD: ${ORTHANC_PORTAL_PASSWORD:?Set ORTHANC_PORTAL_PASSWORD in the .env file}
+    # Orthanc writes its log into files (one per start) that the portal shows in
+    # Configuration > System. (With --logdir, "docker compose logs orthanc" stays empty:
+    # read the log in the portal, or remove the option to get it back on the console.)
+    command: ["--logdir=/var/log/orthanc", "/etc/orthanc/"]
     volumes:
       - ./orthanc.json:/etc/orthanc/orthanc.json:ro   # configuration
       - orthanc-db:/var/lib/orthanc/db                # images + index (BACK THIS UP)
+      - orthanc-logs:/var/log/orthanc                 # Orthanc's log files
     ports:
       # DICOM protocol (C-STORE from scanners/modalities). Remove this line if
       # nothing sends images by DICOM. Keep it on the intranet only.
@@ -64,6 +69,7 @@ services:
       ORTHANC_PASSWORD: ${ORTHANC_PORTAL_PASSWORD:?Set ORTHANC_PORTAL_PASSWORD in the .env file}
       ADMIN_USERNAME: admin
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}       # empty = a random one is printed in the log
+      ORTHANC_LOG_DIR: /orthanc-logs            # where the portal finds Orthanc's log (initial value)
       # Listening ports: ALWAYS these (they are read-only in Settings > Network).
       # Change INTRANET_PORT / INTERNET_PORT in .env, then: docker compose up -d
       BIND_ADDR: 0.0.0.0:${INTRANET_PORT:-8080}
@@ -71,6 +77,7 @@ services:
       # RESET_SETTINGS: "true"                  # recovery: forget the settings saved from the web
     volumes:
       - portal-data:/data                       # users + audit log (BACK THIS UP)
+      - orthanc-logs:/orthanc-logs:ro           # Orthanc's log files, read only (Configuration > System)
     ports:
       # intranet access: http://<server>:<INTRANET_PORT>
       - "${INTRANET_BIND:-0.0.0.0}:${INTRANET_PORT:-8080}:${INTRANET_PORT:-8080}"
@@ -101,3 +108,4 @@ services:
 volumes:
   orthanc-db:
   portal-data:
+  orthanc-logs:

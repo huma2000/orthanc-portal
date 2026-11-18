@@ -291,6 +291,10 @@ pub struct Settings {
     /// Its password. Never sent to the browser (see [`Settings::to_view`]). Always empty
     /// when there is no account (see [`Settings::normalise`]).
     pub orthanc_password: Secret,
+    /// The folder where Orthanc writes its log files (its `--logdir`), as seen by the portal.
+    /// Empty = the System page cannot show Orthanc's log (Orthanc's REST API cannot read it).
+    #[serde(default)]
+    pub orthanc_log_dir: String,
 
     // ---- Network ------------------------------------------------------------
     /// INTRANET listener, e.g. `0.0.0.0:8080`: the whole portal, for staff.
@@ -650,6 +654,7 @@ impl Settings {
             orthanc_url: "http://localhost:8042".into(),
             orthanc_username: String::new(),
             orthanc_password: Secret::default(),
+            orthanc_log_dir: String::new(),
             bind_addr: "0.0.0.0:8080".into(),
             remote_enabled: true,
             remote_bind_addr: "0.0.0.0:8081".into(),
@@ -746,6 +751,9 @@ impl Settings {
         if let Some(v) = env_opt("ORTHANC_PASSWORD") {
             s.orthanc_password = Secret(v);
         }
+        if let Some(v) = env_opt("ORTHANC_LOG_DIR") {
+            s.orthanc_log_dir = v;
+        }
         if let Some(v) = env_opt("BIND_ADDR") {
             s.bind_addr = v;
         }
@@ -838,6 +846,7 @@ impl Settings {
         self.browser_title = self.browser_title.trim().to_string();
         self.login_notice = self.login_notice.trim().to_string();
         self.orthanc_url = self.orthanc_url.trim().trim_end_matches('/').to_string();
+        self.orthanc_log_dir = self.orthanc_log_dir.trim().to_string();
         self.orthanc_username = self.orthanc_username.trim().to_string();
         // No account means no password: never keep a hidden, unused secret around.
         if self.orthanc_username.is_empty() {
@@ -1088,6 +1097,9 @@ impl Settings {
         }
         range("Recent studies on the home page", self.simplified_recent_count, 1, 100)?;
         range("Auto-refresh interval (seconds)", self.auto_refresh_seconds, 5, 3600)?;
+        if self.orthanc_log_dir.chars().count() > 300 || has_control(&self.orthanc_log_dir) {
+            return bad("The folder of Orthanc's log files can have at most 300 characters".into());
+        }
         // --- optional features and formatting
         let mut seen_fields = Vec::new();
         for f in &self.study_detail_fields {

@@ -216,6 +216,8 @@ fn staff_router(state: AppState) -> Router {
         .route("/admin/system", get(system::overview))
         .route("/admin/system/log-level", put(system::set_log_level))
         .route("/admin/system/metrics", get(system::metrics))
+        .route("/admin/system/log", get(system::orthanc_log))
+        .route("/admin/system/log/download", get(system::orthanc_log_download))
         .route("/admin/orthanc", get(system::raw))
         .route("/admin/jobs", get(system::list_jobs))
         .route("/admin/jobs/{id}/{action}", post(system::job_action))
