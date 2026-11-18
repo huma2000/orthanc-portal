@@ -16,6 +16,7 @@ use crate::error::{AppError, AppResult};
 use crate::models::ModalityNode;
 use crate::permissions::Permission;
 use crate::state::AppState;
+use crate::util::feature;
 use crate::util::{contains_pattern, dicom_date, is_valid_dicom_uid, non_empty};
 use axum::extract::State;
 use axum::Json;
@@ -25,11 +26,7 @@ use serde_json::{json, Map, Value};
 
 fn allowed(state: &AppState, user: &User) -> AppResult<()> {
     user.require_or_admin(Permission::Retrieve)?;
-    if state.settings.get().query_retrieve {
-        Ok(())
-    } else {
-        Err(AppError::Denied("Query / retrieve is switched off (Settings > Features)".into()))
-    }
+    feature(state.settings.get().query_retrieve, "Query / retrieve is switched off")
 }
 
 /// DICOM nodes that answer C-FIND, and the DICOMweb servers of Orthanc.
@@ -43,12 +40,8 @@ async fn sources(state: &AppState) -> AppResult<Vec<ModalityNode>> {
         .map(|(id, cfg)| if cfg.is_null() { ModalityNode::bare(id) } else { ModalityNode::from_orthanc(id, cfg) })
         .collect();
     nodes.sort_by(|a, b| a.id.cmp(&b.id));
-    for (name, cfg) in state.orthanc.named_targets("/dicom-web/servers").await {
-        let mut node = ModalityNode::bare(&format!("dicomweb:{name}"));
-        node.kind = "dicomweb";
-        node.url = cfg["Url"].as_str().unwrap_or("").into();
-        nodes.push(node);
-    }
+    let servers = state.orthanc.named_targets("/dicom-web/servers").await;
+    nodes.extend(servers.iter().map(|(name, cfg)| crate::routes::send::named_target("dicomweb", name, cfg)));
     let descriptions = state.db.node_descriptions()?;
     for node in &mut nodes {
         node.description = descriptions.get(&node.id).cloned().unwrap_or_default();

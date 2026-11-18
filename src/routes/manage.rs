@@ -22,7 +22,7 @@ use crate::error::{AppError, AppResult};
 use crate::models::StudySummary;
 use crate::permissions::Permission;
 use crate::state::AppState;
-use crate::util::is_valid_orthanc_id;
+use crate::util::{feature, orthanc_id};
 use axum::extract::{Path, State};
 use axum::Json;
 use serde::Deserialize;
@@ -64,22 +64,6 @@ impl Level {
             Level::Series => "series",
             Level::Instance => "instances",
         }
-    }
-}
-
-fn check_id(id: &str) -> AppResult<()> {
-    if is_valid_orthanc_id(id) {
-        Ok(())
-    } else {
-        Err(AppError::BadRequest("Invalid id".into()))
-    }
-}
-
-fn switched_on(on: bool, what: &str) -> AppResult<()> {
-    if on {
-        Ok(())
-    } else {
-        Err(AppError::Denied(format!("{what} is switched off (Settings > Features)")))
     }
 }
 
@@ -155,8 +139,8 @@ async fn describe_study(state: &AppState, id: &str) -> String {
 
 async fn delete(state: AppState, user: User, level: Level, id: String) -> AppResult<Json<Value>> {
     user.require_or_admin(Permission::Delete)?;
-    switched_on(state.settings.get().allow_delete, "Deleting")?;
-    check_id(&id)?;
+    feature(state.settings.get().allow_delete, "Deleting is switched off")?;
+    orthanc_id(&id)?;
     let what = if level == Level::Study { describe_study(&state, &id).await } else { id.clone() };
     state.orthanc.delete(&format!("/{}/{id}", level.path())).await?;
     state.db.audit(&user.username, &format!("delete_{}", level.path()), &what);
@@ -211,8 +195,8 @@ fn modify_body(replace: Map<String, Value>, keep_uids: bool, level: Level) -> Va
 
 async fn modify(state: AppState, user: User, level: Level, id: String, req: ModifyRequest) -> AppResult<Json<Value>> {
     user.require_or_admin(Permission::Edit)?;
-    switched_on(state.settings.get().allow_modify, "Modifying")?;
-    check_id(&id)?;
+    feature(state.settings.get().allow_modify, "Modifying is switched off")?;
+    orthanc_id(&id)?;
     let replace = replacements(level, &req.replace)?;
     let changes =
         replace.iter().map(|(k, v)| format!("{k}={}", v.as_str().unwrap_or(""))).collect::<Vec<_>>().join(", ");
@@ -254,9 +238,9 @@ pub async fn move_study(
     Json(req): Json<MoveStudy>,
 ) -> AppResult<Json<Value>> {
     user.require_or_admin(Permission::Edit)?;
-    switched_on(state.settings.get().allow_modify, "Modifying")?;
-    check_id(&id)?;
-    check_id(&req.patient_from_study)?;
+    feature(state.settings.get().allow_modify, "Modifying is switched off")?;
+    orthanc_id(&id)?;
+    orthanc_id(&req.patient_from_study)?;
     if req.patient_from_study == id {
         return Err(AppError::BadRequest("Choose a study of another patient".into()));
     }
@@ -300,8 +284,8 @@ pub async fn move_series(
     Json(req): Json<MoveSeries>,
 ) -> AppResult<Json<Value>> {
     user.require_or_admin(Permission::Edit)?;
-    switched_on(state.settings.get().allow_modify, "Modifying")?;
-    check_id(&id)?;
+    feature(state.settings.get().allow_modify, "Modifying is switched off")?;
+    orthanc_id(&id)?;
     let mut replace = Map::new();
     let target_text = if req.study == "new" {
         let description = req.description.trim();
@@ -310,7 +294,7 @@ pub async fn move_series(
         replace.insert("StudyDescription".into(), json!(description));
         "a new study".to_string()
     } else {
-        check_id(&req.study)?;
+        orthanc_id(&req.study)?;
         let target = state.orthanc.get_json(&format!("/studies/{}", req.study)).await?;
         for tag in PATIENT_TAGS {
             replace.insert(tag.into(), json!(target["PatientMainDicomTags"][tag].as_str().unwrap_or("")));
@@ -351,8 +335,8 @@ async fn anonymize(
     req: AnonymizeRequest,
 ) -> AppResult<Json<Value>> {
     user.require_or_admin(Permission::Edit)?;
-    switched_on(state.settings.get().allow_anonymize, "Anonymizing")?;
-    check_id(&id)?;
+    feature(state.settings.get().allow_anonymize, "Anonymizing is switched off")?;
+    orthanc_id(&id)?;
     let mut replace = Map::new();
     for (tag, value) in [("PatientName", req.patient_name.trim()), ("PatientID", req.patient_id.trim())] {
         if !value.is_empty() {
@@ -424,8 +408,8 @@ pub async fn add_series(
     Json(req): Json<AddSeries>,
 ) -> AppResult<Json<Value>> {
     user.require_or_admin(Permission::Edit)?;
-    switched_on(state.settings.get().allow_add_series, "Adding a series")?;
-    check_id(&id)?;
+    feature(state.settings.get().allow_add_series, "Adding a series is switched off")?;
+    orthanc_id(&id)?;
     if req.files.is_empty() || req.files.len() > 50 {
         return Err(AppError::BadRequest("Choose 1 to 50 files".into()));
     }

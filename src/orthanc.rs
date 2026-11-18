@@ -66,7 +66,8 @@ const PLUGINS_TTL: Duration = Duration::from_secs(60);
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Plugins reported by `GET /plugins` and when they were read.
-type PluginsCache = Arc<Mutex<Option<(Instant, Vec<String>)>>>;
+/// The names are kept lower-cased, ready for [`OrthancClient::plugin_loaded`].
+type PluginsCache = Arc<Mutex<Option<(Instant, Arc<Vec<String>>)>>>;
 
 /// Result of the start-up compatibility check ([`OrthancClient::info`]).
 #[derive(Debug)]
@@ -133,6 +134,10 @@ pub struct OrthancClient {
     /// Current address and credentials; swapped when the settings change.
     endpoint: Arc<RwLock<Endpoint>>,
     plugins_cache: PluginsCache,
+    /// Held while `GET /plugins` is being read: callers that find the cache stale at the same
+    /// moment (a page load asks about four viewers at once) wait for that one answer instead
+    /// of each asking Orthanc.
+    plugins_refresh: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Reads the leading digits of "10-rc1" -> 10.
@@ -160,7 +165,12 @@ impl OrthancClient {
             .user_agent(concat!("orthanc-portal/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| AppError::Internal(format!("cannot build HTTP client: {e}")))?;
-        Ok(Self { http, endpoint: Arc::new(RwLock::new(endpoint)), plugins_cache: Arc::new(Mutex::new(None)) })
+        Ok(Self {
+            http,
+            endpoint: Arc::new(RwLock::new(endpoint)),
+            plugins_cache: Arc::new(Mutex::new(None)),
+            plugins_refresh: Arc::new(tokio::sync::Mutex::new(())),
+        })
     }
 
     /// The client used by the whole portal, configured from the saved settings.
@@ -339,31 +349,40 @@ impl OrthancClient {
         Ok(OrthancInfo { version, supported: version_ok && has_extended_find })
     }
 
-    /// Is a plugin whose name contains `name` loaded? (`GET /plugins`, cached 60 s.)
-    pub async fn plugin_loaded(&self, name: &str) -> bool {
-        // Look in the cache first. The lock is released before any `.await`.
-        {
-            let cache = self.plugins_cache.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some((read_at, plugins)) = cache.as_ref() {
-                if read_at.elapsed() < PLUGINS_TTL {
-                    return plugins.iter().any(|p| p.to_lowercase().contains(name));
-                }
-            }
+    /// The cached plugin list, if it is still fresh. The lock is never held across an `.await`.
+    fn fresh_plugins(&self) -> Option<Arc<Vec<String>>> {
+        let cache = self.plugins_cache.lock().unwrap_or_else(|e| e.into_inner());
+        cache.as_ref().filter(|(read_at, _)| read_at.elapsed() < PLUGINS_TTL).map(|(_, plugins)| plugins.clone())
+    }
+
+    /// The loaded plugins, lower-cased (`GET /plugins`, cached 60 s, read once even when many ask).
+    async fn plugins(&self) -> Arc<Vec<String>> {
+        if let Some(plugins) = self.fresh_plugins() {
+            return plugins;
         }
-        let plugins: Vec<String> = match self.get_json("/plugins").await {
-            Ok(Value::Array(items)) => items.iter().filter_map(|v| v.as_str()).map(str::to_string).collect(),
-            _ => {
-                // Orthanc does not answer. Remember "no plugins" for a few seconds only, so
-                // that every page load does not wait for the connection timeout again.
-                let backdated =
-                    Instant::now().checked_sub(PLUGINS_TTL - Duration::from_secs(10)).unwrap_or_else(Instant::now);
-                *self.plugins_cache.lock().unwrap_or_else(|e| e.into_inner()) = Some((backdated, Vec::new()));
-                return false;
+        let _reading = self.plugins_refresh.lock().await;
+        if let Some(plugins) = self.fresh_plugins() {
+            return plugins; // read by whoever held the lock before us
+        }
+        let (read_at, plugins) = match self.get_json("/plugins").await {
+            Ok(Value::Array(items)) => {
+                (Instant::now(), items.iter().filter_map(|v| v.as_str()).map(str::to_lowercase).collect())
             }
+            // Orthanc does not answer. Remember "no plugins" for a few seconds only, so that
+            // every page load does not wait for the connection timeout again.
+            _ => (
+                Instant::now().checked_sub(PLUGINS_TTL - Duration::from_secs(10)).unwrap_or_else(Instant::now),
+                Vec::new(),
+            ),
         };
-        let found = plugins.iter().any(|p| p.to_lowercase().contains(name));
-        *self.plugins_cache.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), plugins));
-        found
+        let plugins = Arc::new(plugins);
+        *self.plugins_cache.lock().unwrap_or_else(|e| e.into_inner()) = Some((read_at, plugins.clone()));
+        plugins
+    }
+
+    /// Is a plugin whose name contains `name` (lower case) loaded?
+    pub async fn plugin_loaded(&self, name: &str) -> bool {
+        self.plugins().await.iter().any(|p| p.contains(name))
     }
 
     /// Should the UI offer the viewer of the plugin `plugin`? Same rules as OHIF (see [`OhifMode`]).

@@ -36,6 +36,7 @@ use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
@@ -196,7 +197,12 @@ pub async fn study(
     let ohif_mode = state.settings.get().ohif;
     let shared = share.studies();
     // The questions to Orthanc are independent: ask them at the same time.
-    let details = futures_util::future::join_all(shared.iter().map(|s| study_details(&state, &s.id)));
+    // A few studies at a time: a link can share up to 50, and each is two questions to Orthanc.
+    let state_ref = &state;
+    let details = futures_util::stream::iter(shared.iter().map(|s| s.id.clone()).collect::<Vec<_>>())
+        .map(|id| async move { study_details(state_ref, &id).await })
+        .buffered(6)
+        .collect::<Vec<_>>();
     let (details, viewer_available) = tokio::join!(details, state.orthanc.ohif_available(ohif_mode));
     let mut studies = Vec::with_capacity(details.len());
     for (index, d) in details.into_iter().enumerate() {

@@ -23,7 +23,7 @@ use crate::error::{AppError, AppResult};
 use crate::models::{ModalityNode, StudySummary};
 use crate::permissions::Permission;
 use crate::state::AppState;
-use crate::util::is_valid_orthanc_id;
+use crate::util::{feature, is_valid_orthanc_id};
 use axum::extract::{Path, State};
 use axum::Json;
 use futures_util::{stream, StreamExt};
@@ -31,8 +31,11 @@ use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-/// A peer or DICOMweb server of Orthanc, as a destination.
-fn named_target(kind: &'static str, name: &str, cfg: &Value) -> ModalityNode {
+/// Studies started at the same time when several are sent (Orthanc queues the jobs anyway).
+const PARALLEL_STARTS: usize = 4;
+
+/// A peer or DICOMweb server of Orthanc, as a destination (also a source of query / retrieve).
+pub fn named_target(kind: &'static str, name: &str, cfg: &Value) -> ModalityNode {
     let mut node = ModalityNode::bare(&format!("{kind}:{name}"));
     node.kind = kind;
     // Only the address: never the user name or password Orthanc keeps for it.
@@ -43,15 +46,26 @@ fn named_target(kind: &'static str, name: &str, cfg: &Value) -> ModalityNode {
 /// Every destination the user may send to (DICOM nodes, and peers / DICOMweb servers when switched on).
 pub async fn destinations(state: &AppState) -> AppResult<Vec<ModalityNode>> {
     let settings = state.settings.get();
-    let mut nodes = state.orthanc.list_modalities().await?;
-    if settings.send_to_peers {
-        let peers = state.orthanc.named_targets("/peers").await;
-        nodes.extend(peers.iter().map(|(name, cfg)| named_target("peer", name, cfg)));
-    }
-    if settings.send_to_dicomweb {
-        let servers = state.orthanc.named_targets("/dicom-web/servers").await;
-        nodes.extend(servers.iter().map(|(name, cfg)| named_target("dicomweb", name, cfg)));
-    }
+    let orthanc = &state.orthanc;
+    // The three lists are independent: asked at the same time.
+    let peers = async {
+        if settings.send_to_peers {
+            orthanc.named_targets("/peers").await
+        } else {
+            Default::default()
+        }
+    };
+    let servers = async {
+        if settings.send_to_dicomweb {
+            orthanc.named_targets("/dicom-web/servers").await
+        } else {
+            Default::default()
+        }
+    };
+    let (nodes, peers, servers) = tokio::join!(orthanc.list_modalities(), peers, servers);
+    let mut nodes = nodes?;
+    nodes.extend(peers.iter().map(|(name, cfg)| named_target("peer", name, cfg)));
+    nodes.extend(servers.iter().map(|(name, cfg)| named_target("dicomweb", name, cfg)));
     let descriptions = state.db.node_descriptions()?;
     for node in &mut nodes {
         node.description = descriptions.get(&node.id).cloned().unwrap_or_default();
@@ -137,9 +151,7 @@ pub async fn send_many(
     Json(req): Json<BulkSendRequest>,
 ) -> AppResult<Json<Value>> {
     user.require(Permission::Send)?;
-    if !state.settings.get().bulk_actions {
-        return Err(AppError::Denied("Actions on several studies are switched off (Settings > Features)".into()));
-    }
+    feature(state.settings.get().bulk_actions, "Actions on several studies are switched off")?;
     if req.studies.is_empty() || req.studies.len() > 100 {
         return Err(AppError::BadRequest("Choose 1 to 100 studies".into()));
     }
@@ -147,15 +159,18 @@ pub async fn send_many(
         return Err(AppError::BadRequest("Invalid study id".into()));
     }
     let node = find_destination(&state, &req.target).await?;
-    let mut started = 0;
-    let mut errors = Vec::new();
-    for id in &req.studies {
-        match start_send(&state, &user, &node, id).await {
-            Ok(_) => started += 1,
-            Err(e) => errors.push(format!("{id}: {e}")),
-        }
-    }
-    Ok(Json(json!({ "started": started, "errors": errors })))
+    let (state, user, node) = (&state, &user, &node);
+    let outcomes: Vec<(String, AppResult<(i64, String)>)> = stream::iter(req.studies.clone())
+        .map(|id| async move {
+            let outcome = start_send(state, user, node, &id).await;
+            (id, outcome)
+        })
+        .buffered(PARALLEL_STARTS)
+        .collect()
+        .await;
+    let errors: Vec<String> =
+        outcomes.iter().filter_map(|(id, r)| r.as_ref().err().map(|e| format!("{id}: {e}"))).collect();
+    Ok(Json(json!({ "started": outcomes.len() - errors.len(), "errors": errors })))
 }
 
 #[derive(Serialize)]

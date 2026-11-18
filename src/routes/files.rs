@@ -19,7 +19,7 @@ use crate::models::StudySummary;
 use crate::permissions::Permission;
 use crate::routes::download::zip_response;
 use crate::state::AppState;
-use crate::util::is_valid_orthanc_id;
+use crate::util::{feature, orthanc_id};
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
@@ -31,20 +31,8 @@ use serde_json::{json, Value};
 /// SOP Class UID of "Encapsulated PDF Storage".
 pub const PDF_SOP_CLASS: &str = "1.2.840.10008.5.1.4.1.1.104.1";
 
-fn check_id(id: &str) -> AppResult<()> {
-    if is_valid_orthanc_id(id) {
-        Ok(())
-    } else {
-        Err(AppError::BadRequest("Invalid id".into()))
-    }
-}
-
 fn browser_on(state: &AppState) -> AppResult<()> {
-    if state.settings.get().instance_browser {
-        Ok(())
-    } else {
-        Err(AppError::Denied("Images and DICOM tags are switched off (Settings > Features)".into()))
-    }
+    feature(state.settings.get().instance_browser, "Images and DICOM tags are switched off")
 }
 
 /// Streams an Orthanc answer to the browser with our own type and name.
@@ -66,7 +54,7 @@ pub async fn series_instances(
 ) -> AppResult<Json<Value>> {
     user.require(Permission::Read)?;
     browser_on(&state)?;
-    check_id(&id)?;
+    orthanc_id(&id)?;
     let list = state.orthanc.get_json(&format!("/series/{id}/instances?requested-tags=SOPClassUID")).await?;
     let mut items: Vec<Value> = list
         .as_array()
@@ -100,7 +88,7 @@ pub async fn instance_tags(
 ) -> AppResult<Json<Value>> {
     user.require(Permission::Read)?;
     browser_on(&state)?;
-    check_id(&id)?;
+    orthanc_id(&id)?;
     Ok(Json(state.orthanc.get_json(&format!("/instances/{id}/tags?ignore-length=0")).await?))
 }
 
@@ -118,7 +106,7 @@ pub async fn instance_preview(
 ) -> AppResult<Response> {
     user.require(Permission::Visualize)?;
     browser_on(&state)?;
-    check_id(&id)?;
+    orthanc_id(&id)?;
     let width = q.width.unwrap_or(1024).clamp(64, 2048);
     let Some((bytes, content_type)) = state.orthanc.rendered_image(&id, width).await? else {
         return Err(AppError::BadRequest("This image cannot be shown as a picture".into()));
@@ -138,7 +126,7 @@ pub async fn instance_pdf(
 ) -> AppResult<Response> {
     user.require(Permission::Visualize)?;
     browser_on(&state)?;
-    check_id(&id)?;
+    orthanc_id(&id)?;
     let upstream = state.orthanc.get_stream(&format!("/instances/{id}/pdf")).await?;
     state.db.audit(&user.username, "open_pdf", &id);
     file_response(upstream, "application/pdf", "inline; filename=\"report.pdf\"")
@@ -151,10 +139,8 @@ pub async fn instance_download(
     Path(id): Path<String>,
 ) -> AppResult<Response> {
     user.require(Permission::Download)?;
-    if !state.settings.get().single_file_download {
-        return Err(AppError::Denied("Downloading single files is switched off (Settings > Features)".into()));
-    }
-    check_id(&id)?;
+    feature(state.settings.get().single_file_download, "Downloading single files is switched off")?;
+    orthanc_id(&id)?;
     let upstream = state.orthanc.get_stream(&format!("/instances/{id}/file")).await?;
     let name = format!("{}.dcm", id.chars().take(17).collect::<String>());
     state.db.audit(&user.username, "download_instance", &id);
@@ -168,10 +154,8 @@ pub async fn series_nifti(
     Path(id): Path<String>,
 ) -> AppResult<Response> {
     user.require(Permission::Download)?;
-    if !state.settings.get().nifti_export {
-        return Err(AppError::Denied("The NIfTI export is switched off (Settings > Features)".into()));
-    }
-    check_id(&id)?;
+    feature(state.settings.get().nifti_export, "The NIfTI export is switched off")?;
+    orthanc_id(&id)?;
     let upstream = state.orthanc.get_stream(&format!("/series/{id}/nifti?compress")).await?;
     let name = format!("series_{}.nii.gz", id.chars().take(8).collect::<String>());
     state.db.audit(&user.username, "download_nifti", &id);
@@ -192,15 +176,13 @@ pub async fn download_many(
     Query(q): Query<BulkDownload>,
 ) -> AppResult<Response> {
     user.require(Permission::Download)?;
-    if !state.settings.get().bulk_actions {
-        return Err(AppError::Denied("Actions on several studies are switched off (Settings > Features)".into()));
-    }
+    feature(state.settings.get().bulk_actions, "Actions on several studies are switched off")?;
     let ids: Vec<&str> = q.studies.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
     if ids.is_empty() || ids.len() > 100 {
         return Err(AppError::BadRequest("Choose 1 to 100 studies".into()));
     }
     for id in &ids {
-        check_id(id)?;
+        orthanc_id(id)?;
     }
     let tool = if q.dicomdir.unwrap_or(false) { "/tools/create-media" } else { "/tools/create-archive" };
     let upstream = state.orthanc.post_stream(tool, &json!({ "Resources": ids, "Synchronous": true })).await?;

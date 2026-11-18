@@ -39,9 +39,10 @@ use crate::permissions::Permission;
 use crate::settings::Settings;
 use crate::sharing;
 use crate::state::AppState;
-use crate::util::{is_valid_orthanc_id, now_unix};
+use crate::util::{feature, is_valid_orthanc_id, now_unix};
 use axum::extract::{Path, State};
 use axum::Json;
+use futures_util::StreamExt;
 use lettre::message::Mailbox;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -162,9 +163,7 @@ pub async fn create_multi_share(
     user.require(Permission::Share)?;
     let mut ids = std::mem::take(&mut req.studies);
     ids.dedup();
-    if ids.len() > 1 && !state.settings.get().multi_study_shares {
-        return Err(AppError::Denied("Links for several studies are switched off (Settings > Features)".into()));
-    }
+    feature(ids.len() < 2 || state.settings.get().multi_study_shares, "Links for several studies are switched off")?;
     if ids.is_empty() || ids.len() > MAX_STUDIES_PER_LINK {
         return Err(AppError::BadRequest(format!("Choose 1 to {MAX_STUDIES_PER_LINK} studies")));
     }
@@ -206,9 +205,16 @@ async fn create(state: AppState, user: crate::db::User, ids: Vec<String>, req: C
     let email = prepare_email(&settings, &user.username, req.email)?;
 
     // Reading the studies checks that they exist and gives what the link will point at.
+    // Read a few at a time (a link can share up to 50 studies), in the order chosen.
+    let orthanc = &state.orthanc;
+    let read: Vec<AppResult<Value>> = futures_util::stream::iter(ids.clone())
+        .map(|id| async move { orthanc.get_json(&format!("/studies/{id}")).await })
+        .buffered(6)
+        .collect()
+        .await;
     let mut studies = Vec::with_capacity(ids.len());
-    for id in &ids {
-        let study = StudySummary::from_orthanc(&state.orthanc.get_json(&format!("/studies/{id}")).await?);
+    for study in read {
+        let study = StudySummary::from_orthanc(&study?);
         if study.study_instance_uid.is_empty() {
             return Err(AppError::BadRequest("This study has no StudyInstanceUID and cannot be shared".into()));
         }

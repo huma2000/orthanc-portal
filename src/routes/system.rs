@@ -15,6 +15,7 @@ use crate::db::User;
 use crate::error::{AppError, AppResult};
 use crate::permissions::Permission;
 use crate::state::AppState;
+use crate::util::feature;
 use axum::extract::{Path, Query, State};
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
@@ -28,11 +29,7 @@ fn admin(user: &User) -> AppResult<()> {
 }
 
 fn system_on(state: &AppState) -> AppResult<()> {
-    if state.settings.get().system_page {
-        Ok(())
-    } else {
-        Err(AppError::Denied("The System page is switched off (Settings > Features)".into()))
-    }
+    feature(state.settings.get().system_page, "The System page is switched off")
 }
 
 pub async fn overview(State(state): State<AppState>, AuthUser(user): AuthUser) -> AppResult<Json<Value>> {
@@ -142,9 +139,7 @@ pub async fn raw(
 ) -> AppResult<Response> {
     admin(&user)?;
     system_on(&state)?;
-    if !state.settings.get().raw_api {
-        return Err(AppError::Denied("Reading Orthanc's API is switched off (Settings > Features)".into()));
-    }
+    feature(state.settings.get().raw_api, "Reading Orthanc's API is switched off")?;
     if !is_readable_path(&q.path) {
         return Err(AppError::BadRequest("Give an address such as /patients or /tools/labels (no files)".into()));
     }
@@ -157,11 +152,7 @@ pub async fn raw(
 // ------------------------------------------------------------------------------- jobs
 
 fn jobs_on(state: &AppState) -> AppResult<()> {
-    if state.settings.get().jobs_page {
-        Ok(())
-    } else {
-        Err(AppError::Denied("The Jobs page is switched off (Settings > Features)".into()))
-    }
+    feature(state.settings.get().jobs_page, "The Jobs page is switched off")
 }
 
 pub async fn list_jobs(State(state): State<AppState>, AuthUser(user): AuthUser) -> AppResult<Json<Value>> {

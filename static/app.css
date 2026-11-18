@@ -761,6 +761,8 @@ th[aria-sort] .sort-header { color: var(--accent); text-decoration: none; }
 /* Auto-refresh switch next to a Refresh button */
 .head-actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
 .chip-toggle.auto-refresh { font-size: 0.85rem; white-space: nowrap; }
+/* The countdown keeps its width, so the button does not jump every second. */
+.auto-refresh-time { display: inline-block; min-width: 4.6em; text-align: left; font-variant-numeric: tabular-nums; }
 
 /* ---- Optional features (Settings > Features) ---- */
 /* Tick boxes and the bar of actions on several studies */

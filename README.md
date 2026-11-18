@@ -288,9 +288,10 @@ Every staff member uses the same layout, showing only what their permissions all
   or *newest study date*, are settings (*Appearance > Home page and icons*). Below them, files and whole folders
   can be **dropped** to upload them; the list and the total refresh when the upload ends.
 * **Auto-refresh**: the recent studies and the Transfers page refresh themselves every 30 seconds (the interval
-  and each switch are settings). An *Auto-refresh · 30 s* button next to *Refresh* lets each person pause it
-  (remembered in their browser). A refresh waits while a window is open, while the series of a study are
-  unfolded, and while the browser tab is in the background. A running transfer is still followed every 3 seconds.
+  and each switch are settings). The *Auto-refresh* button next to *Refresh* counts down the seconds to the next
+  update (*Auto-refresh · 24 s*, then *refreshing*) and lets each person pause it (*paused*, remembered in their
+  browser); *Refresh* starts the countdown again. The countdown waits (*waiting*) while a window is open, while
+  the series of a study are unfolded, and while the browser tab is in the background. A running transfer is still followed every 3 seconds.
 * **Help** explains how to use the portal, in plain words for staff who are not administrators. It is written
   for the person reading it: only the parts their account can use (no word about uploading for someone who cannot
   upload), only the features switched on (Weasis, OHIF, thumbnails, email invitations...), with the limits of this
@@ -872,7 +873,7 @@ database (no known vulnerable version in `Cargo.lock`). The automated tests live
   login hardening, caps, ETag/headers, concurrent administrators, and **talking to Orthanc with an account, without
   one, and when it refuses the portal** (what is sent, what is not, the message for each case), and an
   administrator changing their own password (every other session of that account is signed out);
-* `tests/ui_tests.js`: **169 checks** of both web pages in a simulated browser (jsdom): the Share dialog and the
+* `tests/ui_tests.js`: **174 checks** of both web pages in a simulated browser (jsdom): the Share dialog and the
   Shares tab, the guest page (password, study, series, countdown, downloads left, expiry, revoked, 0-download
   links, no OHIF), what each kind of staff account sees, search, the with/without-account choice in Settings;
 * `cargo test`: **40 unit tests** (image validation; password and link generation; the rules that confine a guest

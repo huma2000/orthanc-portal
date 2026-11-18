@@ -16,6 +16,7 @@ use crate::db::User;
 use crate::error::{AppError, AppResult};
 use crate::permissions::Permission;
 use crate::state::AppState;
+use crate::util::feature;
 use axum::extract::{Path, State};
 use axum::Json;
 use serde::Deserialize;
@@ -23,11 +24,7 @@ use serde_json::{json, Value};
 
 fn allowed(state: &AppState, user: &User) -> AppResult<()> {
     user.require_or_admin(Permission::Worklists)?;
-    if state.settings.get().worklists_enabled {
-        Ok(())
-    } else {
-        Err(AppError::Denied("Worklists are switched off (Settings > Features)".into()))
-    }
+    feature(state.settings.get().worklists_enabled, "Worklists are switched off")
 }
 
 fn check_id(id: &str) -> AppResult<()> {

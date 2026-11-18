@@ -629,32 +629,52 @@ let reloadRecentStudies = null;
 
 /** The home page: the most recent studies, and a drop zone to upload. */
 /**
- * A switch "Auto-refresh · 30 s" that calls `refresh` every few seconds (Settings > Appearance) while `node`
- * is on the page. Each user can pause it (remembered in this browser). A refresh is skipped while the tab is
- * hidden, a window is open or series are unfolded, so nothing changes under the user's mouse.
+ * A switch "Auto-refresh · 24 s" that calls `refresh` every few seconds (Settings > Appearance) while
+ * `node` is on the page, counting down the seconds left before the next update. Each user can pause
+ * it (remembered in this browser). The countdown waits while the tab is hidden, a window is open or
+ * series are unfolded, so nothing changes under the user's mouse. `.restart()` starts it again from
+ * the full interval (after the Refresh button).
  */
 function autoRefresh(key, node, refresh) {
   const seconds = Math.max(5, Number(simpleOptions().refresh_seconds) || 30);
   const storageKey = `portal.autorefresh.${key}`;
   let on = true;
   try { on = localStorage.getItem(storageKey) !== "off"; } catch { /* private window: on */ }
-  const button = h("button", { type: "button", class: "chip-toggle auto-refresh has-tip", "data-name": "auto-refresh" }, `Auto-refresh · ${seconds} s`);
-  const show = () => {
+  let left = seconds;
+  // The words change every second; the name read by screen readers stays the same.
+  const countdown = h("span", { class: "auto-refresh-time", "aria-hidden": "true" });
+  const button = h("button", {
+    type: "button", class: "chip-toggle auto-refresh has-tip", "data-name": "auto-refresh",
+    "aria-label": `Refresh automatically every ${seconds} seconds`,
+  }, "Auto-refresh · ", countdown);
+
+  /** "24 s", "refreshing", "waiting" or "paused", and the tooltip that explains it. */
+  function show(waiting = false) {
     button.setAttribute("aria-pressed", String(on));
-    button.dataset.tip = on ? `The list refreshes itself every ${seconds} seconds. Click to pause.` : "Paused. Click to refresh the list automatically again.";
-  };
+    countdown.textContent = !on ? "paused" : waiting ? "waiting" : left <= 0 ? "refreshing" : `${left} s`;
+    button.dataset.tip = !on ? "Paused. Click to refresh the list automatically again."
+      : waiting ? "Waiting: the list is not refreshed while a window is open, series are shown or the tab is in the background."
+        : `The list refreshes itself every ${seconds} seconds (next in ${Math.max(left, 0)} s). Click to pause.`;
+  }
   button.addEventListener("click", () => {
     on = !on;
+    left = seconds;
     try { localStorage.setItem(storageKey, on ? "on" : "off"); } catch { /* not remembered */ }
     show();
   });
+  button.restart = () => { left = seconds; show(); };
   show();
+
   const timer = setInterval(() => {
     if (!button.isConnected || !node.isConnected) { clearInterval(timer); return; }
-    if (!on || document.hidden || document.querySelector("dialog[open]")) return;
-    if (node.querySelector("tr.series-row:not([hidden])")) return;
-    refresh();
-  }, seconds * 1000);
+    if (!on) return;
+    const waiting = document.hidden || !!document.querySelector("dialog[open]") || !!node.querySelector("tr.series-row:not([hidden])");
+    if (waiting) { show(true); return; }
+    if (left <= 0) left = seconds; // "refreshing" was shown for one second
+    left -= 1;
+    show();
+    if (left <= 0) refresh();
+  }, 1000);
   return button;
 }
 
@@ -684,12 +704,15 @@ function buildHomeView() {
       }
     }
 
+    const recentAuto = options.recent_auto_refresh ? autoRefresh("recent", body, () => { load(); refreshTotalStudies(true); }) : null;
     const section = h("section", { class: "recent", "aria-labelledby": "recent-title" },
       h("div", { class: "recent-head" },
         h("h2", { id: "recent-title" }, options.recent_title || "Recent studies"),
         h("div", { class: "head-actions" },
-          options.recent_auto_refresh ? autoRefresh("recent", body, () => { load(); refreshTotalStudies(true); }) : null,
-          actionButton("button", "refresh", "Refresh", "Refresh the recent studies", { class: "btn small", type: "button", onclick: load }))),
+          recentAuto,
+          actionButton("button", "refresh", "Refresh", "Refresh the recent studies", {
+            class: "btn small", type: "button", onclick: () => { load(); if (recentAuto) recentAuto.restart(); },
+          }))),
       body);
     reloadRecentStudies = () => { if (section.isConnected) load(); };
     load();
@@ -2099,11 +2122,14 @@ function buildTransfersView() {
   }
 
   load();
+  const transfersAuto = simpleOptions().transfers_auto_refresh ? autoRefresh("transfers", container, load) : null;
   return h("div", { class: "view" },
     h("div", { class: "page-head" }, h("h1", null, "Transfers"),
       h("div", { class: "head-actions" },
-        simpleOptions().transfers_auto_refresh ? autoRefresh("transfers", container, load) : null,
-        actionButton("button", "refresh", "Refresh", "Refresh the list", { class: "btn", type: "button", onclick: load }))),
+        transfersAuto,
+        actionButton("button", "refresh", "Refresh", "Refresh the list", {
+          class: "btn", type: "button", onclick: () => { load(); if (transfersAuto) transfersAuto.restart(); },
+        }))),
     container);
 }
 
@@ -2733,7 +2759,7 @@ function helpSections() {
       body: () => [
         h("p", null, `It lists the ${f.simplified && f.simplified.recent_count ? f.simplified.recent_count : ""} most recent studies, ${f.simplified && f.simplified.recent_order === "study_date" ? "the newest examination dates" : "the last ones received by the archive"} first. `,
           helpButton("refresh", "Refresh"), " updates the list.",
-          f.simplified && f.simplified.recent_auto_refresh ? ` It also refreshes itself every ${f.simplified.refresh_seconds} seconds; click "Auto-refresh" next to it to pause that (or start it again). It waits while a window is open or the series of a study are shown.` : ""),
+          f.simplified && f.simplified.recent_auto_refresh ? ` It also refreshes itself every ${f.simplified.refresh_seconds} seconds; the "Auto-refresh" button next to it counts down the seconds to the next update; click it to pause (or start again). It waits while a window is open or the series of a study are shown.` : ""),
         can("read") ? h("p", null, "Each study has the same buttons as on the Search page (see below). The small arrow ▸ at the start of a row shows the series of the study.") : null,
         can("upload") ? h("p", null, "At the bottom, drag files or a whole folder onto the upload area to add them to the archive (see Uploading images).") : null,
       ],
@@ -3865,10 +3891,17 @@ function moreViewersMenu(studies) {
 
 /* ---- Bulk actions: tick several studies ---- */
 
-/** Can this user do anything with several studies at once? */
+/** Can this user do anything with several studies at once? Asked for every row: worked out
+ *  once per sign-in / settings change (a new features object), then remembered. */
+let bulkMemo = { features: null, value: false };
 function bulkOn() {
-  if (!opts().bulk) return false;
-  return can("download") || can("send") || can("share") || canEditLabels() || !!opts().delete || (can("visualize") && viewerLinks([{ study_instance_uid: "1" }]).length > 0);
+  const features = state.user && state.user.features;
+  if (bulkMemo.features !== features) {
+    const value = !!opts().bulk && (can("download") || can("send") || can("share") || canEditLabels() || !!opts().delete
+      || (can("visualize") && viewerLinks([{ study_instance_uid: "1" }]).length > 0));
+    bulkMemo = { features, value };
+  }
+  return bulkMemo.value;
 }
 
 /** The ticked studies of the list that contains `node`. */
