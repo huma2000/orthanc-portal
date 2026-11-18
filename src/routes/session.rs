@@ -48,6 +48,21 @@ pub struct SimplifiedFeature {
     upload_text: String,
 }
 
+/// Settings > Search & labels, as the pages need them.
+#[derive(Serialize)]
+pub struct SearchFeature {
+    columns: Vec<String>,
+    fields: Vec<String>,
+    live: bool,
+    min_chars: u64,
+    infinite: bool,
+    /// Labels that may be put on studies (empty = any).
+    allowed_labels: Vec<String>,
+    label_counts: bool,
+    /// This user may put labels on studies.
+    can_edit_labels: bool,
+}
+
 /// Optional capabilities of the installation, shown or hidden by the UI.
 #[derive(Serialize)]
 pub struct Features {
@@ -63,6 +78,8 @@ pub struct Features {
     share: ShareFeature,
     /// Options of the home page and the icons (Settings > Appearance).
     simplified: SimplifiedFeature,
+    /// Columns, search boxes, live search, endless lists and labels (Settings > Search & labels).
+    search: SearchFeature,
 }
 
 /// Answer of `/api/login` and `/api/me`: the user fields (id, username,
@@ -85,6 +102,16 @@ async fn me_response(state: &AppState, user: User) -> Me {
         max_downloads: settings.share_max_downloads,
         email: settings.email_configured(),
     };
+    let search = SearchFeature {
+        columns: settings.study_columns.clone(),
+        fields: settings.study_search_fields.clone(),
+        live: settings.search_as_you_type,
+        min_chars: settings.search_min_chars,
+        infinite: settings.infinite_scroll,
+        allowed_labels: settings.available_labels.clone(),
+        label_counts: settings.label_counts,
+        can_edit_labels: crate::routes::labels::can_edit_labels(&user),
+    };
     let simplified = SimplifiedFeature {
         recent_count: settings.simplified_recent_count,
         recent_order: settings.simplified_recent_order,
@@ -105,6 +132,7 @@ async fn me_response(state: &AppState, user: User) -> Me {
             share,
             // Only meaningful while the simplified view is switched on.
             simplified,
+            search,
         },
     }
 }

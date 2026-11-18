@@ -44,7 +44,7 @@ newlink() {
 
 echo "== two doors: the staff portal (intranet) and the internet listener (invitation links only)"
 ME=$(body $F $A /api/me)
-ok "intranet admin has all seven permissions" "$(echo $ME | py "','.join(d['permissions'])")" "read,visualize,upload,download,send,share,admin"
+ok "intranet admin has all eight permissions" "$(echo $ME | py "','.join(d['permissions'])")" "read,visualize,upload,download,send,share,admin,labels"
 hasnt "accounts no longer have a remote/full 'scope'" "$ME" '"scope"'
 ok "share is a permission that needs 'read' (400 without it)" "$(code $F $A POST /api/admin/users -H "$J" -d '{"username":"badshare","password":"BadSharePass123","permissions":["share"]}')" "400"
 ok "the Exporter and Clinical roles include share" "$(body $F $A /api/admin/settings | py "[ 'share' in r['permissions'] for r in d['settings']['roles'] if r['key'] in ('exporter','clinical')]")" "[True, True]"
@@ -109,6 +109,44 @@ has "recent studies: the last ones received first (Orthanc's LastUpdate)" "$(tai
 body $F $V "/api/studies?limit=8" > /dev/null
 has "...the search keeps the newest study dates first" "$(tail -1 $WORK/find.log)" '"Key": "StudyDate"'
 put $A '{"color_accent":"","theme_mode":"auto"}' > /dev/null
+echo "== labels, more search fields and sorting"
+ok "an administrator puts a label on a study" "$(body $F $A /api/studies/$SID/labels/urgent -X PUT | py "d['labels']")" "['urgent']"
+ok "...the study list shows it" "$(body $F $V /api/studies | py "d['items'][0]['labels']")" "['urgent']"
+ok "staff without the labels permission cannot (403)" "$(code $F $V PUT /api/studies/$SID/labels/other)" "403"
+ok "a label with a space is refused (400)" "$(code $F $A PUT "/api/studies/$SID/labels/with%20space")" "400"
+put $A '{"available_labels":["urgent","teaching"]}' > /dev/null
+ok "with a list of allowed labels, another one is refused (400)" "$(code $F $A PUT /api/studies/$SID/labels/insurance)" "400"
+ok "every label with its number of studies (allowed ones too)" "$(body $F $V /api/labels | py "[(l['name'], l['count']) for l in d['labels']]")" "[('teaching', 0), ('urgent', 1)]"
+body $F $V "/api/studies?labels=urgent,teaching" > /dev/null
+ok "search by labels: any of them" "$(tail -1 $WORK/find.log | py "(d['Labels'], d['LabelsConstraint'])")" "(['urgent', 'teaching'], 'Any')"
+body $F $V "/api/studies?labels=urgent,teaching&labels_mode=all" > /dev/null
+ok "...all of them" "$(tail -1 $WORK/find.log | py "d['LabelsConstraint']")" "All"
+body $F $V "/api/studies?no_labels=true" > /dev/null
+ok "...without labels (none of the existing ones)" "$(tail -1 $WORK/find.log | py "(d['Labels'], d['LabelsConstraint'])")" "(['urgent'], 'None')"
+ok "...not both at once (400)" "$(code $F $V GET '/api/studies?no_labels=true&labels=urgent')" "400"
+ok "the label is taken off" "$(body $F $A /api/studies/$SID/labels/urgent -X DELETE | py "d['labels']")" "[]"
+put $A '{"available_labels":[]}' > /dev/null
+has "labels put on and taken off are in the audit log" "$(body $F $A '/api/admin/audit?limit=10')" "label_removed"
+body $F $V "/api/studies?birth_from=1980-01-01&birth_to=1980-12-31&patient_sex=m&referring_physician=house&institution=river&other_patient_ids=OLD" > /dev/null
+ok "more search fields: birth date, sex, physician, institution, other IDs" "$(tail -1 $WORK/find.log | py "[d['Query'][k] for k in ('PatientBirthDate','PatientSex','ReferringPhysicianName','InstitutionName','OtherPatientIDs')]")" "['19800101-19801231', 'M', '*house*', '*river*', '*OLD*']"
+ok "an unknown sex is refused (400)" "$(code $F $V GET '/api/studies?patient_sex=x')" "400"
+body $F $V '/api/studies?patient_id=%22P-001%22' > /dev/null
+ok "a value between double quotes is matched exactly" "$(tail -1 $WORK/find.log | py "d['Query']['PatientID']")" "P-001"
+body $F $V "/api/studies?study_uid=$UID_" > /dev/null
+ok "a study by its StudyInstanceUID (links from other programs)" "$(tail -1 $WORK/find.log | py "d['Query']['StudyInstanceUID']")" "$UID_"
+ok "...a malformed one is refused (400)" "$(code $F $V GET '/api/studies?study_uid=1.2.x')" "400"
+ok "the study list gives the physician, institution and other IDs" "$(body $F $V /api/studies | py "(d['items'][0]['referring_physician'], d['items'][0]['institution'], d['items'][0]['other_patient_ids'])")" "('HOUSE^GREGORY', 'Riverside Vets', 'OLD-77')"
+body $F $V "/api/studies?sort=patient&dir=desc" > /dev/null
+ok "sorting by a column (the study date breaks ties)" "$(tail -1 $WORK/find.log | py "[(o['Key'], o['Direction']) for o in d['OrderBy']]")" "[('PatientName', 'DESC'), ('StudyDate', 'DESC'), ('StudyTime', 'DESC')]"
+ok "...an unknown column is refused (400)" "$(code $F $V GET '/api/studies?sort=shoe_size')" "400"
+ok "...and so is an unknown direction (400)" "$(code $F $V GET '/api/studies?sort=patient&dir=up')" "400"
+body $F $V "/api/series?sort=modality" > /dev/null
+ok "series can be sorted too" "$(tail -1 $WORK/find.log | py "[(o['Key'], o['Direction']) for o in d['OrderBy']]")" "[('Modality', 'ASC')]"
+ok "an unknown column in the settings is refused (400)" "$(put $A '{"study_columns":["patient","shoe_size"]}' | tail -1)" "400"
+put $A '{"study_columns":["patient","accession"],"search_as_you_type":true,"infinite_scroll":true}' > /dev/null
+ok "every user gets the columns and the search options" "$(body $F $V /api/me | py "(d['features']['search']['columns'], d['features']['search']['live'], d['features']['search']['infinite'], d['features']['search']['can_edit_labels'])")" "(['patient', 'accession'], True, True, False)"
+put $A "{\"study_columns\":$(body $F $A /api/admin/settings | py "json.dumps(d['defaults']['study_columns'])"),\"search_as_you_type\":false,\"infinite_scroll\":false}" > /dev/null
+
 echo "== DICOM node descriptions and transfer progress"
 ok "an administrator describes a DICOM node" "$(code $F $A PUT /api/admin/nodes/ris -H "$J" -d '{"aet":"RIS","host":"10.0.0.20","port":104,"description":"Radiology information system"}')" "200"
 ok "...too long a description is refused (400)" "$(code $F $A PUT /api/admin/nodes/ris -H "$J" -d "{\"aet\":\"RIS\",\"host\":\"10.0.0.20\",\"port\":104,\"description\":\"$(printf 'x%.0s' $(seq 1 81))\"}")" "400"

@@ -29,8 +29,10 @@ SR_ID = "99999999-88888888-77777777-66666666-55555555"       # a report: NO pixe
 JOB_ID = "27d7b341-e0e2-4825-95ba-fe8b4c2c304d"
 STUDY = {"ID": STUDY_ID, "Type": "Study", "Series": [SERIES_ID, SR_ID],
          "MainDicomTags": {"StudyInstanceUID": "1.2.826.0.1.3680043.8.498.1", "StudyDate": "20240517",
-                           "StudyDescription": "CT CHEST <script>alert(1)</script>", "AccessionNumber": "ACC1"},
-         "PatientMainDicomTags": {"PatientName": "DOE^JOHN", "PatientID": "P-001", "PatientBirthDate": "19800502", "PatientSex": "M"},
+                           "StudyDescription": "CT CHEST <script>alert(1)</script>", "AccessionNumber": "ACC1",
+                           "ReferringPhysicianName": "HOUSE^GREGORY", "InstitutionName": "Riverside Vets"},
+         "PatientMainDicomTags": {"PatientName": "DOE^JOHN", "PatientID": "P-001", "PatientBirthDate": "19800502", "PatientSex": "M",
+                                  "OtherPatientIDs": "OLD-77"},
          "RequestedTags": {"ModalitiesInStudy": "CT\\SR", "NumberOfStudyRelatedInstances": "120"}}
 SERIES = {"ID": SERIES_ID, "ParentStudy": STUDY_ID, "Instances": ["i1", "i2", "i3"],
           "MainDicomTags": {"SeriesInstanceUID": "1.2.3.4", "Modality": "CT", "SeriesDescription": "Chest 1mm", "SeriesNumber": "2", "BodyPartExamined": "CHEST"}}
@@ -41,7 +43,18 @@ MODALITIES = {"ris": {"AET": "RIS", "Host": "10.0.0.20", "Port": 104, "Manufactu
               "archive-only": {"AET": "ARC", "Host": "10.0.0.21", "Port": 104, "AllowStore": False},
               "down": {"AET": "DOWN", "Host": "10.9.9.9", "Port": 104, "AllowStore": True, "AllowEcho": True}}
 job_polls = {"n": 0}
-MODE = {"auth": os.environ.get("MOCK_AUTH", "basic")}   # see the docstring
+LABELS = {}   # Orthanc labels: study id -> set of labels
+
+
+def with_labels(study):
+    """A study as Orthanc returns it: with its "Labels"."""
+    return dict(study, Labels=sorted(LABELS.get(study["ID"], ())))
+
+
+def all_labels():
+    return sorted(set().union(*LABELS.values())) if LABELS else []
+MODE = {"auth": os.environ.get("MOCK_AUTH", "basic"),   # see the docstring
+        "copies": 1}   # how many times a studies search finds the fixture study (POST /__mock/copies), for long lists
 
 
 # ---- demo mode (MOCK_DEMO=1) -------------------------------------------------------------------
@@ -70,7 +83,7 @@ def demo_png(width, seed):
             + chunk(b"IDAT", zlib.compress(b"".join(rows))) + chunk(b"IEND", b""))
 
 
-def demo_add_study(n, name, pid, date, desc, modality, body, images, received):
+def demo_add_study(n, name, pid, date, desc, modality, body, images, received, referring="", institution=""):
     # Hex digits and dashes only, like real Orthanc ids (the portal refuses anything else).
     sid, ser = f"{n:08x}-0000-0000-0000-00000000000a", f"{n:08x}-0000-0000-0000-00000000000b"
     DEMO_SERIES[ser] = {"ID": ser, "ParentStudy": sid, "Instances": [f"demo{n:04d}-i{k}" for k in range(images)],
@@ -78,8 +91,10 @@ def demo_add_study(n, name, pid, date, desc, modality, body, images, received):
                                           "SeriesDescription": desc, "SeriesNumber": "1", "BodyPartExamined": body}}
     DEMO_STUDIES[sid] = {"ID": sid, "Type": "Study", "Series": [ser], "LastUpdate": received,
                          "MainDicomTags": {"StudyInstanceUID": f"1.2.999.{n}", "StudyDate": date, "StudyTime": "101500",
-                                           "StudyDescription": desc, "AccessionNumber": f"ACC{n:04d}"},
-                         "PatientMainDicomTags": {"PatientName": name, "PatientID": pid, "PatientBirthDate": "19750101", "PatientSex": "F" if n % 2 else "M"},
+                                           "StudyDescription": desc, "AccessionNumber": f"ACC{n:04d}",
+                                           "ReferringPhysicianName": referring, "InstitutionName": institution},
+                         "PatientMainDicomTags": {"PatientName": name, "PatientID": pid, "PatientBirthDate": f"19{50 + n * 3:02d}0{1 + n % 9}15",
+                                                  "PatientSex": "F" if n % 2 else "M", "OtherPatientIDs": f"OLD-{n * 7}" if n % 3 == 0 else ""},
                          "RequestedTags": {"ModalitiesInStudy": modality, "NumberOfStudyRelatedInstances": str(images)}}
     return sid
 
@@ -93,38 +108,57 @@ if DEMO:
             ("SATO^YUKI", "US", "THYROID ULTRASOUND", "NECK"), ("BROWN^EMMA", "CT", "CT ABDOMEN PELVIS", "ABDOMEN"),
             ("SILVA^RAFAEL", "XA", "CORONARY ANGIOGRAPHY", "HEART"), ("JOHANSSON^ANNA", "MR", "MRI BRAIN", "HEAD"),
             ("PATEL^RAVI", "DX", "PELVIS AP", "PELVIS"), ("WILLIAMS^OLIVIA", "NM", "BONE SCAN WHOLE BODY", "WHOLEBODY")]):
-        demo_add_study(i + 1, name, f"P-{1000 + i}", f"202611{17 - i:02d}", desc, mod, body, 3 + i % 4, f"202611{17 - i:02d}T09{i:02d}00")
+        demo_add_study(i + 1, name, f"P-{1000 + i}", f"202611{17 - i:02d}", desc, mod, body, 3 + i % 4, f"202611{17 - i:02d}T09{i:02d}00",
+                       ["HOUSE^GREGORY", "YANG^CRISTINA", "SHEPHERD^DEREK"][i % 3], ["Riverside Vets", "Hilltop Animal Hospital"][i % 2])
+    # Two more studies of SMITH^JOHN (P-1001), to try "all studies of this patient"
+    demo_add_study(15, "SMITH^JOHN", "P-1001", "20250310", "MRI LUMBAR SPINE (FOLLOW-UP)", "MR", "LSPINE", 4, "20250310T101500", "HOUSE^GREGORY", "Riverside Vets")
+    demo_add_study(16, "SMITH^JOHN", "P-1001", "20240122", "LUMBAR SPINE X-RAY", "DX", "LSPINE", 2, "20240122T101500", "YANG^CRISTINA", "Riverside Vets")
+    ids = sorted(DEMO_STUDIES)
+    for n, labels in [(0, {"urgent"}), (1, {"insurance", "second-opinion"}), (3, {"urgent", "teaching"}), (6, {"teaching"}), (9, {"insurance"})]:
+        LABELS[ids[n]] = set(labels)
+
+
+def demo_tag(resource, key):
+    """The value of a tag for a study or a series (looking in the parent study and patient too)."""
+    if key == "ModalitiesInStudy":
+        return resource.get("RequestedTags", {}).get("ModalitiesInStudy", "")
+    for source in (resource, DEMO_STUDIES.get(resource.get("ParentStudy"), {})):
+        for part in ("MainDicomTags", "PatientMainDicomTags"):
+            if key in source.get(part, {}):
+                return source[part][key]
+    return ""
+
+
+def demo_matches(value, key, wanted):
+    """Orthanc's matching rules: lists with \\, ranges for dates, wildcards * and ?, else exact (no case)."""
+    import fnmatch
+    value = value or ""
+    if key == "ModalitiesInStudy" or "\\" in wanted:
+        return bool(set(value.split("\\")) & set(wanted.split("\\")))
+    if key.endswith("Date") and "-" in wanted:
+        lo, _, hi = wanted.partition("-")
+        return bool(value) and (not lo or value >= lo) and (not hi or value <= hi)
+    return fnmatch.fnmatchcase(value.lower(), wanted.lower())
 
 
 def demo_find(q):
-    """Enough of /tools/find for the demo: patient / description filters, modalities, dates, sorting, paging."""
-    query = q.get("Query", {})
-    def like(value, pattern):
-        p = (pattern or "").strip("*").lower()
-        return not p or p in (value or "").lower()
-    if q["Level"] == "Study":
-        items = list(DEMO_STUDIES.values())
-        items = [s for s in items if like(s["PatientMainDicomTags"]["PatientName"], query.get("PatientName"))
-                 and like(s["PatientMainDicomTags"]["PatientID"], query.get("PatientID"))
-                 and like(s["MainDicomTags"]["StudyDescription"], query.get("StudyDescription"))]
-        if query.get("ModalitiesInStudy"):
-            wanted = set(query["ModalitiesInStudy"].split("\\"))
-            items = [s for s in items if set(s["RequestedTags"]["ModalitiesInStudy"].split("\\")) & wanted]
-        if query.get("StudyDate"):
-            lo, _, hi = query["StudyDate"].partition("-")
-            items = [s for s in items if (not lo or s["MainDicomTags"]["StudyDate"] >= lo) and (not hi or s["MainDicomTags"]["StudyDate"] <= hi)]
-        by_received = any(o.get("Key") == "LastUpdate" for o in q.get("OrderBy", []))
-        items.sort(key=(lambda s: s["LastUpdate"]) if by_received else (lambda s: s["MainDicomTags"]["StudyDate"]), reverse=True)
-    else:
-        items = list(DEMO_SERIES.values())
-        if query.get("Modality"):
-            wanted = set(query["Modality"].split("\\"))
-            items = [s for s in items if s["MainDicomTags"]["Modality"] in wanted]
-        items = [s for s in items if like(s["MainDicomTags"]["SeriesDescription"], query.get("SeriesDescription"))]
-        if query.get("BodyPartExamined"):   # exact match, like Orthanc
-            items = [s for s in items if s["MainDicomTags"]["BodyPartExamined"].upper() == query["BodyPartExamined"].upper()]
+    """Enough of /tools/find for the demo: any main tag, labels, sorting (OrderBy), paging."""
+    level = q["Level"]
+    items = list(DEMO_STUDIES.values()) if level == "Study" else list(DEMO_SERIES.values())
+    for key, wanted in q.get("Query", {}).items():
+        items = [r for r in items if demo_matches(demo_tag(r, key), key, wanted)]
+    if level == "Study" and "Labels" in q:
+        wanted, mode = set(q["Labels"]), q.get("LabelsConstraint", "All")
+        has = lambda s: LABELS.get(s["ID"], set())
+        test = {"All": lambda s: wanted <= has(s), "Any": lambda s: bool(wanted & has(s)), "None": lambda s: not (wanted & has(s))}[mode]
+        items = [s for s in items if test(s)]
+    for order in reversed(q.get("OrderBy", [])):   # stable sorts, last key first
+        key = order["Key"]
+        value = (lambda r: r.get("LastUpdate", "")) if order.get("Type") == "Metadata" else (lambda r, k=key: demo_tag(r, k).lower())
+        items.sort(key=value, reverse=order.get("Direction") == "DESC")
     since = q.get("Since", 0)
-    return items[since:since + q.get("Limit", 100)]
+    found = items[since:since + q.get("Limit", 100)]
+    return [with_labels(s) for s in found] if level == "Study" else found
 
 
 DEMO_JOBS = {}
@@ -196,12 +230,15 @@ class H(BaseHTTPRequestHandler):
         p = self.path.split("?")[0]
         if p == "/system": return self._json({"Version": VERSION, "Capabilities": ["HasExtendedFind", "HasExtendedChanges"]})
         if p == "/plugins": return self._json(["dicom-web", "ohif", "explorer.html"])
+        if p == "/tools/labels": return self._json(all_labels())
+        m = re.match(r"^/studies/([^/]+)/labels$", p)
+        if m: return self._json(sorted(LABELS.get(m.group(1), ())))
         if DEMO:
             if p == "/statistics": return self._json({"CountStudies": len(DEMO_STUDIES), "CountSeries": len(DEMO_SERIES)})
             m = re.match(r"^/studies/([^/]+)(/series)?$", p)
             if m and m.group(1) in DEMO_STUDIES:
                 study = DEMO_STUDIES[m.group(1)]
-                return self._json([DEMO_SERIES[s] for s in study["Series"]] if m.group(2) else study)
+                return self._json([DEMO_SERIES[s] for s in study["Series"]] if m.group(2) else with_labels(study))
             if p.startswith("/series/") and p[8:] in DEMO_SERIES: return self._json(DEMO_SERIES[p[8:]])
             m = re.match(r"^/instances/(demo(\d+)-i\d+)/rendered$", p)
             if m:
@@ -217,7 +254,7 @@ class H(BaseHTTPRequestHandler):
                                "Content": {"InstancesCount": 120, "FailedInstancesCount": 0, "RemoteAet": "RIS"}})
         if DEMO and p.startswith("/jobs/") and p[6:] in DEMO_JOBS:
             return self._json(demo_job(p[6:]))
-        if p == f"/studies/{STUDY_ID}": return self._json(STUDY)
+        if p == f"/studies/{STUDY_ID}": return self._json(with_labels(STUDY))
         if p == f"/studies/{STUDY_ID}/series": return self._json([SERIES, SR_SERIES])
         if p == f"/series/{SERIES_ID}": return self._json(SERIES)
         if p == f"/series/{SR_ID}": return self._json(SR_SERIES)
@@ -247,6 +284,8 @@ class H(BaseHTTPRequestHandler):
         body = self._body()
         if self.path == "/__mock/auth":   # test control, not part of Orthanc: switches the protection mode
             MODE["auth"] = json.loads(body)["mode"]; return self._json({"mode": MODE["auth"]})
+        if self.path == "/__mock/copies":   # test control: how many studies a search finds
+            MODE["copies"] = int(json.loads(body)["n"]); return self._json({"copies": MODE["copies"]})
         if not self._gate(): return
         m = re.match(r"^/modalities/([^/]+)/echo$", self.path)
         if m:
@@ -256,7 +295,13 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/tools/find":
             q = json.loads(body); log("find", q)
             if DEMO: return self._json(demo_find(q))
-            return self._json([STUDY] if q["Level"] == "Study" else [SERIES])
+            if q["Level"] != "Study": return self._json([SERIES])
+            found = [with_labels(STUDY)] * MODE["copies"]
+            return self._json(found[q.get("Since", 0):q.get("Since", 0) + q.get("Limit", 100)])
+        if self.path == "/tools/count-resources":
+            q = json.loads(body); log("count", q)
+            studies = DEMO_STUDIES.values() if DEMO else [STUDY]
+            return self._json({"Count": sum(1 for s in studies if set(q.get("Labels", [])) <= LABELS.get(s["ID"], set()))})
         if DEMO and self.path == "/instances":
             if body[:4] == b"BAD!": return self._json({"error": "bad"}, 400)
             return self._json({"ID": "x", "Status": "Success", "ParentStudy": demo_upload()})
@@ -274,6 +319,11 @@ class H(BaseHTTPRequestHandler):
     def do_PUT(self):
         raw = self._body()
         if not self._gate(): return
+        m = re.match(r"^/studies/([^/]+)/labels/([^/]+)$", self.path)
+        if m:
+            if m.group(1) not in (DEMO_STUDIES if DEMO else {STUDY_ID: 1}): return self._json({"error": "nf"}, 404)
+            log("labels", {"put": m.group(2), "study": m.group(1)})
+            LABELS.setdefault(m.group(1), set()).add(unquote(m.group(2))); return self._json({})
         m = re.match(r"^/modalities/([^/]+)$", self.path)
         if not m: return self._json({"error": "nf"}, 404)
         alias = unquote(m.group(1)); body = json.loads(raw or b"{}"); log("modput", {"alias": alias, "body": body})
@@ -282,6 +332,11 @@ class H(BaseHTTPRequestHandler):
     def do_DELETE(self):
         self._body()
         if not self._gate(): return
+        m = re.match(r"^/studies/([^/]+)/labels/([^/]+)$", self.path)
+        if m:
+            labels = LABELS.get(m.group(1), set()); labels.discard(unquote(m.group(2)))
+            if not labels: LABELS.pop(m.group(1), None)
+            return self._json({})
         m = re.match(r"^/modalities/([^/]+)$", self.path)
         if not m or unquote(m.group(1)) not in MODALITIES: return self._json({"error": "nf"}, 404)
         del MODALITIES[unquote(m.group(1))]; return self._json({})

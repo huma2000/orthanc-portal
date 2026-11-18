@@ -25,7 +25,7 @@ use crate::auth::AuthUser;
 use crate::error::{AppError, AppResult};
 use crate::orthanc::{Diagnosis, OrthancClient};
 use crate::permissions::Permission;
-use crate::settings::{default_modality_buttons, default_roles};
+use crate::settings::{default_modality_buttons, default_roles, Settings};
 use crate::state::AppState;
 use crate::util::now_unix;
 use axum::extract::{Path, State};
@@ -60,7 +60,12 @@ async fn settings_document(state: &AppState) -> Value {
         "listeners": state.listeners.status().await,
         // true = the listening addresses are set by the environment (Docker): read-only here.
         "listeners_from_env": state.listeners_from_env,
-        "defaults": { "roles": default_roles(), "modality_buttons": default_modality_buttons() },
+        "defaults": {
+            "roles": default_roles(),
+            "modality_buttons": default_modality_buttons(),
+            "study_columns": Settings::defaults().study_columns,
+            "study_search_fields": Settings::defaults().study_search_fields,
+        },
         "branding": state.branding.describe(),
         // Every permission, for the roles editor.
         "permissions": Permission::ALL

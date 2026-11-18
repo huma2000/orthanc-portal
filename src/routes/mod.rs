@@ -26,6 +26,7 @@
 //! /api/login|logout|me     session endpoints
 //! /api/studies, /series    consult / search               (permission: read)
 //! /api/stats               number of studies in the PACS  (permission: read)
+//! /api/labels, /api/studies/{id}/labels/{label}   labels  (read to see, labels/admin to change)
 //! /api/*/thumbnail         preview image                  (permission: visualize)
 //! /api/weasis/link         build a weasis:// URI          (permission: visualize)
 //! /dicom-web/*, /wado      read-only DICOMweb proxy       (Weasis and OHIF)
@@ -49,6 +50,7 @@ pub mod admin;
 pub mod branding;
 pub mod download;
 pub mod guest;
+pub mod labels;
 pub mod send;
 pub mod session;
 pub mod settings;
@@ -124,6 +126,9 @@ fn staff_router(state: AppState) -> Router {
         .route("/studies/{id}/series", get(studies::study_series))
         .route("/series", get(studies::search_series))
         .route("/stats", get(studies::statistics))
+        // --- labels on studies ---
+        .route("/labels", get(labels::list_labels))
+        .route("/studies/{id}/labels/{label}", put(labels::add_label).delete(labels::remove_label))
         // --- preview thumbnails (they need `visualize`; see routes/thumbnails.rs) ---
         .route("/studies/{id}/thumbnail", get(thumbnails::study_thumbnail))
         .route("/series/{id}/thumbnail", get(thumbnails::series_thumbnail))

@@ -34,6 +34,12 @@ pub struct StudySummary {
     pub modalities: Vec<String>,
     pub series_count: Option<usize>,
     pub instances_count: Option<u64>,
+    pub referring_physician: String,
+    pub requesting_physician: String,
+    pub institution: String,
+    pub other_patient_ids: String,
+    /// Orthanc labels of the study (`urgent`, `insurance`...).
+    pub labels: Vec<String>,
 }
 
 impl StudySummary {
@@ -65,6 +71,14 @@ impl StudySummary {
             modalities,
             series_count: v["Series"].as_array().map(|a| a.len()),
             instances_count: text(&requested["NumberOfStudyRelatedInstances"]).parse().ok(),
+            referring_physician: text(&main["ReferringPhysicianName"]),
+            requesting_physician: text(&main["RequestingPhysician"]),
+            institution: text(&main["InstitutionName"]),
+            other_patient_ids: text(&patient["OtherPatientIDs"]),
+            labels: v["Labels"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|l| l.as_str().map(str::to_string)).collect())
+                .unwrap_or_default(),
         }
     }
 }

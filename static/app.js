@@ -39,7 +39,7 @@ const UPLOAD_CONCURRENCY = 3;         // files sent to the server at the same ti
 /**
  * Quick modality filters shown as toggle buttons: `{ label, codes, title }`. `codes` are
  * the DICOM modality codes sent to the server (RX = CR + DX). Administrators choose
- * which ones are shown and in what order (Settings > General > Modality buttons); the
+ * which ones are shown and in what order (Settings > Search & labels > Modality buttons); the
  * server sends the visible ones, in order, with the user's features.
  */
 const modalityButtons = () => (state.user && state.user.features && state.user.features.modality_buttons) || [];
@@ -333,7 +333,7 @@ function applyBrand() {
   icon.setAttribute("href", state.brand.favicon.url);
   icon.setAttribute("type", state.brand.favicon.type);
   document.querySelectorAll(".brand-slot").forEach((slot) => {
-    slot.replaceChildren(...brandContent(Number(slot.dataset.size), slot.dataset.heading === "1"));
+    slot.replaceChildren(...brandContent(Number(slot.dataset.size), slot.dataset.heading === "1").filter(Boolean)); // no name = null, not the text "null"
   });
 }
 
@@ -440,6 +440,8 @@ const ICONS = {
   download: ["M12 3.5v11.5", "M7.5 10.5 12 15l4.5-4.5", "M4 17v3.5h16V17"],
   refresh: ["M19.5 12a7.5 7.5 0 1 1-2.2-5.3", "M19.5 4v4.5H15"],
   link: ["M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1", "M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"],
+  patient: [{ c: [12, 8, 3.5] }, "M5 20.5c0-3.9 3.1-6.5 7-6.5s7 2.6 7 6.5"],            // a person: their other studies
+  tag: ["M3.5 12.5V4h8.5l8.5 8.5-8.5 8.5z", { c: [8, 8.5, 1.2] }],                    // a label
   revoke: [{ c: [12, 12, 8.5] }, "M6 6l12 12"],
   key: [{ c: [7.5, 15.5, 4] }, "M10.5 12.5 20 3", "M16.5 6.5l2.5 2.5", "M14 9l2 2"],
   edit: ["M4 20h4L19 9l-4-4L4 16z", "M13.5 6.5l4 4"],
@@ -545,6 +547,8 @@ function renderSimplified() {
   const pages = SIMPLE_PAGES.filter((p) => !p.needs || can(p.needs));
   if (!pages.some((p) => p.id === state.simpleView)) state.simpleView = "home";
   const current = pages.find((p) => p.id === state.simpleView);
+  // The address carries the filters of the Search page (see showSearchInAddress); elsewhere it is plain.
+  if (current.id !== "search" && location.search) { try { history.replaceState(null, "", "/"); } catch { /* fine */ } }
 
   /** One icon of the column. `data-tip` is the description that pops up on hover (app.css). */
   const sideButton = (label, iconName, onclick, isCurrent = false, extra = null) => h("button", {
@@ -668,6 +672,7 @@ function openStudyDialog(study) {
   const seriesSlot = h("div", null, h("div", { class: "loading" }, "Loading series..."));
   const demographics = [study.patient_sex, formatDicomDate(study.patient_birth_date)].filter(Boolean).join(", ");
   const detail = (label, value) => (value ? [h("dt", null, label), h("dd", null, value)] : null);
+  const labelsSlot = h("dd", null, labelChips(study.labels));
   const dialog = h("dialog", { class: "study-dialog" }, h("div", { class: "dialog-form" },
     h("h2", null, formatName(study.patient_name)),
     h("dl", { class: "share-details" },
@@ -676,8 +681,9 @@ function openStudyDialog(study) {
       detail("Study date", formatDicomDate(study.study_date)),
       detail("Description", study.study_description),
       detail("Modalities", study.modalities.length ? h("span", null, study.modalities.map(chip)) : null),
-      detail("Content", `${study.series_count ?? "?"} series${study.instances_count != null ? `, ${study.instances_count} images` : ""}`)),
-    h("div", { class: "actions" }, studyActions(study)),
+      detail("Content", `${study.series_count ?? "?"} series${study.instances_count != null ? `, ${study.instances_count} images` : ""}`),
+      [h("dt", null, "Labels"), labelsSlot]),
+    h("div", { class: "actions" }, studyActions(study, () => labelsSlot.replaceChildren(...[labelChips(study.labels)].flat()))),
     seriesSlot,
     h("div", { class: "dialog-actions" }, h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Close"))));
   dialog.addEventListener("close", () => dialog.remove());
@@ -802,26 +808,54 @@ function thumb(kind, id, modality, small = false, size = 0) {
    6. STUDIES AND SERIES SEARCH
    ==================================================================== */
 
-/** Remembers what the user typed in each search form while they browse other tabs. */
+/** Remembers what the user typed in each search form (and how the list is sorted) while they browse other pages. */
 const searchMemory = { studies: {}, series: {} };
 
-/** Configuration of the "Studies" tab. `fields` become the filter form. */
+/** Settings > Search & labels, as sent by the server: columns, search boxes, live search, endless lists, labels. */
+const searchOptions = () => (state.user && state.user.features && state.user.features.search) || {};
+const canEditLabels = () => !!searchOptions().can_edit_labels;
+
+/**
+ * Every search box the Studies search can offer; Settings > Search & labels chooses which ones are
+ * shown, and in which order. A box can have two controls (from / to). `name` is the parameter sent
+ * to /api/studies; a value between double quotes ("P-001") must match exactly.
+ */
+const STUDY_FIELDS = {
+  patient_name: { title: "Patient name", controls: [{ name: "patient_name", label: "Patient name", placeholder: "DOE or DOE*" }] },
+  patient_id: { title: "Patient ID", controls: [{ name: "patient_id", label: "Patient ID" }] },
+  birth_date: { title: "Birth date (from / to)", controls: [{ name: "birth_from", label: "Birth date from", type: "date" }, { name: "birth_to", label: "Birth date to", type: "date" }] },
+  sex: { title: "Sex", controls: [{ name: "patient_sex", label: "Sex", type: "select", options: [["", "Any"], ["F", "Female"], ["M", "Male"], ["O", "Other"]] }] },
+  other_ids: { title: "Other patient IDs", controls: [{ name: "other_patient_ids", label: "Other patient IDs" }] },
+  description: { title: "Study description", controls: [{ name: "description", label: "Study description" }] },
+  accession: { title: "Accession number", controls: [{ name: "accession_number", label: "Accession number" }] },
+  referring: { title: "Referring physician", controls: [{ name: "referring_physician", label: "Referring physician" }] },
+  requesting: { title: "Requesting physician", controls: [{ name: "requesting_physician", label: "Requesting physician" }] },
+  institution: { title: "Institution", controls: [{ name: "institution", label: "Institution" }] },
+  modality: { title: "Modality buttons", controls: [{ name: "modality", label: "Modality", type: "modalities" }] },
+  dates: { title: "Study date (from / to)", controls: [{ name: "date_from", label: "Study date from", type: "date" }, { name: "date_to", label: "Study date to", type: "date" }] },
+  labels: { title: "Labels", controls: [{ name: "labels", label: "Labels", type: "labels" }] },
+};
+/** Filters that have no box of their own (they arrive through a link from another program). */
+const EXTRA_STUDY_CONTROLS = [{ name: "study_uid", label: "StudyInstanceUID" }];
+const DEFAULT_STUDY_FIELDS = ["patient_name", "patient_id", "description", "modality", "dates", "labels"];
+
+/** Configuration of the Studies search. `fields` become the filter form. */
 const STUDY_SEARCH = {
   id: "studies",
   title: "Studies",
   endpoint: "/api/studies",
-  fields: [
-    { name: "patient_name", label: "Patient name", placeholder: "DOE or DOE*" },
-    { name: "patient_id", label: "Patient ID" },
-    { name: "description", label: "Study description" },
-    { name: "modality", label: "Modality", type: "modalities" },
-    { name: "date_from", label: "Study date from", type: "date" },
-    { name: "date_to", label: "Study date to", type: "date" },
-  ],
+  get fields() {
+    return (searchOptions().fields || DEFAULT_STUDY_FIELDS).flatMap((key) => (STUDY_FIELDS[key] ? STUDY_FIELDS[key].controls : []));
+  },
+  get allControls() {
+    return [...Object.values(STUDY_FIELDS).flatMap((f) => f.controls), ...EXTRA_STUDY_CONTROLS];
+  },
+  defaultSort: { sort: "study_date", dir: "desc" },
   renderTable: renderStudiesTable,
+  rows: (study) => studyRows(study),
 };
 
-/** Configuration of the "Series" tab. */
+/** Configuration of the Series search. */
 const SERIES_SEARCH = {
   id: "series",
   title: "Series",
@@ -835,7 +869,10 @@ const SERIES_SEARCH = {
     { name: "date_from", label: "Study date from", type: "date" },
     { name: "date_to", label: "Study date to", type: "date" },
   ],
+  get allControls() { return this.fields; },
+  defaultSort: { sort: "", dir: "" },
   renderTable: renderSeriesTable,
+  rows: (series) => seriesRow(series),
 };
 
 /**
@@ -889,59 +926,279 @@ function buildModalityPicker(initial, onChange, chips = modalityButtons()) {
   };
 }
 
+/* ---- Labels ---- */
+
+/** The labels with their study counts, asked once and kept until a label changes. */
+let labelsCache = null;
+function loadLabels() {
+  if (!labelsCache) {
+    labelsCache = api("GET", "/api/labels").then((r) => r.labels).catch((e) => { labelsCache = null; toastError(e); return []; });
+  }
+  return labelsCache;
+}
+
+/** Labels as small tags. */
+const labelChips = (labels) => (labels && labels.length ? labels.map((l) => h("span", { class: "chip label-chip" }, l)) : dash());
+
 /**
- * Generic search page: filter form + results panel + pagination.
- * `cfg` (STUDY_SEARCH / SERIES_SEARCH) says which fields to show, which API
- * endpoint to call and how to draw the rows.
+ * Labels search box: a toggle per label (with its number of studies), "Without labels", and
+ * "any / all" once several are chosen. Its `.value` is kept in the search memory as text:
+ * "" | "none" | "any:a,b" | "all:a,b"; `addParams` turns it into the parameters of /api/studies.
+ */
+function buildLabelPicker(initial, onChange) {
+  let selected = new Set(), mode = "any", none = false, labels = [];
+  const box = h("div", { class: "label-picker" }, h("span", { class: "muted" }, "Loading labels..."));
+
+  function load(text) {
+    selected = new Set(); mode = "any"; none = false;
+    if (text === "none") none = true;
+    else if (text) {
+      const [m, list] = text.includes(":") ? text.split(":", 2) : ["any", text];
+      mode = m === "all" ? "all" : "any";
+      list.split(",").map((l) => l.trim()).filter(Boolean).forEach((l) => selected.add(l));
+    }
+  }
+  function draw() {
+    const toggle = (pressed, text, title, onclick) => h("button", { type: "button", class: "chip-toggle label-toggle", "aria-pressed": String(pressed), title, onclick }, text);
+    const known = labels.map((l) => l.name);
+    const all = [...labels, ...[...selected].filter((n) => !known.includes(n)).map((name) => ({ name, count: null }))];
+    box.replaceChildren(...[
+      ...all.map((l) => toggle(selected.has(l.name), l.count == null ? l.name : `${l.name} (${l.count})`, `Studies labelled ${l.name}`,
+        () => { none = false; if (selected.has(l.name)) selected.delete(l.name); else selected.add(l.name); draw(); onChange(); })),
+      toggle(none, "Without labels", "Studies that have no label at all", () => { none = !none; selected.clear(); draw(); onChange(); }),
+      selected.size > 1
+        ? h("select", { class: "label-mode", "aria-label": "Match", onchange: (e) => { mode = e.target.value; onChange(); } },
+          h("option", { value: "any", selected: mode === "any" }, "any of them"),
+          h("option", { value: "all", selected: mode === "all" }, "all of them"))
+        : null,
+      all.length ? null : h("span", { class: "muted" }, "No label yet."),
+    ].filter(Boolean)); // replaceChildren() would write a null as the text "null"
+  }
+  load(initial || "");
+  loadLabels().then((list) => { labels = list; draw(); });
+  return {
+    node: box,
+    get value() { return none ? "none" : selected.size ? `${mode}:${[...selected].join(",")}` : ""; },
+    set value(text) { load(text || ""); draw(); },
+    addParams(params) {
+      if (none) params.set("no_labels", "true");
+      else if (selected.size) { params.set("labels", [...selected].join(",")); if (mode === "all") params.set("labels_mode", "all"); }
+    },
+  };
+}
+
+/**
+ * The labels of a study: shown, taken off (×) and added (with suggestions; only the allowed
+ * ones when an administrator restricted them). `onChange` redraws the row.
+ */
+function openLabelsDialog(study, onChange) {
+  const allowed = searchOptions().allowed_labels || [];
+  const error = h("div", { class: "form-error", role: "alert", hidden: true });
+  const list = h("div", { class: "label-list" });
+  const datalist = h("datalist", { id: "label-suggestions" });
+  const input = h("input", { list: "label-suggestions", maxlength: 64, autocomplete: "off", "aria-label": "Label to add",
+    placeholder: allowed.length ? "Choose one of the labels" : "A word, e.g. urgent or second-opinion" });
+  loadLabels().then((labels) => datalist.replaceChildren(...[...new Set([...allowed, ...labels.map((l) => l.name)])]
+    .filter((n) => !study.labels.includes(n)).map((n) => h("option", { value: n }))));
+
+  function draw() {
+    list.replaceChildren(...(study.labels.length
+      ? study.labels.map((l) => h("span", { class: "chip label-chip" }, l,
+        h("button", { type: "button", class: "chip-remove", "aria-label": `Take the label ${l} off`, title: "Take it off", onclick: () => change("DELETE", l) }, "×")))
+      : [h("span", { class: "muted" }, "No label yet.")]));
+  }
+  async function change(method, label) {
+    error.hidden = true;
+    try {
+      const r = await api(method, `/api/studies/${study.id}/labels/${encodeURIComponent(label)}`);
+      study.labels = r.labels;
+      labelsCache = null; // the counts changed
+      draw();
+      onChange();
+    } catch (e) {
+      error.textContent = e.message;
+      error.hidden = false;
+    }
+  }
+  const dialog = h("dialog", null, h("form", {
+    onsubmit: (event) => { event.preventDefault(); const label = input.value.trim(); if (label) { change("PUT", label); input.value = ""; } },
+  },
+    h("h2", null, "Labels"),
+    h("p", null, h("b", null, formatName(study.patient_name)), " ", formatDicomDate(study.study_date), study.study_description ? `, ${study.study_description}` : ""),
+    list, error,
+    h("div", { class: "inline-field" }, input, h("button", { class: "btn primary", type: "submit" }, "Add")),
+    datalist,
+    h("p", { class: "hint" }, allowed.length
+      ? `Allowed labels: ${allowed.join(", ")}.`
+      : "Letters, digits, - and _ only (no spaces). Labels are shared: everyone sees them and can search by them."),
+    h("div", { class: "dialog-actions" }, h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Close"))));
+  dialog.addEventListener("close", () => dialog.remove());
+  document.body.append(dialog);
+  draw();
+  dialog.showModal();
+  input.focus();
+}
+
+/* ---- Links to a search ---- */
+
+/** Opens the Search page with these filters (and nothing else), e.g. all the studies of a patient. */
+function openSearchWith(kind, filters) {
+  document.querySelectorAll("dialog[open]").forEach((d) => d.close());
+  searchMemory[kind] = { ...filters };
+  state.simpleView = "search";
+  state.simpleSearch = kind;
+  renderApp();
+}
+
+/** All the studies of the patient of `study` (exact Patient ID, or exact name without an ID). */
+function openPatientStudies(study) {
+  openSearchWith("studies", study.patient_id ? { patient_id: `"${study.patient_id}"` } : { patient_name: `"${study.patient_name}"` });
+}
+
+/** The address of the page follows the search, so it can be bookmarked or sent ("Copy link"). */
+function showSearchInAddress(kind, params) {
+  const shown = new URLSearchParams(params);
+  shown.delete("limit");
+  shown.delete("offset");
+  if (kind === "series") shown.set("search", "series");
+  const query = shown.toString();
+  try { history.replaceState(null, "", query ? `/?${query}` : "/"); } catch { /* not possible here: the page still works */ }
+}
+
+/**
+ * A link with filters (e.g. /?patient_id=P-001&date_from=2026-01-01&sort=patient_name, or
+ * /?study_uid=1.2.3 from another program) opens the Search page with them. Read once, at start-up
+ * (before signing in, if needed).
+ */
+function readSearchFromAddress() {
+  const query = new URLSearchParams(location.search);
+  if (![...query.keys()].length) return;
+  const kind = query.get("search") === "series" ? "series" : "studies";
+  const filters = {};
+  for (const [key, value] of query) if (!["search", "labels_mode", "no_labels"].includes(key)) filters[key] = value;
+  if (query.get("no_labels") === "true") filters.labels = "none";
+  else if (filters.labels) filters.labels = `${query.get("labels_mode") === "all" ? "all" : "any"}:${filters.labels}`;
+  searchMemory[kind] = filters;
+  state.simpleView = "search";
+  state.simpleSearch = kind;
+}
+
+/**
+ * Generic search page: filter form + results + paging (Previous / Next, or the next results
+ * loaded at the end of the list when "endless lists" is on).
+ * `cfg` (STUDY_SEARCH / SERIES_SEARCH) says which fields to show, which API endpoint to call
+ * and how to draw the rows.
  */
 function buildSearchView(cfg) {
   const memory = searchMemory[cfg.id];
+  const options = searchOptions();
   const inputs = {};
   let offset = 0;
+  let hasMore = false;
+  let loading = false;
   let latestSearch = 0; // number of the newest search; older answers are ignored (see run())
+  let shownCount = 0;
 
-  // One labelled control per field, pre-filled from memory. The modality field is
-  // a group of toggle buttons that searches again as soon as one is toggled.
-  const fieldNodes = cfg.fields.map((field) => {
-    if (field.type === "modalities") {
-      const picker = buildModalityPicker(memory[field.name] || "", () => run(0));
+  // The boxes chosen in Settings, plus any filter that came in another way (a link, "all the
+  // studies of this patient") without a box of its own: shown too, so no filter is ever hidden.
+  const chosen = cfg.fields;
+  const extra = cfg.allControls.filter((c) => memory[c.name] && !chosen.some((f) => f.name === c.name));
+  const fields = [...chosen, ...extra];
+
+  // Searching while typing (Settings > Search & labels): after a pause, and once enough letters are typed.
+  let typingTimer = null;
+  const typed = (input) => {
+    if (!options.live) return;
+    clearTimeout(typingTimer);
+    typingTimer = setTimeout(() => {
+      const v = input.value.trim();
+      if (!v || v.replaceAll('"', "").length >= (options.min_chars || 3)) run(0);
+    }, 350);
+  };
+
+  // One labelled control per field, pre-filled from memory. Modality and label buttons search
+  // again as soon as they are toggled.
+  const fieldNodes = fields.map((field) => {
+    if (field.type === "modalities" || field.type === "labels") {
+      const picker = field.type === "modalities"
+        ? buildModalityPicker(memory[field.name] || "", () => run(0))
+        : buildLabelPicker(memory[field.name] || "", () => run(0));
       inputs[field.name] = picker; // exposes .value like a normal input
       return h("div", { class: "field wide" }, h("span", { class: "field-label" }, field.label), picker.node);
     }
-    const input = h("input", { name: field.name, type: field.type || "text", value: memory[field.name] || "", placeholder: field.placeholder || "" });
+    let input;
+    if (field.type === "select") {
+      input = h("select", { name: field.name, onchange: () => { if (options.live) run(0); } },
+        field.options.map(([v, text]) => h("option", { value: v, selected: v === (memory[field.name] || "") }, text)));
+    } else {
+      input = h("input", { name: field.name, type: field.type || "text", value: memory[field.name] || "", placeholder: field.placeholder || "" });
+      if (field.type === "date") input.addEventListener("change", () => { if (options.live) run(0); });
+      else input.addEventListener("input", () => typed(input));
+    }
     inputs[field.name] = input;
     return h("label", null, field.label, input);
   });
 
   const results = h("section", { class: "panel" });
 
-  /** Calls the API with the current filters and draws one page of results. */
-  async function run(newOffset) {
-    offset = newOffset;
-    const thisSearch = ++latestSearch;
+  /** The current sort, and a click on a column title: that column, or the other direction. */
+  const sorting = () => ({
+    sort: memory.sort || cfg.defaultSort.sort,
+    dir: memory.dir || cfg.defaultSort.dir,
+    onSort: (key) => {
+      const current = memory.sort || cfg.defaultSort.sort;
+      const dir = memory.dir || cfg.defaultSort.dir;
+      memory.dir = key === current ? (dir === "asc" ? "desc" : "asc") : (key === "study_date" ? "desc" : "asc");
+      memory.sort = key;
+      run(0);
+    },
+  });
+
+  /** The parameters of the search: the boxes, then the sort. */
+  function searchParams() {
     const params = new URLSearchParams();
     for (const [name, input] of Object.entries(inputs)) {
       memory[name] = input.value;
-      if (input.value.trim()) params.set(name, input.value.trim());
+      if (input.addParams) input.addParams(params);
+      else if (input.value.trim()) params.set(name, input.value.trim());
     }
+    if (memory.sort) { params.set("sort", memory.sort); params.set("dir", memory.dir || "asc"); }
+    return params;
+  }
+
+  /** Calls the API with the current filters; `more` = the next results, added below the others. */
+  async function run(newOffset, more = false) {
+    offset = newOffset;
+    const thisSearch = ++latestSearch;
+    const params = searchParams();
+    showSearchInAddress(cfg.id, params);
     params.set("limit", PAGE_SIZE);
     params.set("offset", offset);
 
-    results.replaceChildren(h("div", { class: "loading" }, "Searching..."));
+    loading = true;
+    if (!more) results.replaceChildren(h("div", { class: "loading" }, "Searching..."));
     try {
       const page = await api("GET", `${cfg.endpoint}?${params}`);
       // The user may have toggled another filter while this one was still loading:
       // answers can arrive out of order, and an old one must never replace a newer one.
       if (thisSearch !== latestSearch) return;
-      if (!page.items.length) {
+      hasMore = page.has_more;
+      if (more) {
+        results.querySelector("tbody").append(...page.items.flatMap((item) => cfg.rows(item)));
+        shownCount += page.items.length;
+        results.querySelector(".load-more").replaceWith(buildLoadMore());
+      } else if (!page.items.length) {
         results.replaceChildren(h("div", { class: "empty" }, offset > 0 ? "No more results." : "No results. Try fewer filters, or a wildcard such as DOE*."));
-        return;
+      } else {
+        shownCount = page.items.length;
+        results.replaceChildren(cfg.renderTable(page.items, sorting()), options.infinite ? buildLoadMore() : buildPager(page));
       }
-      results.replaceChildren(cfg.renderTable(page.items), buildPager(page));
     } catch (e) {
       if (thisSearch !== latestSearch) return;
-      results.replaceChildren(h("div", { class: "empty" }, e.message));
+      if (!more) results.replaceChildren(h("div", { class: "empty" }, e.message));
       toastError(e);
+    } finally {
+      if (thisSearch === latestSearch) loading = false;
     }
   }
 
@@ -954,6 +1211,25 @@ function buildSearchView(cfg) {
         h("button", { class: "btn small", type: "button", disabled: !page.has_more, onclick: () => run(offset + PAGE_SIZE) }, "Next")));
   }
 
+  /**
+   * Endless list: the end of the list, which loads the next results when it scrolls into view
+   * (or when its button is pressed).
+   */
+  function buildLoadMore() {
+    const loadMore = () => { if (hasMore && !loading) run(offset + PAGE_SIZE, true); };
+    const footer = h("div", { class: "pager load-more" },
+      h("span", { class: "muted" }, `${shownCount} shown`),
+      hasMore ? h("button", { class: "btn small", type: "button", onclick: loadMore }, "Load more") : h("span", { class: "muted" }, "That is all."));
+    if (hasMore && "IntersectionObserver" in window) {
+      const observer = new IntersectionObserver((entries) => {
+        if (!footer.isConnected) { observer.disconnect(); return; }
+        if (entries.some((e) => e.isIntersecting)) { observer.disconnect(); loadMore(); }
+      }, { rootMargin: "300px" });
+      setTimeout(() => observer.observe(footer), 0);
+    }
+    return footer;
+  }
+
   const form = h("form", {
     class: "panel filters",
     onsubmit: (event) => { event.preventDefault(); run(0); },
@@ -963,28 +1239,72 @@ function buildSearchView(cfg) {
       h("button", { class: "btn primary", type: "submit" }, `Search ${cfg.title.toLowerCase()}`),
       h("button", {
         class: "btn", type: "button",
-        onclick: () => { for (const input of Object.values(inputs)) input.value = ""; run(0); },
-      }, "Clear filters")));
+        onclick: () => { for (const input of Object.values(inputs)) input.value = ""; delete memory.sort; delete memory.dir; run(0); },
+      }, "Clear filters"),
+      options.live ? h("span", { class: "muted" }, "Results update as you type.") : null));
 
   run(0); // show the most recent studies right away
   return h("div", { class: "view" },
-    h("div", { class: "page-head" }, h("h1", null, cfg.title)), form, results);
+    h("div", { class: "page-head" }, h("h1", null, cfg.title),
+      actionButton("button", "link", "Copy link", "Copy a link to this search (with its filters)", {
+        class: "btn", type: "button",
+        onclick: async () => toast((await copyText(location.href)) ? "Link to this search copied." : "Could not copy: copy the address of the page instead.", "info", 3000),
+      })),
+    form, results);
 }
 
-/** Results table of the "Studies" tab. Each study row can expand to show its series. */
-const studyColumns = () => ["", ...(showThumbs() ? ["Preview"] : []), "Patient", "Patient ID", "Study date", "Description", "Modality", "Series / images", "Actions"];
+/** A column title; a button that sorts the list when the column can be sorted (`sorting` given). */
+function columnHeader(title, sortKey, sorting, extraClass = null) {
+  if (!sorting || !sortKey) return h("th", { class: extraClass }, title);
+  const active = sorting.sort === sortKey;
+  const arrow = active ? (sorting.dir === "desc" ? " ▼" : " ▲") : "";
+  return h("th", { class: extraClass, "aria-sort": active ? (sorting.dir === "desc" ? "descending" : "ascending") : null },
+    h("button", { type: "button", class: "sort-header", title: `Sort by ${title.toLowerCase()}`, onclick: () => sorting.onSort(sortKey) }, title, arrow));
+}
 
-function renderStudiesTable(studies) {
-  const headers = studyColumns();
+/**
+ * Every column the studies tables can show; Settings > Search & labels chooses which ones, and in
+ * which order. `sort` = the key the server sorts by (none = cannot be sorted).
+ */
+const STUDY_COLUMNS = {
+  patient: { title: "Patient", sort: "patient", cell: (s) => {
+    const demographics = [s.patient_sex, formatDicomDate(s.patient_birth_date)].filter(Boolean).join(", ");
+    return h("td", null, h("div", { class: "patient" }, formatName(s.patient_name)), demographics ? h("div", { class: "sub" }, demographics) : null);
+  } },
+  patient_id: { title: "Patient ID", sort: "patient_id", cell: (s) => h("td", { class: "mono" }, s.patient_id || dash()) },
+  birth_date: { title: "Birth date", sort: "birth_date", cell: (s) => h("td", { class: "nowrap" }, formatDicomDate(s.patient_birth_date) || dash()) },
+  sex: { title: "Sex", sort: "sex", cell: (s) => h("td", null, s.patient_sex || dash()) },
+  other_ids: { title: "Other patient IDs", sort: "other_ids", cell: (s) => h("td", { class: "mono" }, s.other_patient_ids || dash()) },
+  study_date: { title: "Study date", sort: "study_date", cell: (s) => h("td", { class: "nowrap" }, formatDicomDate(s.study_date) || dash()) },
+  description: { title: "Description", sort: "description", cell: (s) => h("td", null, s.study_description || dash()) },
+  accession: { title: "Accession number", sort: "accession", cell: (s) => h("td", { class: "mono" }, s.accession_number || dash()) },
+  referring: { title: "Referring physician", sort: "referring", cell: (s) => h("td", null, s.referring_physician ? formatName(s.referring_physician) : dash()) },
+  requesting: { title: "Requesting physician", sort: "requesting", cell: (s) => h("td", null, s.requesting_physician ? formatName(s.requesting_physician) : dash()) },
+  institution: { title: "Institution", sort: "institution", cell: (s) => h("td", null, s.institution || dash()) },
+  modalities: { title: "Modality", cell: (s) => h("td", null, s.modalities.length ? s.modalities.map(chip) : dash()) },
+  series: { title: "Series / images", cell: (s) => h("td", null, `${s.series_count ?? "?"} series`, s.instances_count != null ? h("div", { class: "sub" }, `${s.instances_count} images`) : null) },
+  labels: { title: "Labels", cell: (s) => h("td", { class: "labels-cell" }, labelChips(s.labels)) },
+};
+const DEFAULT_STUDY_COLUMNS = ["patient", "patient_id", "study_date", "description", "modalities", "series", "labels"];
+const studyColumnKeys = () => (searchOptions().columns || DEFAULT_STUDY_COLUMNS).filter((key) => STUDY_COLUMNS[key]);
+/** Number of cells in a study row: arrow, preview, the chosen columns, actions. */
+const studyColumnCount = () => 2 + (showThumbs() ? 1 : 0) + studyColumnKeys().length;
+
+/** The studies table (Search, and the home page). `sorting` makes the column titles sort the list. */
+function renderStudiesTable(studies, sorting = null) {
   return h("div", { class: "table-wrap" },
     h("table", { class: "data" },
-      h("thead", null, h("tr", null, headers.map((t) => h("th", { class: t === "Actions" ? "num" : null }, t)))),
-      h("tbody", null, studies.map(studyRows))));
+      h("thead", null, h("tr", null,
+        h("th", null, ""),
+        showThumbs() ? h("th", null, "Preview") : null,
+        studyColumnKeys().map((key) => columnHeader(STUDY_COLUMNS[key].title, STUDY_COLUMNS[key].sort, sorting)),
+        h("th", { class: "num" }, "Actions"))),
+      h("tbody", null, studies.map((s) => studyRows(s)))));
 }
 
 /** Two table rows per study: the study itself and a hidden row that will hold its series. */
 function studyRows(study) {
-  const seriesCell = h("td", { colspan: studyColumns().length }); // the whole width of the table
+  const seriesCell = h("td", { colspan: studyColumnCount() }); // the whole width of the table
   const seriesRow = h("tr", { class: "series-row", hidden: true }, seriesCell);
   let loaded = false;
 
@@ -1005,29 +1325,31 @@ function studyRows(study) {
         seriesCell.replaceChildren(h("div", { class: "series-empty muted" }, e.message));
       }
     },
-  }, "\u25B8");
+  }, "▸");
 
-  const demographics = [study.patient_sex, formatDicomDate(study.patient_birth_date)].filter(Boolean).join(", ");
-  const imageInfo = study.instances_count != null ? `${study.instances_count} images` : "";
-
+  const cells = studyColumnKeys().map((key) => STUDY_COLUMNS[key].cell(study));
+  // After a label is put on or taken off, only the labels cell is redrawn.
+  const redrawLabels = () => {
+    const i = studyColumnKeys().indexOf("labels");
+    if (i >= 0) cells[i].replaceChildren(...[labelChips(study.labels)].flat());
+  };
   const mainRow = h("tr", { class: "study" },
     h("td", null, twisty),
     showThumbs() ? h("td", { class: "thumb-cell" }, thumb("studies", study.id, study.modalities[0])) : null,
-    h("td", null, h("div", { class: "patient" }, formatName(study.patient_name)), demographics ? h("div", { class: "sub" }, demographics) : null),
-    h("td", { class: "mono" }, study.patient_id || dash()),
-    h("td", { class: "nowrap" }, formatDicomDate(study.study_date) || dash()),
-    h("td", null, study.study_description || dash()),
-    h("td", null, study.modalities.length ? study.modalities.map(chip) : dash()),
-    h("td", null, `${study.series_count ?? "?"} series`, imageInfo ? h("div", { class: "sub" }, imageInfo) : null),
-    h("td", null, h("div", { class: "actions" }, studyActions(study))));
+    cells,
+    h("td", null, h("div", { class: "actions" }, studyActions(study, redrawLabels))));
 
   return [mainRow, seriesRow];
 }
 
-/** Buttons shown for a study, according to the user's permissions. */
-function studyActions(study) {
+/** Buttons shown for a study, according to the user's permissions. `onLabels` redraws after a label change. */
+function studyActions(study, onLabels = () => {}) {
   return [
     can("visualize") ? viewButtons(study) : null,
+    study.patient_id || study.patient_name
+      ? actionButton("button", "patient", "Other studies of this patient", "All the studies of this patient", { class: "btn small", type: "button", onclick: () => openPatientStudies(study) })
+      : null,
+    canEditLabels() ? actionButton("button", "tag", "Labels", "Labels: put labels on this study or take them off", { class: "btn small", type: "button", onclick: () => openLabelsDialog(study, onLabels) }) : null,
     can("send") ? actionButton("button", "send", "Send to...", "Send to a DICOM node", { class: "btn small", type: "button", onclick: () => openSendDialog(study) }) : null,
     can("share") ? actionButton("button", "share", "Share...", "Share with somebody outside (link + password)", { class: "btn small", type: "button", onclick: () => openShareDialog(study) }) : null,
     can("download") ? downloadMenu("studies", study.id) : null,
@@ -1050,29 +1372,40 @@ function renderSeriesBox(seriesList) {
         h("td", null, h("div", { class: "actions" }, can("download") ? downloadMenu("series", s.id) : null)))))));
 }
 
-/** Results table of the "Series" tab. Each series shows the patient/study it belongs to. */
-function renderSeriesTable(seriesList) {
-  const headers = [...(showThumbs() ? ["Preview"] : []), "Patient", "Study date", "Study", "#", "Modality", "Series description", "Body part", "Images", "Actions"];
+
+/** The columns of the Series list: title and the key the server sorts by. */
+const SERIES_COLUMNS = [["Patient", "patient"], ["Study date", "study_date"], ["Study", null], ["#", "number"], ["Modality", "modality"],
+  ["Series description", "description"], ["Body part", "body_part"], ["Images", null]];
+
+/** Results table of the Series search. Each series shows the patient/study it belongs to. */
+function renderSeriesTable(seriesList, sorting = null) {
   return h("div", { class: "table-wrap" },
     h("table", { class: "data" },
-      h("thead", null, h("tr", null, headers.map((t) => h("th", { class: t === "Actions" || t === "Images" ? "num" : null }, t)))),
-      h("tbody", null, seriesList.map((s) => {
-        const study = s.study; // may be missing if Orthanc could not return the parent study
-        return h("tr", { class: "study" },
-          showThumbs() ? h("td", { class: "thumb-cell" }, thumb("series", s.id, s.modality)) : null,
-          h("td", null, h("div", { class: "patient" }, study ? formatName(study.patient_name) : dash()), study ? h("div", { class: "sub mono" }, study.patient_id) : null),
-          h("td", { class: "nowrap" }, study ? formatDicomDate(study.study_date) : dash()),
-          h("td", null, (study && study.study_description) || dash()),
-          h("td", null, s.series_number || dash()),
-          h("td", null, chip(s.modality)),
-          h("td", null, s.description || dash()),
-          h("td", null, s.body_part || dash()),
-          h("td", { class: "num" }, s.instances_count),
-          h("td", null, h("div", { class: "actions" }, [
-            can("visualize") && study ? viewButtons(study) : null,
-            can("download") ? downloadMenu("series", s.id) : null,
-          ])));
-      }))));
+      h("thead", null, h("tr", null,
+        showThumbs() ? h("th", null, "Preview") : null,
+        SERIES_COLUMNS.map(([title, key]) => columnHeader(title, key, sorting, title === "Images" ? "num" : null)),
+        h("th", { class: "num" }, "Actions"))),
+      h("tbody", null, seriesList.map(seriesRow))));
+}
+
+/** One row of the Series list. */
+function seriesRow(s) {
+  const study = s.study; // may be missing if Orthanc could not return the parent study
+  return h("tr", { class: "study" },
+    showThumbs() ? h("td", { class: "thumb-cell" }, thumb("series", s.id, s.modality)) : null,
+    h("td", null, h("div", { class: "patient" }, study ? formatName(study.patient_name) : dash()), study ? h("div", { class: "sub mono" }, study.patient_id) : null),
+    h("td", { class: "nowrap" }, study ? formatDicomDate(study.study_date) : dash()),
+    h("td", null, (study && study.study_description) || dash()),
+    h("td", null, s.series_number || dash()),
+    h("td", null, chip(s.modality)),
+    h("td", null, s.description || dash()),
+    h("td", null, s.body_part || dash()),
+    h("td", { class: "num" }, s.instances_count),
+    h("td", null, h("div", { class: "actions" }, [
+      can("visualize") && study ? viewButtons(study) : null,
+      study ? actionButton("button", "patient", "Other studies of this patient", "All the studies of this patient", { class: "btn small", type: "button", onclick: () => openPatientStudies(study) }) : null,
+      can("download") ? downloadMenu("series", s.id) : null,
+    ])));
 }
 
 /* ====================================================================
@@ -2279,20 +2612,36 @@ function helpSections() {
     {
       id: "search", title: "Finding a study", show: can("read"),
       body: () => [
-        h("p", null, "Fill in one or more boxes, then press ", h("b", null, "Search studies"), ". Leave a box empty to ignore it."),
+        searchOptions().live
+          ? h("p", null, "Fill in one or more boxes: the results follow as you type (dates, lists and buttons search at once). Leave a box empty to ignore it.")
+          : h("p", null, "Fill in one or more boxes, then press ", h("b", null, "Search studies"), ". Leave a box empty to ignore it."),
         ul(
           [h("b", null, "Patient name"), ": part of the name is enough (DOE finds DOE, JOHN). A star works as a wildcard: SMI* finds every name starting with SMI."],
-          [h("b", null, "Patient ID"), " and ", h("b", null, "Study description"), ": also a part is enough."],
+          [h("b", null, "Patient ID"), " and ", h("b", null, "Study description"), ": also a part is enough. Put a value between double quotes to find exactly it: \"P-001\" does not find P-0011."],
           [h("b", null, "Modality"), ": click the buttons (CT, MR, US...) to show only those examinations; you can choose several. Click again to remove one. Other codes can be typed in the box next to them."],
           [h("b", null, "Study date from / to"), ": a period; fill in only one of the two for \"since\" or \"until\"."],
         ),
-        h("p", null, "The results show the newest studies first, 25 per page (", h("b", null, "Previous"), " / ", h("b", null, "Next"), " at the bottom). ",
-          h("b", null, "Clear filters"), " empties every box."),
+        h("p", null, "The results show the newest studies first, 25 at a time (",
+          searchOptions().infinite ? "the next ones appear when you scroll to the end of the list" : [h("b", null, "Previous"), " / ", h("b", null, "Next"), " at the bottom"], "). ",
+          "Click a column title to sort by it; click it again for the other way round. ", h("b", null, "Clear filters"), " empties every box."),
         ul(
           "Click the small arrow ▸ at the start of a row to see the series of the study (each set of images) and how many images each has.",
           f.thumbnails && can("visualize") ? "The small picture is a preview of the study or series: it appears after a moment." : null,
           "Rest the mouse on a modality tag (CT, MR...) to see its full name.",
+          [helpButton("patient", "Other studies of this patient"), ": every study of the same patient, in the Search page."],
+          [helpButton("link", "Copy link"), " (next to the title): a link to this search with its filters, to bookmark or to send to a colleague."],
+          [h("b", null, "Labels"), ": click labels to see only the studies that have them (several: any or all of them), or ", h("b", null, "Without labels"), "."],
           [h("b", null, "Series"), " (the second tab of the Search page): the same search, one row per series, with a ", h("b", null, "Body part"), " box (CHEST, KNEE...)."],
+        ),
+      ],
+    },
+    {
+      id: "labels", title: "Labels", show: can("read") && canEditLabels(),
+      body: () => [
+        h("p", null, "Labels are short words you put on studies to find them again: urgent, insurance, second-opinion, teaching... Everyone sees them, in the Labels column and in the study window, and can search by them."),
+        ul(
+          [helpButton("tag", "Labels"), " on a study: type a label (or choose a suggested one) and press ", h("b", null, "Add"), "; the × of a label takes it off."],
+          (searchOptions().allowed_labels || []).length ? `Only these labels can be used: ${searchOptions().allowed_labels.join(", ")}.` : "Letters, digits, - and _ only (no spaces).",
         ),
       ],
     },
@@ -2488,6 +2837,19 @@ const SETTINGS_FIELDS = {
     { key: "thumbnails_enabled", label: "Show preview thumbnails next to studies and series", type: "checkbox", wide: true, hint: "Only staff with the visualize permission see them (guests with an invitation never do). Each one makes Orthanc decode one image." },
     { key: "thumbnail_cache_mb", label: "Thumbnail cache (MB)", type: "number", min: 0, max: 1024, hint: "Memory used to remember generated thumbnails. 0 = no cache." },
   ],
+  lists: [
+    { key: "search_as_you_type", label: "Search while typing (live search)", type: "checkbox", wide: true,
+      hint: "On: the results follow the boxes as they are filled in (after a short pause, once the number of letters below is typed); dates, lists and buttons search at once. Off: press the Search button." },
+    { key: "search_min_chars", label: "Letters before searching while typing", type: "number", min: 1, max: 10 },
+    { key: "infinite_scroll", label: "Endless lists", type: "checkbox", wide: true,
+      hint: "On: the next results are loaded when you scroll to the end of the list (there is also a Load more button). Off: 25 results per page with Previous / Next." },
+  ],
+  labels: [
+    { key: "available_labels", label: "Allowed labels", type: "list", wide: true, placeholder: "urgent, insurance, second-opinion, teaching",
+      hint: "Separate them with commas. Empty = staff may create any label. Letters, digits, - and _ only. Labels already on studies can always be taken off." },
+    { key: "label_counts", label: "Show how many studies have each label", type: "checkbox", wide: true,
+      hint: "Orthanc counts them each time the labels are shown: switch it off if that is slow on a very large archive." },
+  ],
   simplified: [
     { key: "simplified_recent_count", label: "Recent studies on the home page", type: "number", min: 1, max: 100 },
     { key: "simplified_recent_order", label: "Which studies are the most recent", type: "select", options: [["received", "The last ones received by the PACS"], ["study_date", "The newest study dates"]] },
@@ -2592,7 +2954,43 @@ function buildRolesEditor(roles, defaults, permissions) {
 }
 
 /**
- * Editor of the modality buttons of the search pages (Settings > General): order (move
+ * Chooses some items of a catalog and their order (columns, search boxes): one row per item with
+ * Shown, ↑ and ↓. `catalog` = [[key, title]]; `get()` = the chosen keys, in order.
+ */
+function buildPickList(what, catalog, chosen, defaults) { // `what`: "columns", "search boxes"
+  const titles = new Map(catalog);
+  const make = (keys) => [...keys.filter((k) => titles.has(k)).map((key) => ({ key, on: true })),
+    ...catalog.filter(([k]) => !keys.includes(k)).map(([key]) => ({ key, on: false }))];
+  let rows = make(chosen);
+  const list = h("div", { class: "pick-list" });
+  function draw(focus) {
+    list.replaceChildren(...rows.map((row, i) => {
+      const move = (step, symbol, label) => h("button", {
+        class: "btn small", type: "button", "aria-label": `${label} ${titles.get(row.key)}`, title: label, disabled: i + step < 0 || i + step >= rows.length,
+        "data-control": symbol,
+        onclick: () => { [rows[i], rows[i + step]] = [rows[i + step], rows[i]]; draw([i + step, symbol]); },
+      }, symbol);
+      return h("div", { class: `pick-row${row.on ? "" : " is-hidden"}`, "data-key": row.key },
+        h("div", { class: "modbtn-move" }, move(-1, "↑", "Move up"), move(1, "↓", "Move down")),
+        h("label", { class: "check" },
+          h("input", { type: "checkbox", checked: row.on, onchange: (e) => { row.on = e.target.checked; draw(); } }),
+          titles.get(row.key)));
+    }));
+    if (focus) {
+      const control = list.children[focus[0]] && list.children[focus[0]].querySelector(`[data-control="${focus[1]}"]`);
+      if (control && !control.disabled) control.focus();
+    }
+  }
+  draw();
+  return {
+    node: h("div", { class: "pick-editor" }, list,
+      h("div", { class: "filter-actions" }, h("button", { class: "btn small", type: "button", onclick: () => { rows = make(defaults); draw(); } }, `Restore the default ${what}`))),
+    get: () => rows.filter((r) => r.on).map((r) => r.key),
+  };
+}
+
+/**
+ * Editor of the modality buttons of the search pages (Settings > Search & labels): order (move
  * up / down), shown or hidden, label, DICOM codes and description, plus add / remove /
  * restore defaults. A live preview shows the row exactly as users will see it, with the
  * "Other codes" box that is always there. Saved with the rest of the form.
@@ -2659,8 +3057,9 @@ function buildModalityButtonsEditor(buttons, defaults) {
  * in buildSettingsView). The others are separate screens whose changes apply at once.
  */
 const SETTINGS_TABS = [
-  { id: "general", label: "General", sections: ["branding", "search", "viewers"] },
+  { id: "general", label: "General", sections: ["branding", "viewers"] },
   { id: "appearance", label: "Appearance", sections: ["theme", "simplified"] },
+  { id: "search", label: "Search & labels", sections: ["search", "lists", "labels"] },
   { id: "orthanc", label: "Orthanc", sections: ["orthanc"] },
   { id: "network", label: "Network & sharing", sections: ["network", "sharing", "email"] },
   { id: "security", label: "Security & roles", sections: ["security", "roles"] },
@@ -2754,6 +3153,12 @@ function buildSettingsView() {
     const field = (def) => {
       const value = s[def.key];
       let input;
+      if (def.type === "list") {
+        // A list of words, edited as "a, b, c"; sent to the server as an array.
+        const area = h("textarea", { rows: 2, placeholder: def.placeholder }, (value || []).join(", "));
+        inputs[def.key] = { type: "list", get value() { return area.value.split(/[\s,;]+/).filter(Boolean); } };
+        return h("div", { class: def.wide ? "setting wide" : "setting" }, h("label", null, def.label, area), def.hint ? h("p", { class: "hint" }, def.hint) : null);
+      }
       if (def.type === "textarea") {
         input = h("textarea", { rows: 3, maxlength: 500 }, value);
       } else if (def.type === "select") {
@@ -2886,6 +3291,8 @@ function buildSettingsView() {
       ...colorFields,
     ];
     const modalityEditor = buildModalityButtonsEditor(s.modality_buttons, doc.defaults.modality_buttons);
+    const columnsEditor = buildPickList("columns", Object.entries(STUDY_COLUMNS).map(([k, c]) => [k, c.title]), s.study_columns, doc.defaults.study_columns);
+    const fieldsEditor = buildPickList("search boxes", Object.entries(STUDY_FIELDS).map(([k, f]) => [k, f.title]), s.study_search_fields, doc.defaults.study_search_fields);
 
     // Docker (LISTENERS_FROM_ENV): the addresses must match the published ports, so they are
     // set in the .env file of docker-compose and only shown here.
@@ -2928,6 +3335,8 @@ function buildSettingsView() {
         }
         body.roles = rolesEditor.get();
         body.modality_buttons = modalityEditor.get();
+        body.study_columns = columnsEditor.get();
+        body.study_search_fields = fieldsEditor.get();
         if (smtpPassword.value) body.smtp_password = smtpPassword.value;
         if (clearSmtpPassword.checked) body.clear_smtp_password = true;
         if (withoutAccount()) {
@@ -2961,6 +3370,12 @@ function buildSettingsView() {
       section("search", "Modality buttons", "The quick filters above the Studies and Series lists. Put them in the order your staff use them and hide the ones nobody needs. Each button searches for one or more DICOM modality codes (RX = CR + DX). The \"Other codes\" box is always shown, so any code can still be searched.",
         modalityEditor.node),
       section("viewers", "Viewers and uploads", null, SETTINGS_FIELDS.viewers.map(field)),
+      section("lists", "Studies lists and search", "Which columns the studies tables show (Search and home page), which boxes the Studies search offers, in which order, and how searching and paging behave. A column with its title underlined can be sorted by clicking it.",
+        h("div", { class: "setting" }, h("span", { class: "field-label" }, "Columns of the studies tables"), columnsEditor.node),
+        h("div", { class: "setting" }, h("span", { class: "field-label" }, "Boxes of the Studies search"), fieldsEditor.node),
+        SETTINGS_FIELDS.lists.map(field)),
+      section("labels", "Labels", "Short words staff put on studies to find them again (urgent, insurance, teaching...). Everyone who can search sees them and can search by them; people with the labels permission (and administrators) put them on and take them off. They are Orthanc's own labels.",
+        SETTINGS_FIELDS.labels.map(field)),
       section("theme", "Colours", "Match the portal to your practice's colours. Changes are previewed on this page at once and kept when you save. The logo, the portal name and the window title are in the General tab.",
         themeFields),
       section("simplified", "Home page and icons", "The portal shows the logo, the practice name and the total of studies at the top, a column of icons (Home, Search, Shares, Uploads, Transfers, Help, Configuration, Log out) on the left, and a home page with the most recent studies and an area to drop files into. Each person sees only the icons their permissions allow.",
@@ -2976,7 +3391,7 @@ function buildSettingsView() {
       section("roles", "Roles", "Shortcuts that pre-tick permissions when you create or edit a user (Users tab). Users keep their own permissions: changing a role does not change existing users.", rolesEditor.node),
       h("div", { class: "settings-actions" },
         save,
-        h("span", { class: "muted" }, "Saves the General, Appearance, Orthanc, Network & sharing and Security & roles tabs together.")));
+        h("span", { class: "muted" }, "Saves the General, Appearance, Search & labels, Orthanc, Network & sharing and Security & roles tabs together.")));
 
     formHost.replaceChildren(form);
     showNotices(notices);
@@ -3096,6 +3511,7 @@ function openNodeDialog(node, reload) {
 
 /** Asks the server whether a session already exists (cookie), then draws the page. */
 (async function boot() {
+  readSearchFromAddress(); // a link with filters (e.g. /?patient_id=P-001) opens the Search page, after signing in if needed
   try { state.brand = await api("GET", "/api/public"); } catch { /* keep the default identity */ }
   applyBrand();
   try { state.user = await api("GET", "/api/me"); } catch { state.user = null; }

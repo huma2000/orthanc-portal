@@ -117,11 +117,13 @@ async function newLink(admin, body) {
   await until(() => admin.$("form.settings-form"), 6000);
   const subtab = (name) => admin.$$(".subtabs [role=tab]").find((b) => b.textContent === name);
   const visibleSections = () => admin.$$("section.settings-section").filter((s) => !s.hidden).map((s) => s.querySelector("h2").textContent);
-  check("Settings tabs", admin.$$(".subtabs [role=tab]").map((b) => b.textContent).join() === "General,Appearance,Orthanc,Network & sharing,Security & roles,Users,DICOM nodes,Audit log",
+  check("Settings tabs", admin.$$(".subtabs [role=tab]").map((b) => b.textContent).join() === "General,Appearance,Search & labels,Orthanc,Network & sharing,Security & roles,Users,DICOM nodes,Audit log",
     admin.$$(".subtabs [role=tab]").map((b) => b.textContent).join());
   check("no stray 'null' text on the page (it used to appear under the title)",
     !admin.$$("main *").some((el) => Array.from(el.childNodes).some((n) => n.nodeType === 3 && n.textContent.trim() === "null")));
-  check("General shows Branding, Modality buttons and Viewers", visibleSections().join() === "Branding,Modality buttons,Viewers and uploads", visibleSections().join());
+  check("General shows Branding and Viewers", visibleSections().join() === "Branding,Viewers and uploads", visibleSections().join());
+  admin.click(subtab("Search & labels"));
+  check("Search & labels shows the modality buttons, the lists and search options, and the labels", visibleSections().join() === "Modality buttons,Studies lists and search,Labels", visibleSections().join());
   admin.click(subtab("Orthanc"));
   check("Orthanc shows the connection only, with the Save button", visibleSections().join() === "Orthanc connection" && !admin.$("form.settings-form").closest("[hidden]"), visibleSections().join());
   admin.labelInput(admin.section("Orthanc connection"), "Orthanc address").value = "http://typed-not-saved:8042";
@@ -149,7 +151,7 @@ async function newLink(admin, body) {
   const tagTitle = (code) => { const tag = Array.from(row.querySelectorAll(".chip")).find((c) => c.textContent === code); return tag && tag.getAttribute("title"); };
   check("modality tags explain themselves on hover: CT (button description), SR (DICOM name)",
     tagTitle("CT") === "CT: Computed tomography" && tagTitle("SR") === "SR: Structured report", `${tagTitle("CT")} | ${tagTitle("SR")}`);
-  check("the default modality buttons, in the default order", admin.$$(".chip-toggle").map((b) => b.textContent).join() === "CT,MR,US,RX,MG,XA,RF,NM,PT", admin.$$(".chip-toggle").map((b) => b.textContent).join());
+  check("the default modality buttons, in the default order", admin.$$(".mod-picker .chip-toggle").map((b) => b.textContent).join() === "CT,MR,US,RX,MG,XA,RF,NM,PT", admin.$$(".mod-picker .chip-toggle").map((b) => b.textContent).join());
   check("the study date never wraps", row.querySelectorAll("td.nowrap").length > 0);
   check("the old View drop-down is gone", !Array.from(row.querySelectorAll("summary")).some((s) => s.textContent === "View"));
   check("the Weasis notice is no longer on the Studies page", !/Weasis needs to be/.test(admin.$("main").textContent));
@@ -360,11 +362,12 @@ async function newLink(admin, body) {
   console.log("--- modality buttons: order and visibility chosen in Settings");
   await viewers.tab("Settings");
   await until(() => viewers.section("Modality buttons"), 6000);
+  viewers.click(viewers.$$(".subtabs [role=tab]").find((b) => b.textContent === "Search & labels"));
   const modSection = viewers.section("Modality buttons");
   const modRows = () => Array.from(viewers.section("Modality buttons").querySelectorAll(".modbtn-row"));
   const rowOf = (label) => modRows().find((r) => r.querySelector(".modbtn-label").value === label);
   const previewChips = () => Array.from(viewers.section("Modality buttons").querySelectorAll(".modbtn-preview .chip-toggle")).map((b) => b.textContent).join();
-  check("Settings > General has the modality buttons editor, with the 9 defaults", !modSection.hidden && modRows().length === 9 && previewChips() === "CT,MR,US,RX,MG,XA,RF,NM,PT", previewChips());
+  check("Settings > Search & labels has the modality buttons editor, with the 9 defaults", !modSection.hidden && modRows().length === 9 && previewChips() === "CT,MR,US,RX,MG,XA,RF,NM,PT", previewChips());
   check("...and its preview always shows the Other codes box", !!modSection.querySelector(".modbtn-preview .mod-other"));
   for (let i = 0; i < 3; i++) viewers.click(viewers.button(rowOf("RX"), "↑")); // RX to the top
   const shownBox = (label) => rowOf(label).querySelector("input[type=checkbox]");
@@ -376,15 +379,15 @@ async function newLink(admin, body) {
   check("the order and the hidden button are saved (the hidden one is kept, to show it again later)",
     savedButtons.map((b) => b.label + (b.visible ? "" : "-")).join() === "RX,CT-,MR,US,MG,XA,RF,NM,PT", savedButtons.map((b) => b.label + (b.visible ? "" : "-")).join());
   await viewers.tab("Studies"); await until(() => viewers.$("tr.study"), 6000);
-  check("the Studies page follows at once: RX first, no CT", viewers.$$(".chip-toggle").map((b) => b.textContent).join() === "RX,MR,US,MG,XA,RF,NM,PT", viewers.$$(".chip-toggle").map((b) => b.textContent).join());
+  check("the Studies page follows at once: RX first, no CT", viewers.$$(".mod-picker .chip-toggle").map((b) => b.textContent).join() === "RX,MR,US,MG,XA,RF,NM,PT", viewers.$$(".mod-picker .chip-toggle").map((b) => b.textContent).join());
   await viewers.tab("Series"); await until(() => viewers.$(".mod-picker"), 6000);
-  check("...and so does the Series page", viewers.$$(".chip-toggle").map((b) => b.textContent).join() === "RX,MR,US,MG,XA,RF,NM,PT");
+  check("...and so does the Series page", viewers.$$(".mod-picker .chip-toggle").map((b) => b.textContent).join() === "RX,MR,US,MG,XA,RF,NM,PT");
   await admin.call("PUT", "/api/admin/settings", { modality_buttons: savedButtons.map((b) => ({ ...b, visible: false })) });
   const noButtons = await makeDom(STAFF);
   await noButtons.login("admin", "SuperSecret123");
   await noButtons.tab("Studies");
   await until(() => noButtons.$(".mod-picker"), 6000);
-  check("with every button hidden, the Other codes box is still there", noButtons.$$(".chip-toggle").length === 0 && !!noButtons.$(".mod-picker .mod-other"));
+  check("with every button hidden, the Other codes box is still there", noButtons.$$(".mod-picker .chip-toggle").length === 0 && !!noButtons.$(".mod-picker .mod-other"));
   const defaultButtons = (await (await admin.call("GET", "/api/admin/settings")).json()).defaults.modality_buttons;
   await admin.call("PUT", "/api/admin/settings", { modality_buttons: defaultButtons });
 
@@ -413,13 +416,77 @@ async function newLink(admin, body) {
   await until(() => reader.$("tr.study"), 6000);
   check("read-only account: the list, no Download, no Share, no viewers, no previews", reader.$$("tr.study").length === 1 && !reader.$("details.menu") && !reader.button(reader.$("tr.study"), "Share...") && !reader.button(reader.$("tr.study"), "Weasis") && !reader.$(".thumb"));
 
+  console.log("--- labels, sorting, the patient's other studies, links, live search, endless lists, chosen columns");
+  const findLog = () => JSON.parse(fs.readFileSync(path.join(LOGS, "find.log"), "utf8").trim().split("\n").pop());
+  await admin.tab("Studies"); await until(() => admin.$("tr.study"), 6000);
+  admin.click(admin.button(admin.$("tr.study"), "Labels"));
+  await until(() => admin.$("dialog .label-list"));
+  const labelsDialog = admin.$$("dialog").pop();
+  labelsDialog.querySelector("input[list]").value = "second-opinion";
+  admin.submit(labelsDialog.querySelector("form"));
+  await until(() => /second-opinion/.test(labelsDialog.querySelector(".label-list").textContent), 5000);
+  check("the Labels button puts a label on the study", /second-opinion/.test(labelsDialog.querySelector(".label-list").textContent));
+  check("...and the row shows it at once", /second-opinion/.test(admin.$("tr.study .labels-cell").textContent));
+  labelsDialog.querySelector("input[list]").value = "has space";
+  admin.submit(labelsDialog.querySelector("form"));
+  await until(() => !labelsDialog.querySelector(".form-error").hidden, 5000);
+  check("a label with a space is refused, with the reason", /letters, digits/.test(labelsDialog.querySelector(".form-error").textContent), labelsDialog.querySelector(".form-error").textContent);
+  admin.click(admin.button(labelsDialog, "Close"));
+  await admin.tab("Studies"); await until(() => admin.$$(".label-picker .chip-toggle").some((b) => /second-opinion/.test(b.textContent)), 6000);
+  const labelToggle = admin.$$(".label-picker .chip-toggle").find((b) => /second-opinion/.test(b.textContent));
+  check("the Labels search box offers it, with its number of studies", labelToggle.textContent === "second-opinion (1)", labelToggle.textContent);
+  admin.click(labelToggle); await sleep(1200);
+  check("clicking it searches the studies with that label", JSON.stringify(findLog().Labels) === '["second-opinion"]', JSON.stringify(findLog()));
+  check("...and the page address keeps the search (it can be bookmarked)", /labels=second-opinion/.test(admin.window.location.search), admin.window.location.search);
+  admin.click(admin.button(admin.$("form.filters"), "Clear filters")); await sleep(1200);
+  const patientTitle = () => admin.$$("th .sort-header").find((b) => /^Patient( [▲▼])?$/.test(b.textContent));
+  admin.click(patientTitle()); await sleep(1200);
+  check("clicking a column title sorts by it", findLog().OrderBy[0].Key === "PatientName" && findLog().OrderBy[0].Direction === "ASC", JSON.stringify(findLog().OrderBy));
+  admin.click(patientTitle()); await sleep(1200);
+  check("...a second click the other way round, with an arrow", findLog().OrderBy[0].Direction === "DESC" && /▼/.test(admin.$("th[aria-sort] .sort-header").textContent));
+  check("columns without a value to sort by have a plain title", !admin.$$("th .sort-header").some((b) => /Modality|Labels/.test(b.textContent)));
+  admin.click(admin.button(admin.$("tr.study"), "Other studies of this patient")); await sleep(1200);
+  check("'Other studies of this patient' searches its exact Patient ID", admin.$("input[name=patient_id]").value === '"P-001"' && findLog().Query.PatientID === "P-001", JSON.stringify(findLog().Query));
+  check("...on the Search page", admin.$(".subtabs [aria-selected=true]").textContent === "Studies");
+
+  const linked = await makeDom(STAFF, "/?patient_id=P-001&sort=patient&dir=asc");
+  await linked.login("admin", "SuperSecret123"); await until(() => linked.$("th[aria-sort]"), 6000);
+  check("a link with filters opens the Search page with them, after signing in", !!linked.$("input[name=patient_id]") && linked.$("input[name=patient_id]").value === "P-001" && /Patient ▲/.test(linked.$("th[aria-sort]").textContent));
+  const viaUid = await makeDom(STAFF, `/?study_uid=${STUDY_UID}`);
+  await viaUid.login("admin", "SuperSecret123"); await until(() => viaUid.$("input[name=study_uid]"), 6000);
+  check("...a filter without a box of its own (StudyInstanceUID) gets one, so it is never hidden", !!viaUid.$("input[name=study_uid]") && viaUid.$("input[name=study_uid]").value === STUDY_UID);
+
+  await admin.call("PUT", "/api/admin/settings", { search_as_you_type: true, infinite_scroll: true });
+  await fetch("http://127.0.0.1:18042/__mock/copies", { method: "POST", body: JSON.stringify({ n: 30 }) });
+  const live = await makeDom(STAFF);
+  await live.login("admin", "SuperSecret123"); await live.tab("Studies"); await until(() => live.$$("tr.study").length >= 25, 6000);
+  check("endless list: the first 25, no Previous / Next, a Load more button", live.$$("tr.study").length === 25 && !live.button(live.$("main"), "Next") && !!live.button(live.$("main"), "Load more"), String(live.$$("tr.study").length));
+  live.click(live.button(live.$("main"), "Load more")); await until(() => live.$$("tr.study").length === 30, 6000);
+  check("...Load more adds the next ones below", live.$$("tr.study").length === 30 && /That is all/.test(live.$(".load-more").textContent), String(live.$$("tr.study").length));
+  const nameBox = live.$("input[name=patient_name]");
+  nameBox.value = "DO"; nameBox.dispatchEvent(new live.window.Event("input", { bubbles: true })); await sleep(900);
+  check("live search: two letters are not enough yet (3 by default)", findLog().Query.PatientName !== "*DO*");
+  nameBox.value = "DOE"; nameBox.dispatchEvent(new live.window.Event("input", { bubbles: true })); await sleep(1200);
+  check("...with three, the results follow without pressing Search", findLog().Query.PatientName === "*DOE*", JSON.stringify(findLog().Query));
+  await fetch("http://127.0.0.1:18042/__mock/copies", { method: "POST", body: JSON.stringify({ n: 1 }) });
+  await admin.call("PUT", "/api/admin/settings", { search_as_you_type: false, infinite_scroll: false });
+
+  await admin.call("PUT", "/api/admin/settings", { study_columns: ["patient", "accession", "labels"], study_search_fields: ["patient_name", "sex"] });
+  const custom = await makeDom(STAFF);
+  await custom.login("admin", "SuperSecret123"); await custom.tab("Studies"); await until(() => custom.$("tr.study"), 6000);
+  const headerTitles = custom.$$("table.data thead th").map((th) => th.textContent.replace(/[▲▼]/g, "").trim()).filter(Boolean).join();
+  check("the columns chosen in Settings, in their order", headerTitles === "Preview,Patient,Accession number,Labels,Actions", headerTitles);
+  check("...and the search boxes chosen (a Sex list, no Patient ID box)", !!custom.$("select[name=patient_sex]") && !custom.$("input[name=patient_id]"));
+  const searchDefaults = (await (await admin.call("GET", "/api/admin/settings")).json()).defaults;
+  await admin.call("PUT", "/api/admin/settings", { study_columns: searchDefaults.study_columns, study_search_fields: searchDefaults.study_search_fields });
+
   console.log("--- search keeps working (modality filter)");
   await admin.tab("Studies");
-  admin.click(admin.$$(".chip-toggle").find((b) => b.textContent === "RX")); await sleep(1000);
+  admin.click(admin.$$(".mod-picker .chip-toggle").find((b) => b.textContent === "RX")); await sleep(1000);
   const lastFind = fs.readFileSync(path.join(LOGS, "find.log"), "utf8").trim().split("\n").pop();
   check("RX chip searches CR + DX", /"ModalitiesInStudy": "CR\\\\DX"/.test(lastFind), lastFind);
 
-  const all = [admin, guest, revokedPage, viewOnlyPage, shortPage, expiredPage, nothing, garbage, unknown, noViewerPage, adminNoOhif, viewers, noButtons, sharer, viewer, reader];
+  const all = [admin, guest, revokedPage, viewOnlyPage, shortPage, expiredPage, nothing, garbage, unknown, noViewerPage, adminNoOhif, viewers, noButtons, sharer, viewer, reader, linked, viaUid, live, custom];
   check("no JavaScript errors anywhere", all.every((d) => d.errors.length === 0), all.flatMap((d) => d.errors).join("|"));
   console.log(`\nRESULT: ${results.filter(Boolean).length} passed, ${results.filter((r) => !r).length} failed`);
   process.exit(results.every(Boolean) ? 0 : 1);

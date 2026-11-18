@@ -13,6 +13,7 @@
 //! | `send`      | Send a study to a remote DICOM node (an Orthanc "modality")            |
 //! | `share`     | Invite somebody OUTSIDE: password-protected link to ONE study          |
 //! | `admin`     | Manage users and settings, read the audit log                          |
+//! | `labels`    | Put labels on studies and take them off (administrators can too)       |
 //!
 //! All accounts live on the **intranet**. People outside never have an account: they get a
 //! one-study invitation link (see `routes/shares.rs` and `routes/guest.rs`), which has its
@@ -37,11 +38,12 @@ pub enum Permission {
     Send,
     Share,
     Admin,
+    Labels,
 }
 
 impl Permission {
     /// Every permission, in the order shown in the admin screen.
-    pub const ALL: [Permission; 7] = [
+    pub const ALL: [Permission; 8] = [
         Permission::Read,
         Permission::Visualize,
         Permission::Upload,
@@ -49,6 +51,7 @@ impl Permission {
         Permission::Send,
         Permission::Share,
         Permission::Admin,
+        Permission::Labels,
     ];
 
     /// Stable machine name, used in the database, in the JSON API and in error messages.
@@ -61,6 +64,7 @@ impl Permission {
             Permission::Send => "send",
             Permission::Share => "share",
             Permission::Admin => "admin",
+            Permission::Labels => "labels",
         }
     }
 
@@ -76,6 +80,7 @@ impl Permission {
                 "Invite people outside: password-protected link to one study (view + limited downloads)"
             }
             Permission::Admin => "Manage users and settings, view the audit log",
+            Permission::Labels => "Put labels on studies and take them off (to organise and find them)",
         }
     }
 
@@ -120,12 +125,14 @@ impl PermissionSet {
     /// being able to find studies, so those permissions require `read`.
     pub fn validate(&self) -> Result<(), AppError> {
         let needs_read = self.contains(Permission::Visualize)
+            || self.contains(Permission::Labels)
             || self.contains(Permission::Download)
             || self.contains(Permission::Send)
             || self.contains(Permission::Share);
         if needs_read && !self.contains(Permission::Read) {
             return Err(AppError::BadRequest(
-                "The 'visualize', 'download', 'send' and 'share' permissions require the 'read' permission".into(),
+                "The 'visualize', 'labels', 'download', 'send' and 'share' permissions require the 'read' permission"
+                    .into(),
             ));
         }
         Ok(())

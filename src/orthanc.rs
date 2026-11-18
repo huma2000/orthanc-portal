@@ -250,6 +250,24 @@ impl OrthancClient {
         Ok(self.check(resp).await?.json::<Value>().await?)
     }
 
+    /// `POST path` with a JSON body, answer parsed as JSON (e.g. `/tools/count-resources`).
+    pub async fn post_json(&self, path: &str, body: &Value) -> Result<Value, AppError> {
+        let resp = self.request(Method::POST, path).json(body).timeout(JSON_TIMEOUT).send().await?;
+        Ok(self.check(resp).await?.json::<Value>().await?)
+    }
+
+    /// `PUT path` with an empty body (e.g. putting a label on a study).
+    pub async fn put_empty(&self, path: &str) -> Result<(), AppError> {
+        let resp = self.request(Method::PUT, path).body("").timeout(JSON_TIMEOUT).send().await?;
+        self.check(resp).await.map(|_| ())
+    }
+
+    /// `DELETE path` (e.g. taking a label off a study).
+    pub async fn delete(&self, path: &str) -> Result<(), AppError> {
+        let resp = self.request(Method::DELETE, path).timeout(JSON_TIMEOUT).send().await?;
+        self.check(resp).await.map(|_| ())
+    }
+
     /// `POST /tools/find` - returns the array of matching resources.
     pub async fn find(&self, body: &Value) -> Result<Vec<Value>, AppError> {
         let resp = self.request(Method::POST, "/tools/find").json(body).timeout(JSON_TIMEOUT).send().await?;

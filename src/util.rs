@@ -49,6 +49,10 @@ pub fn non_empty(v: Option<String>) -> Option<String> {
 /// DICOM matching uses `*` and `?` wildcards. When the user typed a plain word we
 /// search "contains" semantics by wrapping it in `*`; explicit wildcards are kept.
 pub fn contains_pattern(term: &str) -> String {
+    // "P-001" between double quotes = exactly that value (as in Orthanc Explorer 2).
+    if term.len() >= 2 && term.starts_with('"') && term.ends_with('"') {
+        return term[1..term.len() - 1].to_string();
+    }
     if term.contains('*') || term.contains('?') {
         term.to_string()
     } else {

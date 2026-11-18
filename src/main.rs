@@ -36,7 +36,7 @@
 //! | `settings.rs`        | all settings editable from the web (stored in SQLite)  |
 //! | `server.rs`          | runs / re-opens the two HTTP listeners at runtime      |
 //! | `error.rs`           | `AppError` -> HTTP status + JSON                       |
-//! | `permissions.rs`     | the seven permissions of staff accounts                |
+//! | `permissions.rs`     | the eight permissions of staff accounts                |
 //! | `db.rs`              | SQLite: users, audit log, transfers, settings          |
 //! | `auth.rs`            | passwords, sessions, tokens, throttling, guards        |
 //! | `orthanc.rs`         | client for Orthanc's REST API (reconfigurable live)    |

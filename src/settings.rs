@@ -188,8 +188,8 @@ pub fn default_roles() -> Vec<Role> {
         role("viewer", "Viewer (search + view)", &[Permission::Read, Permission::Visualize]),
         role(
             "contributor",
-            "Contributor (viewer + upload)",
-            &[Permission::Read, Permission::Visualize, Permission::Upload],
+            "Contributor (viewer + upload + labels)",
+            &[Permission::Read, Permission::Visualize, Permission::Upload, Permission::Labels],
         ),
         role(
             "exporter",
@@ -206,6 +206,7 @@ pub fn default_roles() -> Vec<Role> {
                 Permission::Download,
                 Permission::Send,
                 Permission::Share,
+                Permission::Labels,
             ],
         ),
         role("administrator", "Administrator (everything)", &Permission::ALL),
@@ -356,6 +357,74 @@ pub struct Settings {
     pub simplified_recent_title: String,
     #[serde(default = "default_upload_text")]
     pub simplified_upload_text: String,
+
+    // ---- Search and lists (Settings > Search & labels) --------------------------------
+    /// Columns of the studies tables, in order (keys of [`STUDY_COLUMNS`]).
+    #[serde(default = "default_study_columns")]
+    pub study_columns: Vec<String>,
+    /// Search boxes of the Studies search, in order (keys of [`STUDY_SEARCH_FIELDS`]).
+    #[serde(default = "default_study_search_fields")]
+    pub study_search_fields: Vec<String>,
+    /// Search while typing (after `search_min_chars` letters) instead of with the Search button.
+    #[serde(default)]
+    pub search_as_you_type: bool,
+    #[serde(default = "default_search_min_chars")]
+    pub search_min_chars: u64,
+    /// Load the next results when scrolling to the end of a list, instead of Previous / Next.
+    #[serde(default)]
+    pub infinite_scroll: bool,
+
+    // ---- Labels -----------------------------------------------------------------------
+    /// The only labels that may be put on studies. Empty = any label.
+    #[serde(default)]
+    pub available_labels: Vec<String>,
+    /// Show how many studies carry each label (one count per label for Orthanc).
+    #[serde(default = "default_true")]
+    pub label_counts: bool,
+}
+
+/// Every column the studies tables can show (Settings > Search & labels), in the order offered.
+pub const STUDY_COLUMNS: [&str; 14] = [
+    "patient",
+    "patient_id",
+    "birth_date",
+    "sex",
+    "other_ids",
+    "study_date",
+    "description",
+    "accession",
+    "referring",
+    "requesting",
+    "institution",
+    "modalities",
+    "series",
+    "labels",
+];
+/// Every search box the Studies search can offer.
+pub const STUDY_SEARCH_FIELDS: [&str; 13] = [
+    "patient_name",
+    "patient_id",
+    "birth_date",
+    "sex",
+    "other_ids",
+    "description",
+    "accession",
+    "referring",
+    "requesting",
+    "institution",
+    "modality",
+    "dates",
+    "labels",
+];
+
+fn default_study_columns() -> Vec<String> {
+    ["patient", "patient_id", "study_date", "description", "modalities", "series", "labels"].map(String::from).to_vec()
+}
+fn default_study_search_fields() -> Vec<String> {
+    ["patient_name", "patient_id", "description", "modality", "dates", "labels"].map(String::from).to_vec()
+}
+fn default_search_min_chars() -> u64 {
+    3
 }
 
 fn default_smtp_port() -> u64 {
@@ -446,6 +515,13 @@ impl Settings {
             simplified_show_labels: false,
             simplified_recent_title: default_recent_title(),
             simplified_upload_text: default_upload_text(),
+            study_columns: default_study_columns(),
+            study_search_fields: default_study_search_fields(),
+            search_as_you_type: false,
+            search_min_chars: default_search_min_chars(),
+            infinite_scroll: false,
+            available_labels: Vec::new(),
+            label_counts: true,
         }
     }
 
@@ -588,6 +664,11 @@ impl Settings {
             *color = color.trim().to_lowercase();
         }
         self.simplified_recent_title = self.simplified_recent_title.trim().to_string();
+        for label in &mut self.available_labels {
+            *label = label.trim().to_string();
+        }
+        self.available_labels.retain(|l| !l.is_empty());
+        self.available_labels.dedup();
         self.simplified_upload_text = self.simplified_upload_text.trim().to_string();
         for role in &mut self.roles {
             role.key = role.key.trim().to_string();
@@ -801,6 +882,33 @@ impl Settings {
         }
         if self.simplified_upload_text.chars().count() > 120 || has_control(&self.simplified_upload_text) {
             return bad("The text of the upload area can have at most 120 characters".into());
+        }
+
+        // --- search and labels
+        let check_keys = |what: &str, keys: &[String], allowed: &[&str], at_least_one: bool| -> Result<(), AppError> {
+            if at_least_one && keys.is_empty() {
+                return Err(AppError::BadRequest(format!("Choose at least one {what}")));
+            }
+            for (i, key) in keys.iter().enumerate() {
+                if !allowed.contains(&key.as_str()) {
+                    return Err(AppError::BadRequest(format!("Unknown {what} '{key}'")));
+                }
+                if keys[..i].contains(key) {
+                    return Err(AppError::BadRequest(format!("The {what} '{key}' is chosen twice")));
+                }
+            }
+            Ok(())
+        };
+        check_keys("column", &self.study_columns, &STUDY_COLUMNS, true)?;
+        check_keys("search box", &self.study_search_fields, &STUDY_SEARCH_FIELDS, false)?;
+        range("Letters before searching while typing", self.search_min_chars, 1, 10)?;
+        if self.available_labels.len() > 100 {
+            return bad("At most 100 allowed labels".into());
+        }
+        if let Some(bad_label) = self.available_labels.iter().find(|l| !crate::routes::labels::valid_label(l)) {
+            return bad(format!(
+                "'{bad_label}' is not a valid label: 1 to 64 letters, digits, '-' or '_' (no spaces or accents)"
+            ));
         }
         Ok(())
     }
@@ -1031,6 +1139,24 @@ mod tests {
         assert!(mail("none", "").is_ok(), "a relay without sign-in");
         assert!(mail("starttls", "mailer").is_ok());
         assert!(mail("tls", "mailer").is_ok());
+    }
+
+    /// Columns, search boxes and allowed labels are checked.
+    #[test]
+    fn search_and_label_settings_are_checked() {
+        let base = Settings::defaults();
+        let ok = |patch: Value| base.with_patch(&patch).is_ok();
+        assert!(ok(json!({ "study_columns": ["patient", "accession", "labels"], "study_search_fields": [] })));
+        assert!(!ok(json!({ "study_columns": [] })), "at least one column");
+        assert!(!ok(json!({ "study_columns": ["patient", "patient"] })), "twice");
+        assert!(!ok(json!({ "study_search_fields": ["shoe_size"] })), "unknown");
+        assert!(ok(json!({ "available_labels": ["urgent", " teaching "] })));
+        assert!(!ok(json!({ "available_labels": ["with space"] })));
+        assert!(!ok(json!({ "search_min_chars": 0 })));
+        assert_eq!(
+            base.with_patch(&json!({ "available_labels": [" a ", "", "b"] })).unwrap().available_labels,
+            ["a", "b"]
+        );
     }
 
     /// Colours and texts of the appearance tab are checked.

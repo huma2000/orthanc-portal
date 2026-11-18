@@ -208,8 +208,9 @@ screens whose changes apply at once.
 | Tab > section | What you can change |
 |---|---|
 | **General > Branding** | **Browser window title**, **website icon**, **logo**, portal name, whether the name is shown next to the logo, notice shown on the login page (see below) |
-| **General > Modality buttons** | The quick modality filters of the Studies and Series pages: order, shown / hidden, label, DICOM codes, description; add, remove, restore defaults (the *Other codes* box is always shown) |
+| **Search & labels > Modality buttons** | The quick modality filters of the Studies and Series pages: order, shown / hidden, label, DICOM codes, description; add, remove, restore defaults (the *Other codes* box is always shown) |
 | **Appearance > Colours** | Light / dark / automatic, and the **accent**, **header**, **icon column** and **page background** colours (each can go back to the built-in one). Previewed at once, kept when saved (see [The layout and the colours](#the-layout-and-the-colours)) |
+| **Search & labels** | The modality buttons; the columns of the studies tables and the boxes of the Studies search (which ones, in which order); live search on or off and its minimum number of letters; endless lists on or off; the allowed labels and whether their counts are shown |
 | **Appearance > Home page and icons** | How many recent studies the home page shows, which ones (last received / newest study date) and how (the Studies table, or cards with big previews), card size, the two texts of the home page, the total of studies in the header, names under the icons |
 | **General > Viewers and uploads** | Show the **Weasis** button (on / off), show the **OHIF** button (automatic / always / never), largest uploaded file, preview thumbnails on/off and their cache size |
 | **Orthanc > Orthanc connection** | Address; **with an account** (user name + password, write-only: never sent back to the browser) **or without an account** (for an Orthanc that only accepts a list of allowed computers); **Test connection** (mode used, version, DICOMweb/OHIF plugins, number of DICOM nodes; works on values you have typed but not yet saved) |
@@ -363,6 +364,7 @@ with an invitation have no account and no permissions, only their link (section 
 | `send` | Send studies to remote DICOM nodes, see transfers |
 | `share` | **Invite somebody outside to look at a study** (create links), see and revoke their own links |
 | `admin` | Manage users, settings, DICOM nodes, branding, read the audit log; see and revoke **everyone's** links |
+| `labels` | Put labels on studies and take them off (administrators can too; everyone who can search sees them) |
 
 Rules: `visualize`, `download`, `send` and `share` require `read`. The last active administrator cannot be
 removed or disabled, and nobody can delete or demote their own account.
@@ -392,21 +394,49 @@ or resetting their password also ends their sessions and Weasis tokens. An admin
 
 ---
 
-## 6. Searching and filtering by modality
+## 6. Searching, sorting and labels
 
-* **Search** page, with its **Studies** and **Series** tabs; text fields accept DICOM wildcards (`DOE*`, `?`), a plain word means
-  "contains". Study dates are a range. Newest studies come first (sorted by Orthanc, so paging is exact).
+* **Search** page, with its **Studies** and **Series** tabs; text fields accept DICOM wildcards (`DOE*`, `?`), a
+  plain word means "contains", and a value **between double quotes** (`"P-001"`) must match **exactly**. Dates are
+  ranges. Newest studies come first (sorted by Orthanc, so paging is exact).
+* **Sorting**: click a column title to sort by it (underlined titles), click again for the other direction. Every
+  column with a DICOM value can be sorted (patient, IDs, dates, description, physicians, institution...); the
+  study date breaks ties. The Series list can be sorted by patient, study date, number, modality, description
+  and body part.
+* **Choose the columns and the search boxes** in *Settings > Search & labels*: the studies tables (Search and home
+  page) can show patient, patient ID, birth date, sex, other patient IDs, study date, description, accession
+  number, referring and requesting physician, institution, modalities, series/images and labels, in the order you
+  set; the Studies search can offer boxes for the same fields (dates and birth dates as from / to, sex as a list,
+  labels as toggles). By default: patient, patient ID, study date, description, modalities, series/images,
+  labels; and the boxes patient name, patient ID, study description, modality, study dates and labels.
+* **Live search** (*Search while typing*, off by default): the results follow the boxes as they are filled in,
+  after a short pause and once a minimum number of letters is typed (3 by default); dates, lists and buttons search
+  at once.
+* **Endless lists** (off by default): instead of Previous / Next, the next 25 results are loaded when you scroll
+  to the end of the list (a *Load more* button does the same).
+* **All the studies of a patient**: the person icon on a study (or a series) opens the Search page with that
+  exact Patient ID.
+* **Links to a search**: the address of the Search page follows its filters and sort, so it can be bookmarked,
+  and *Copy link* (next to the title) copies it. Another program can open the portal on a search the same way:
+  `/?patient_id=P-001`, `/?study_uid=1.2.840...`, `/?labels=urgent&sort=patient&dir=asc`, `/?search=series&body_part=KNEE`
+  (the names are those of the API below). After signing in, the search opens; a filter that has no box among those
+  chosen in Settings gets one, so it is never hidden.
+* **Labels** (Orthanc's own labels): short words such as `urgent`, `insurance` or `teaching`, shown in a column and
+  in the study window. Anyone who can search sees them and filters by them: one toggle per label with its number of
+  studies, several at once (any or all of them), or *Without labels*. Staff with the **`labels` permission** (and
+  administrators) put them on and take them off with the tag icon of a study. *Settings > Search & labels* can
+  restrict the labels to a fixed list and switch off the counts (one count per label for Orthanc). Every change is
+  in the audit log.
 * **Modality** is a row of toggle buttons, by default **CT, MR, US, RX, MG, XA, RF, NM, PT**. Several can be
   active at once (CT *or* US) and the list refreshes immediately. **RX** means X-ray, which DICOM splits into
   `CR` and `DX`, so it selects both. The **Other codes** box next to them accepts any other code (`SR`,
   `ES`...) and is always shown.
-* An administrator arranges the buttons in *Settings > General > Modality buttons*: move them up or down,
+* An administrator arranges the buttons in *Settings > Search & labels > Modality buttons*: move them up or down,
   hide the ones nobody uses (they stay in the list, ready to be shown again), change a label, its DICOM codes
   or its description, add new ones or restore the defaults. A preview shows the row as users will see it;
   the change reaches everybody as soon as it is saved.
-* The search fields are patient name, patient ID, study (or series) description, modality, body part (Series)
-  and study dates. The accession number is neither searched nor shown in the list (guests still see it on
-  their invitation page, and the API still accepts `accession_number=`).
+* The Series search offers patient name, patient ID, series description, modality, body part and study dates.
+  The accession number is not shown or searched unless an administrator adds its column or box.
 * Under the hood the codes become a DICOM "any of" list: `ModalitiesInStudy = "CT\CR\DX"`. The API accepts
   `?modality=ct,rx` (case-insensitive, `RX` expands to `CR,DX`).
 * The studies table shows a **preview thumbnail**, modality badges, the number of series/images, and expands
@@ -683,6 +713,9 @@ All JSON. State-changing calls need the header `X-Requested-With: portal`.
 | `POST /api/login`, `POST /api/logout`, `GET /api/me` | none / session | Session (`/me` returns the permissions, the `role` and `features`: `ohif`, `thumbnails`, `share`, `simplified` (home page and icon options)) |
 | `GET /api/studies?patient_name=&patient_id=&accession_number=&description=&modality=&date_from=&date_to=&order=&limit=&offset=` | read | Search studies (`modality=ct,rx`; `order=received` = last received first, otherwise newest study date) |
 | `GET /api/stats` | read | `{ "studies": N }`: number of studies in Orthanc |
+| `GET /api/studies?...&birth_from=&birth_to=&patient_sex=&referring_physician=&requesting_physician=&institution=&other_patient_ids=&study_uid=&labels=a,b&labels_mode=any\|all&no_labels=true&sort=&dir=asc\|desc` | read | The other filters and the sort of the Studies search (`sort`: patient, patient_id, birth_date, sex, other_ids, study_date, description, accession, referring, requesting, institution, received) |
+| `GET /api/labels` | read | Every label with its number of studies, the allowed ones, and whether the caller may change them |
+| `PUT/DELETE /api/studies/{id}/labels/{label}` | labels or admin | Put a label on a study / take it off; answers the study's labels |
 | `GET /api/studies/{id}/series` | read | Series of a study |
 | `GET /api/series?...&body_part=` | read | Search series |
 | `GET /api/studies/{id}/thumbnail`, `GET /api/series/{id}/thumbnail` (`?size=64\|128\|256`) | visualize | Preview JPEG (404 = nothing to show) |
@@ -763,7 +796,7 @@ The code compiles without warnings on Rust 1.91, passes `cargo clippy --all-targ
 formatted with `rustfmt` (see `rustfmt.toml`), and its dependencies were checked against the RustSec advisory
 database (no known vulnerable version in `Cargo.lock`). The automated tests live in the **`tests/`** folder:
 
-* `tests/server_tests.sh`: **439 checks** of the server against a fake Orthanc (`tests/mock_orthanc.py`) and a
+* `tests/server_tests.sh`: **463 checks** of the server against a fake Orthanc (`tests/mock_orthanc.py`) and a
   fake mail server (`tests/mock_smtp.py`):
   the two doors (staff portal vs invitation links only, Cloudflare headers refused on the intranet port), creating
   links with the default and the limited validity/downloads, the password gate and its throttling, what a guest
@@ -774,10 +807,10 @@ database (no known vulnerable version in `Cargo.lock`). The automated tests live
   login hardening, caps, ETag/headers, concurrent administrators, and **talking to Orthanc with an account, without
   one, and when it refuses the portal** (what is sent, what is not, the message for each case), and an
   administrator changing their own password (every other session of that account is signed out);
-* `tests/ui_tests.js`: **109 checks** of both web pages in a simulated browser (jsdom): the Share dialog and the
+* `tests/ui_tests.js`: **129 checks** of both web pages in a simulated browser (jsdom): the Share dialog and the
   Shares tab, the guest page (password, study, series, countdown, downloads left, expiry, revoked, 0-download
   links, no OHIF), what each kind of staff account sees, search, the with/without-account choice in Settings;
-* `cargo test`: **28 unit tests** (image validation; password and link generation; the rules that confine a guest
+* `cargo test`: **30 unit tests** (image validation; password and link generation; the rules that confine a guest
   to one study; account / no account and the wording of Orthanc refusals; the thumbnail cache; tokens and sessions;
   the role of a user, settings saved by earlier versions, the appearance settings; email addresses, invitation texts, the hourly email limit and
   the rule that the mail server password never travels unencrypted).
