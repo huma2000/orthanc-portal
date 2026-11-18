@@ -170,6 +170,10 @@ pub struct Transfer {
     pub final_state: Option<String>,
     #[serde(skip)]
     pub final_error: Option<String>,
+    /// What a finished transfer did, as JSON `{ "instances", "failed", "runtime" }` (kept so the
+    /// Transfers tab can still say "120 images in 2 min" once Orthanc has forgotten the job).
+    #[serde(skip)]
+    pub final_info: Option<String>,
 }
 
 /// One stored branding image: `(kind, content type, bytes, updated_at)`.
@@ -254,7 +258,8 @@ impl Db {
                  target   TEXT    NOT NULL,
                  job_id   TEXT    NOT NULL,
                  final_state TEXT,                                      -- set once the job has ended
-                 final_error TEXT
+                 final_error TEXT,
+                 final_info  TEXT                                       -- JSON: images, failed, run time
              );
 
              -- Invitation links for people outside (see routes/guest.rs).
@@ -286,14 +291,21 @@ impl Db {
              );
 
              -- Configuration saved from the Settings screen: a single row, key 'main'.
+             -- Descriptions of the DICOM nodes (Settings > DICOM nodes), shown to the staff:
+             -- Orthanc itself only knows the short alias, the AE title and the address.
+             CREATE TABLE IF NOT EXISTS node_descriptions (
+                 alias       TEXT PRIMARY KEY,
+                 description TEXT NOT NULL
+             );
+
              CREATE TABLE IF NOT EXISTS settings (
                  key   TEXT PRIMARY KEY,
                  value TEXT NOT NULL
              );",
         )?;
 
-        // Databases created by older versions have no `final_state` / `final_error` columns.
-        for column in ["final_state", "final_error"] {
+        // Databases created by older versions have no `final_state` / `final_error` / `final_info` columns.
+        for column in ["final_state", "final_error", "final_info"] {
             let exists = conn
                 .prepare("SELECT 1 FROM pragma_table_info('transfers') WHERE name = ?1")?
                 .exists(params![column])?;
@@ -492,7 +504,7 @@ impl Db {
     pub fn recent_transfers(&self, only_user: Option<&str>, limit: i64) -> Result<Vec<Transfer>, AppError> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(
-            "SELECT id, ts, username, study_id, label, target, job_id, final_state, final_error FROM transfers
+            "SELECT id, ts, username, study_id, label, target, job_id, final_state, final_error, final_info FROM transfers
              WHERE (?1 IS NULL OR username = ?1 COLLATE NOCASE)
              ORDER BY id DESC LIMIT ?2",
         )?;
@@ -507,6 +519,7 @@ impl Db {
                 job_id: r.get(6)?,
                 final_state: r.get(7)?,
                 final_error: r.get(8)?,
+                final_info: r.get(9)?,
             })
         })?;
         let transfers = rows.collect::<Result<Vec<_>, _>>()?;
@@ -574,10 +587,35 @@ impl Db {
     }
 
     /// Remembers how a transfer ended, so Orthanc is not asked about it again.
-    pub fn set_transfer_final(&self, id: i64, state: &str, error: Option<&str>) -> Result<(), AppError> {
+    pub fn set_transfer_final(&self, id: i64, state: &str, error: Option<&str>, info: &str) -> Result<(), AppError> {
         let conn = self.lock();
-        conn.prepare_cached("UPDATE transfers SET final_state = ?1, final_error = ?2 WHERE id = ?3")?
-            .execute(params![state, error, id])?;
+        conn.prepare_cached("UPDATE transfers SET final_state = ?1, final_error = ?2, final_info = ?3 WHERE id = ?4")?
+            .execute(params![state, error, info, id])?;
+        Ok(())
+    }
+
+    // ------------------------------------------------------- DICOM node descriptions
+
+    /// Every description, by alias.
+    pub fn node_descriptions(&self) -> Result<std::collections::HashMap<String, String>, AppError> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached("SELECT alias, description FROM node_descriptions")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Sets the description of a node; an empty one removes it.
+    pub fn set_node_description(&self, alias: &str, description: &str) -> Result<(), AppError> {
+        let conn = self.lock();
+        if description.is_empty() {
+            conn.prepare_cached("DELETE FROM node_descriptions WHERE alias = ?1")?.execute(params![alias])?;
+        } else {
+            conn.prepare_cached(
+                "INSERT INTO node_descriptions (alias, description) VALUES (?1, ?2)
+                 ON CONFLICT(alias) DO UPDATE SET description = excluded.description",
+            )?
+            .execute(params![alias, description])?;
+        }
         Ok(())
     }
 

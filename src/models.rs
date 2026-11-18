@@ -117,6 +117,9 @@ pub struct ModalityNode {
     pub host: String,
     pub port: u64,
     pub manufacturer: String,
+    /// What the staff call it (Settings > DICOM nodes); empty when no description was given.
+    #[serde(default)]
+    pub description: String,
 }
 
 impl ModalityNode {
@@ -128,11 +131,19 @@ impl ModalityNode {
             host: text(&cfg["Host"]),
             port: cfg["Port"].as_u64().unwrap_or(0),
             manufacturer: text(&cfg["Manufacturer"]),
+            description: String::new(),
         }
     }
 
     /// A node known only by its alias (fallback when Orthanc gives no details).
     pub fn bare(id: &str) -> Self {
-        Self { id: id.to_string(), aet: String::new(), host: String::new(), port: 0, manufacturer: String::new() }
+        Self {
+            id: id.to_string(),
+            aet: String::new(),
+            host: String::new(),
+            port: 0,
+            manufacturer: String::new(),
+            description: String::new(),
+        }
     }
 }

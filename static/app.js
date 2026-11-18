@@ -49,6 +49,7 @@ const state = {
   user: null,     // { id, username, permissions: ["read", ...], features: { ohif, thumbnails, share: {...} } }
   view: null,     // id of the visible tab ("studies", "series", "upload", "settings"...)
   simpleView: "home", // id of the visible page of the simplified view (see SIMPLE_PAGES)
+  simpleSearch: "studies", // simplified Search page: "studies" or "series"
   settingsTab: "general", // id of the visible tab inside Settings (see SETTINGS_TABS)
   notice: "",     // message shown on the login form (e.g. "Your session expired")
   // Identity of this installation (Settings > Branding). Filled from /api/public.
@@ -251,6 +252,7 @@ function openStudies() {
   if (!can("read")) return;
   state.view = "studies";
   state.simpleView = "search";
+  state.simpleSearch = "studies";
   renderApp();
 }
 
@@ -527,6 +529,7 @@ const ICONS = {
   settings: [GEAR_PATH, { c: [12, 12, 3.2] }],
   logout: ["M13 3.5h6v17h-6", "M3.5 12h11", "M11 8.5l3.5 3.5-3.5 3.5"],
   swap: ["M4 8h14", "M15 5l3 3-3 3", "M20 16H6", "M9 13l-3 3 3 3"],
+  transfers: ["M3 12h10.5", "M10 8.5l3.5 3.5-3.5 3.5", "M16 4.5h5v15h-5z", "M18.5 8h.01", "M18.5 11h.01"], // an arrow into another system
   help: [{ c: [12, 12, 9] }, "M9.6 9.4a2.5 2.5 0 1 1 3.4 2.4c-.6.3-1 .8-1 1.5v.6", { c: [12, 16.9, 0.35] }],
   // Buttons of a study (simplified view)
   weasis: ["M3 4.5h18v11.5H3z", "M8.5 20.5h7", "M12 16v4.5"],                       // a desktop screen
@@ -586,7 +589,7 @@ function showTip(target) {
   tipBox.style.left = `${Math.round(left)}px`;
 }
 const hideTip = () => { tipBox.hidden = true; tipFor = null; };
-const tipTarget = (event) => (event.target instanceof Element ? event.target.closest(".icon-btn[data-tip]") : null);
+const tipTarget = (event) => (event.target instanceof Element ? event.target.closest(".icon-btn[data-tip], .has-tip[data-tip]") : null);
 document.addEventListener("mouseover", (event) => { const t = tipTarget(event); if (t) showTip(t); else hideTip(); });
 document.addEventListener("focusin", (event) => { const t = tipTarget(event); if (t && t.matches(":focus-visible")) showTip(t); else hideTip(); });
 document.addEventListener("focusout", hideTip);
@@ -614,12 +617,30 @@ function icon(name) {
  */
 const SIMPLE_PAGES = [
   { id: "home", label: "Home", icon: "home", needs: null, build: buildHomeView },
-  { id: "search", label: "Search", icon: "search", needs: "read", build: () => buildSearchView(STUDY_SEARCH) },
+  { id: "search", label: "Search", icon: "search", needs: "read", build: buildSimpleSearch },
   { id: "shares", label: "Shares", icon: "share", needs: "share", build: buildSharesView },
   { id: "upload", label: "Uploads", icon: "upload", needs: "upload", build: buildUploadView },
+  { id: "transfers", label: "Transfers", icon: "transfers", needs: "send", build: buildTransfersView },
   { id: "help", label: "Help", icon: "help", needs: null, bottom: true, build: buildHelpView },
   { id: "settings", label: "Configuration", icon: "settings", needs: "admin", bottom: true, build: buildSettingsView },
 ];
+
+/**
+ * Search page of the simplified view: the Studies and the Series searches of the normal view
+ * (its two tabs), behind two small tabs of their own.
+ */
+function buildSimpleSearch() {
+  const kinds = [["studies", "Studies", STUDY_SEARCH], ["series", "Series", SERIES_SEARCH]];
+  if (!kinds.some(([id]) => id === state.simpleSearch)) state.simpleSearch = "studies";
+  const tabs = h("div", { class: "subtabs", role: "tablist", "aria-label": "Search" },
+    kinds.map(([id, label]) => h("button", {
+      type: "button", role: "tab", "aria-selected": String(id === state.simpleSearch),
+      onclick: () => { state.simpleSearch = id; renderApp(); },
+    }, label)));
+  const view = buildSearchView(kinds.find(([id]) => id === state.simpleSearch)[2]);
+  view.insertBefore(tabs, view.children[1]); // under the page title, above the filters
+  return view;
+}
 
 /** Options of the simplified view sent by the server (Settings > Appearance). */
 const simpleOptions = () => (state.user && state.user.features && state.user.features.simplified) || {};
@@ -1244,7 +1265,7 @@ async function openSendDialog(study) {
 
   const error = h("div", { class: "form-error", role: "alert", hidden: true });
   const target = h("select", null, nodes.map((n) =>
-    h("option", { value: n.id }, n.aet ? `${n.id}  (${n.aet} at ${n.host}:${n.port})` : n.id)));
+    h("option", { value: n.id }, [n.description ? `${n.description}: ${n.id}` : n.id, n.aet ? `  (${n.aet} at ${n.host}:${n.port})` : ""].join(""))));
   const submit = h("button", { class: "btn primary", type: "submit" }, "Send study");
 
   const dialog = h("dialog", null, h("form", {
@@ -1666,9 +1687,13 @@ function buildUploadProgress() {
  */
 function buildTransfersView() {
   const container = h("section", { class: "panel" });
+  // The destinations, to name them (description, AE title, address): asked once per visit.
+  let nodes = new Map();
+  const nodesLoaded = api("GET", "/api/modalities").then((list) => { nodes = new Map(list.map((n) => [n.id, n])); }).catch(() => {});
 
   async function load() {
     try {
+      await nodesLoaded;
       const rows = await api("GET", "/api/transfers");
       container.replaceChildren(rows.length ? renderTransfers(rows) : h("div", { class: "empty" }, 'Nothing sent yet. Use "Send to..." on a study.'));
       // Keep polling only while something is still in progress and this tab is visible.
@@ -1681,27 +1706,58 @@ function buildTransfersView() {
     }
   }
 
+  /** The destination: its short name, with its description and address in a tooltip and under it. */
+  function destinationCell(alias) {
+    const n = nodes.get(alias);
+    const address = n && n.aet ? `AE title ${n.aet} at ${n.host}:${n.port}` : "";
+    const tip = n
+      ? [n.description, address].filter(Boolean).join(" — ") || alias
+      : `${alias}: no longer among the DICOM destinations`;
+    return h("td", null,
+      h("span", { class: "chip has-tip", "data-tip": tip, "aria-label": `${alias}: ${tip}`, tabindex: "0" }, alias),
+      n && n.description ? h("div", { class: "sub" }, n.description) : null);
+  }
+
+  /** "45%, 54 of 120 images, 1 min 10 s, about 1 min 25 s left" while it runs; the outcome when finished. */
+  function progressCell(r) {
+    const fill = h("span");
+    fill.style.width = `${r.progress}%`;
+    const images = r.instances;
+    const ran = r.runtime ? formatDuration(r.runtime) : "";
+    let detail;
+    if (r.state === "Pending") detail = "Waiting to start";
+    else if (r.state === "Running" || r.state === "Retry") {
+      const parts = [];
+      if (images) parts.push(`${Math.round((images * r.progress) / 100)} of ${images} images`);
+      if (ran) parts.push(ran);
+      if (r.runtime && r.progress > 0 && r.progress < 100) parts.push(`about ${formatDuration((r.runtime * (100 - r.progress)) / r.progress)} left`);
+      detail = parts.join(" · ") || "Sending";
+    } else if (r.state === "Success") detail = images ? `${images} images in ${ran || "a moment"}` : "Sent";
+    else if (r.state === "Failure") detail = images && r.failed ? `${r.failed} of ${images} images could not be sent` : "";
+    else if (r.state === "Unknown") detail = "Orthanc no longer remembers this transfer";
+    else if (r.state === "Unavailable") detail = "Orthanc did not answer: trying again";
+    const running = ["Pending", "Running", "Retry"].includes(r.state);
+    return h("td", { class: "transfer-progress" },
+      running ? h("div", { class: "upload-progress-line" }, h("div", { class: "progress" }, fill), h("b", null, `${r.progress}%`)) : null,
+      detail ? h("div", { class: "sub" }, detail) : null,
+      r.error ? h("div", { class: "error-line" }, r.error) : null);
+  }
+
   function renderTransfers(rows) {
     return h("div", { class: "table-wrap" }, h("table", { class: "data" },
-      h("thead", null, h("tr", null, ["Started", "Study", "Destination", "By", "State"].map((t) => h("th", null, t)))),
-      h("tbody", null, rows.map((r) => {
-        const fill = h("span");
-        fill.style.width = `${r.progress}%`;
-        return h("tr", null,
-          h("td", { class: "nowrap" }, formatTimestamp(r.ts)),
-          h("td", null, r.label.replaceAll(" | ", " - ")),
-          h("td", null, h("span", { class: "chip" }, r.target)),
-          h("td", null, r.username),
-          h("td", null,
-            h("span", { class: `chip state-${r.state.toLowerCase()}` }, r.state),
-            r.state === "Running" || r.state === "Pending" ? h("div", { class: "progress small" }, fill) : null,
-            r.error ? h("div", { class: "error-line" }, r.error) : null));
-      }))));
+      h("thead", null, h("tr", null, ["Started", "Study", "Destination", "By", "Progress", "State"].map((t) => h("th", null, t)))),
+      h("tbody", null, rows.map((r) => h("tr", null,
+        h("td", { class: "nowrap" }, formatTimestamp(r.ts)),
+        h("td", null, r.label.replaceAll(" | ", " - ")),
+        destinationCell(r.target),
+        h("td", null, r.username),
+        progressCell(r),
+        h("td", null, h("span", { class: `chip state-${r.state.toLowerCase()}` }, r.state)))))));
   }
 
   load();
   return h("div", { class: "view" },
-    h("div", { class: "page-head" }, h("h1", null, "Transfers"), h("button", { class: "btn", type: "button", onclick: load }, "Refresh")),
+    h("div", { class: "page-head" }, h("h1", null, "Transfers"), actionButton("button", "refresh", "Refresh", "Refresh the list", { class: "btn", type: "button", onclick: load })),
     container);
 }
 
@@ -2316,7 +2372,7 @@ function helpSections() {
           simple ? [helpIcon("home"), " ", h("b", null, "Home"), ": the latest studies and an area to upload files."] : null,
           can("read") ? [simple ? [helpIcon("search"), " "] : null, where("Search", "Studies and Series"), ": find a study or a series."] : null,
           can("upload") ? [simple ? [helpIcon("upload"), " "] : null, h("b", null, "Uploads"), ": add images to the archive and follow the uploads."] : null,
-          can("send") && !simple ? [h("b", null, "Transfers"), ": follow the studies you sent to another system."] : null,
+          can("send") ? [simple ? [helpIcon("transfers"), " "] : null, h("b", null, "Transfers"), ": follow the studies you sent to another system."] : null,
           can("share") ? [simple ? [helpIcon("share"), " "] : null, h("b", null, "Shares"), ": the links you created to show a study to someone outside."] : null,
           [simple ? [helpIcon("help"), " "] : null, h("b", null, "Help"), ": this page."],
         ),
@@ -2348,7 +2404,7 @@ function helpSections() {
           "Click the small arrow ▸ at the start of a row to see the series of the study (each set of images) and how many images each has.",
           f.thumbnails && can("visualize") ? "The small picture is a preview of the study or series: it appears after a moment." : null,
           "Rest the mouse on a modality tag (CT, MR...) to see its full name.",
-          simple ? null : [h("b", null, "Series"), " tab: the same search, one row per series, with a ", h("b", null, "Body part"), " box (CHEST, KNEE...)."],
+          [h("b", null, "Series"), simple ? " (the second tab of the Search page)" : " tab", ": the same search, one row per series, with a ", h("b", null, "Body part"), " box (CHEST, KNEE...)."],
         ),
       ],
     },
@@ -2379,9 +2435,9 @@ function helpSections() {
       body: () => [
         h("p", null, helpButton("send", "Send to..."), " sends a whole study to another DICOM system the practice works with (a workstation, another archive...). Choose the destination in the list and confirm."),
         h("p", null, "The transfer continues on its own, even if you leave the page. ",
-          simple
-            ? (f.interface_switch ? "To follow it, switch to the normal view (see Switching view) and open the Transfers tab." : "Your administrator can tell you whether it arrived.")
-            : ["Follow it in the ", h("b", null, "Transfers"), " tab: it shows when it is finished, or why it failed."]),
+          "Follow it on the ", simple ? [helpIcon("transfers"), " "] : null, h("b", null, "Transfers"), simple ? " page" : " tab",
+          ": while it runs it shows the percentage, how many images were sent, how long it has been running and about how long is left (the list updates itself); then how many images were sent, or why it failed."),
+        h("p", null, "Rest the mouse on the name of a destination (for example \"ris\") to see what it is and where it is."),
       ],
     },
     {
@@ -3038,7 +3094,7 @@ function buildSettingsView() {
       section("viewers", "Viewers and uploads", null, SETTINGS_FIELDS.viewers.map(field)),
       section("theme", "Colours", "Match the portal to your practice's colours. Changes are previewed on this page at once and kept when you save. The logo, the portal name and the window title are in the General tab.",
         themeFields),
-      section("simplified", "Simplified view", "A reduced layout for staff who mostly look at recent studies and upload new ones: the logo, the practice name and the total of studies at the top, a column of icons (Home, Search, Shares, Uploads, Help, Configuration, Log out) on the left, and a home page with the most recent studies and an area to drop files into. Choose which roles use it in Security & roles > Roles.",
+      section("simplified", "Simplified view", "A reduced layout for staff who mostly look at recent studies and upload new ones: the logo, the practice name and the total of studies at the top, a column of icons (Home, Search, Shares, Uploads, Transfers, Help, Configuration, Log out) on the left, and a home page with the most recent studies and an area to drop files into. Choose which roles use it in Security & roles > Roles.",
         SETTINGS_FIELDS.simplified.map(field)),
       section("orthanc", "Orthanc connection", "The PACS this portal works with. Saved changes apply immediately, without restarting.",
         urlField, modeField, userField, passwordField,
@@ -3080,9 +3136,10 @@ function buildNodesView() {
 
   function renderTable(nodes) {
     return h("div", { class: "table-wrap" }, h("table", { class: "data" },
-      h("thead", null, h("tr", null, ["Name", "AE title", "Address", "Send", "Ping", "Actions"].map((t) => h("th", { class: t === "Actions" ? "num" : null }, t)))),
+      h("thead", null, h("tr", null, ["Name", "Description", "AE title", "Address", "Send", "Ping", "Actions"].map((t) => h("th", { class: t === "Actions" ? "num" : null }, t)))),
       h("tbody", null, nodes.map((n) => h("tr", null,
         h("td", null, h("span", { class: "patient" }, n.id)),
+        h("td", null, n.description || h("span", { class: "muted" }, "-")),
         h("td", { class: "mono" }, n.aet),
         h("td", { class: "mono" }, `${n.host}:${n.port}`),
         h("td", null, h("span", { class: `chip ${n.allow_store ? "status-on" : "status-off"}` }, n.allow_store ? "allowed" : "blocked")),
@@ -3123,6 +3180,7 @@ function openNodeDialog(node, reload) {
   const aet = h("input", { required: true, maxlength: 16, value: node ? node.aet : "", placeholder: "RADWS01", autocomplete: "off" });
   const host = h("input", { required: true, value: node ? node.host : "", placeholder: "192.168.1.50", autocomplete: "off" });
   const port = h("input", { required: true, type: "number", min: 1, max: 65535, value: node ? node.port : 104 });
+  const description = h("input", { maxlength: 80, value: node ? node.description || "" : "", placeholder: "e.g. Radiology information system", autocomplete: "off" });
   const allowStore = h("input", { type: "checkbox", checked: node ? node.allow_store : true });
   const allowEcho = h("input", { type: "checkbox", checked: node ? node.allow_echo : true });
 
@@ -3132,7 +3190,7 @@ function openNodeDialog(node, reload) {
       error.hidden = true;
       try {
         await api("PUT", `/api/admin/nodes/${encodeURIComponent(isNew ? name.value.trim() : node.id)}`, {
-          aet: aet.value, host: host.value, port: Number(port.value),
+          aet: aet.value, host: host.value, port: Number(port.value), description: description.value,
           allow_store: allowStore.checked, allow_echo: allowEcho.checked,
         });
         dialog.close();
@@ -3150,6 +3208,7 @@ function openNodeDialog(node, reload) {
     h("label", null, "AE title of the remote system", aet),
     h("label", null, "Host name or IP address", host),
     h("label", null, "DICOM port", port),
+    h("label", null, "Description (what the staff see, e.g. on the Transfers page)", description),
     h("label", { class: "check" }, allowStore, "Orthanc may send images to it (C-STORE)"),
     h("label", { class: "check" }, allowEcho, "Orthanc may ping it (C-ECHO)"),
     h("p", { class: "muted" }, "The remote system must also be configured to accept associations from Orthanc's AE title and address."),

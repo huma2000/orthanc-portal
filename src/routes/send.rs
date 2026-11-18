@@ -11,7 +11,8 @@
 //! How it works: the portal asks Orthanc to run a C-STORE job
 //! (`POST /modalities/{alias}/store` with `"Synchronous": false`). Orthanc answers
 //! at once with a **job id**; the portal stores it and, when the Transfers tab is
-//! open, reads `GET /jobs/{id}` to show Pending / Running / Success / Failure.
+//! open, reads `GET /jobs/{id}` to show Pending / Running / Success / Failure, the progress,
+//! the number of images, the time it has been running and the images that failed.
 
 use crate::auth::AuthUser;
 use crate::error::{AppError, AppResult};
@@ -31,7 +32,12 @@ pub async fn list_modalities(
     AuthUser(user): AuthUser,
 ) -> AppResult<Json<Vec<ModalityNode>>> {
     user.require(Permission::Send)?;
-    Ok(Json(state.orthanc.list_modalities().await?))
+    let mut nodes = state.orthanc.list_modalities().await?;
+    let descriptions = state.db.node_descriptions()?;
+    for node in &mut nodes {
+        node.description = descriptions.get(&node.id).cloned().unwrap_or_default();
+    }
+    Ok(Json(nodes))
 }
 
 #[derive(Deserialize)]
@@ -90,6 +96,17 @@ pub struct TransferView {
     progress: u64,
     /// Orthanc's explanation when the state is `Failure`.
     error: Option<String>,
+    /// Images of the study being sent, and how many could not be sent (when Orthanc says).
+    instances: Option<u64>,
+    failed: Option<u64>,
+    /// Seconds the job has been running (or ran, once finished).
+    runtime: Option<f64>,
+}
+
+/// The numbers Orthanc gives about a C-STORE job: `(images, failed images, run time in seconds)`.
+fn job_numbers(job: &Value) -> (Option<u64>, Option<u64>, Option<f64>) {
+    let content = &job["Content"];
+    (content["InstancesCount"].as_u64(), content["FailedInstancesCount"].as_u64(), job["EffectiveRuntime"].as_f64())
 }
 
 /// Recent transfers. Users see their own; administrators see everybody's.
@@ -111,6 +128,8 @@ pub async fn list_transfers(
         .map(|t| async move {
             if let Some(done) = &t.final_state {
                 let progress = if done == "Success" { 100 } else { 0 };
+                let info: Value =
+                    t.final_info.as_deref().and_then(|i| serde_json::from_str(i).ok()).unwrap_or_default();
                 return TransferView {
                     id: t.id,
                     ts: t.ts,
@@ -120,22 +139,26 @@ pub async fn list_transfers(
                     state: done.clone(),
                     progress,
                     error: t.final_error,
+                    instances: info["instances"].as_u64(),
+                    failed: info["failed"].as_u64(),
+                    runtime: info["runtime"].as_f64(),
                 };
             }
-            let (job_state, progress, error) = match orthanc.get_job(&t.job_id).await {
+            let (job_state, progress, error, (instances, failed, runtime)) = match orthanc.get_job(&t.job_id).await {
                 Ok(job) => {
                     let state = job["State"].as_str().unwrap_or("Unknown").to_string();
                     let error =
                         if state == "Failure" { job["ErrorDescription"].as_str().map(str::to_string) } else { None };
-                    (state, job["Progress"].as_u64().unwrap_or(0), error)
+                    (state, job["Progress"].as_u64().unwrap_or(0), error, job_numbers(&job))
                 }
                 // Orthanc no longer remembers the job: its outcome can never be known.
-                Err(AppError::NotFound) => ("Unknown".to_string(), 0, None),
+                Err(AppError::NotFound) => ("Unknown".to_string(), 0, None, (None, None, None)),
                 // Orthanc did not answer: say nothing definitive, try again next time.
-                Err(_) => ("Unavailable".to_string(), 0, None),
+                Err(_) => ("Unavailable".to_string(), 0, None, (None, None, None)),
             };
             if matches!(job_state.as_str(), "Success" | "Failure" | "Unknown") {
-                let _ = db.set_transfer_final(t.id, &job_state, error.as_deref());
+                let info = json!({ "instances": instances, "failed": failed, "runtime": runtime }).to_string();
+                let _ = db.set_transfer_final(t.id, &job_state, error.as_deref(), &info);
             }
             TransferView {
                 id: t.id,
@@ -146,6 +169,9 @@ pub async fn list_transfers(
                 state: job_state,
                 progress,
                 error,
+                instances,
+                failed,
+                runtime,
             }
         })
         .buffered(8)

@@ -120,6 +120,10 @@ body $F $V "/api/studies?limit=8" > /dev/null
 has "...the search keeps the newest study dates first" "$(tail -1 $WORK/find.log)" '"Key": "StudyDate"'
 put $A "{\"roles\":$(body $F $A /api/admin/settings | py "json.dumps(d['defaults']['roles'])"),\"simplified_enabled\":false,\"default_interface\":\"normal\",\"color_accent\":\"\",\"theme_mode\":\"auto\"}" > /dev/null
 ok "...and everything goes back to the normal view" "$(body $F $V /api/me | py "d['features']['interface']")" "normal"
+echo "== DICOM node descriptions and transfer progress"
+ok "an administrator describes a DICOM node" "$(code $F $A PUT /api/admin/nodes/ris -H "$J" -d '{"aet":"RIS","host":"10.0.0.20","port":104,"description":"Radiology information system"}')" "200"
+ok "...too long a description is refused (400)" "$(code $F $A PUT /api/admin/nodes/ris -H "$J" -d "{\"aet\":\"RIS\",\"host\":\"10.0.0.20\",\"port\":104,\"description\":\"$(printf 'x%.0s' $(seq 1 81))\"}")" "400"
+ok "staff who can send see the description" "$(body $F $S /api/modalities | py "[n['description'] for n in d if n['id']=='ris'][0]")" "Radiology information system"
 T=$(tok $V)
 ok "a Weasis token works on the intranet" "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $T" $F/dicom-web/studies)" "200"
 ok "...and is useless on the internet listener (401)" "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $T" $G/dicom-web/studies)" "401"
@@ -485,10 +489,12 @@ R1=$(body $F $S /api/studies/$SID/send -X POST -H "$J" -d '{"target":"ris"}')
 has "Orthanc job id returned" "$R1" "27d7b341"
 has "asynchronous store requested" "$(tail -1 store.log)" '"Synchronous": false'
 ok "unknown destination -> 400" "$(code $F $S POST /api/studies/$SID/send -H "$J" -d '{"target":"../tools"}')" "400"
-T1=$(body $F $S /api/transfers | py "d[0]['state']"); T2=$(body $F $S /api/transfers | py "d[0]['state']"); T3=$(body $F $S /api/transfers | py "d[0]['state']")
+P1=$(body $F $S /api/transfers); T1=$(echo "$P1" | py "d[0]['state']"); T2=$(body $F $S /api/transfers | py "d[0]['state']"); T3=$(body $F $S /api/transfers | py "d[0]['state']")
 ok "job state Running, Running, Success" "$T1,$T2,$T3" "Running,Running,Success"
+ok "while it runs: progress, images and run time" "$(echo "$P1" | py "(d[0]['progress'], d[0]['instances'], d[0]['failed'], d[0]['runtime'])")" "(40, 120, 0, 1.5)"
 N=$(wc -l < jobs.log); for i in 1 2 3; do body $F $S /api/transfers > /dev/null; done
 ok "finished transfers are remembered: Orthanc is not asked again" "$(wc -l < jobs.log)" "$N"
+ok "...with what they did (images, run time)" "$(body $F $S /api/transfers | py "(d[0]['state'], d[0]['instances'], d[0]['runtime'])")" "('Success', 120, 3.5)"
 
 echo "== upload and download"
 ok "upload a file" "$(code $F $A POST /api/upload -H 'Content-Type: application/dicom' --data-binary @small.dcm)" "200"

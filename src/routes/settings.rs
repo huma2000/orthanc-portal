@@ -243,6 +243,8 @@ pub struct NodeView {
     port: u64,
     allow_store: bool,
     allow_echo: bool,
+    /// What the staff call it (kept by the portal, not by Orthanc).
+    description: String,
 }
 
 impl NodeView {
@@ -256,6 +258,7 @@ impl NodeView {
             // Orthanc's defaults: both are allowed unless the configuration says otherwise.
             allow_store: cfg["AllowStore"].as_bool().unwrap_or(true),
             allow_echo: cfg["AllowEcho"].as_bool().unwrap_or(true),
+            description: String::new(),
         }
     }
 }
@@ -267,8 +270,17 @@ fn valid_alias(alias: &str) -> bool {
 
 pub async fn list_nodes(State(state): State<AppState>, AuthUser(admin): AuthUser) -> AppResult<Json<Vec<NodeView>>> {
     admin.require(Permission::Admin)?;
-    let mut nodes: Vec<NodeView> =
-        state.orthanc.modalities_raw().await?.iter().map(|(id, cfg)| NodeView::from_orthanc(id, cfg)).collect();
+    let descriptions = state.db.node_descriptions()?;
+    let mut nodes: Vec<NodeView> = state
+        .orthanc
+        .modalities_raw()
+        .await?
+        .iter()
+        .map(|(id, cfg)| NodeView {
+            description: descriptions.get(id.as_str()).cloned().unwrap_or_default(),
+            ..NodeView::from_orthanc(id, cfg)
+        })
+        .collect();
     nodes.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(Json(nodes))
 }
@@ -285,6 +297,9 @@ pub struct NodeInput {
     allow_store: Option<bool>,
     /// May Orthanc ping it with C-ECHO? (default yes)
     allow_echo: Option<bool>,
+    /// What the staff call it, e.g. "Radiology information system" (optional, up to 80 characters).
+    #[serde(default)]
+    description: String,
 }
 
 /// Creates or updates a DICOM node in Orthanc.
@@ -330,7 +345,12 @@ pub async fn put_node(
     config.insert("AllowStore".into(), json!(input.allow_store.unwrap_or(true)));
     config.insert("AllowEcho".into(), json!(input.allow_echo.unwrap_or(true)));
 
+    let description: String = input.description.trim().chars().filter(|c| !c.is_control()).collect();
+    if description.chars().count() > 80 {
+        return bad("The description can have at most 80 characters");
+    }
     state.orthanc.put_modality(&alias, &Value::Object(config)).await?;
+    state.db.set_node_description(&alias, &description)?;
     state.db.audit(&admin.username, "dicom_node_saved", &format!("{alias} = {aet}@{host}:{}", input.port));
     Ok(Json(json!({ "ok": true })))
 }
@@ -345,6 +365,7 @@ pub async fn delete_node(
         return Err(AppError::BadRequest("Invalid name".into()));
     }
     state.orthanc.delete_modality(&alias).await?;
+    state.db.set_node_description(&alias, "")?;
     state.db.audit(&admin.username, "dicom_node_deleted", &alias);
     Ok(Json(json!({ "ok": true })))
 }

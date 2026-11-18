@@ -714,6 +714,8 @@ dialog.study-dialog { width: min(760px, calc(100vw - 2rem)); }
 }
 .side-btn .upload-badge { position: absolute; top: 1px; right: 0; margin: 0; }
 .upload-progress-cell { min-width: 16rem; }
+.transfer-progress { min-width: 15rem; }
+.has-tip { cursor: help; }
 .upload-errors > .btn { justify-self: start; }   /* "Browse studies": a button, not a bar */
 /* Share windows: how long a link works (days / hours / minutes) and the email options */
 fieldset.duration { display: flex; gap: 0.6rem; flex-wrap: wrap; border: 0; padding: 0; margin: 0; }

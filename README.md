@@ -219,7 +219,7 @@ screens whose changes apply at once.
 | **Security & roles > Sessions and sign-in security** | Session length, Weasis link validity, failed sign-ins before lockout, lockout length, secure-cookie mode, how long to keep the audit log (0 = forever) |
 | **Security & roles > Roles** | The role shortcuts offered in the user form (add, rename, change permissions, restore defaults) and the **view** (normal or simplified) of each role |
 | **Users** | Accounts, permissions, enable/disable, password reset |
-| **DICOM nodes** | Remote DICOM systems Orthanc sends studies to: add, edit, delete, **Test** (DICOM ping) |
+| **DICOM nodes** | Remote DICOM systems Orthanc sends studies to: add, edit (with a description shown to the staff), delete, **Test** (DICOM ping) |
 | **Audit log** | Every change above is recorded (setting names only, never values or passwords) |
 
 In the rest of this document *Settings > Share links* means the **Share links** section (here in the
@@ -270,7 +270,7 @@ the **simplified view**:
 
 * The **header** shows the logo and the portal name (*General > Branding*) and the **total number of studies**
   in Orthanc.
-* The **column of icons** leads to **Home**, **Search**, **Shares**, **Uploads**, **Help**, **Configuration** (administrators)
+* The **column of icons** leads to **Home**, **Search** (studies or series), **Shares**, **Uploads**, **Transfers**, **Help**, **Configuration** (administrators)
   and **Log out**. Each icon names itself when the mouse rests on it (or always, under the icon, if you tick
   *Write the name under each icon*). An icon is shown only to users with the matching permission. On a phone
   the column becomes a bar at the bottom of the screen.
@@ -279,7 +279,8 @@ the **simplified view**:
   chosen instead (a click on a card opens the study with the same buttons and its series). How many studies,
   and whether "recent" means *last received by the PACS* or *newest study date*, are settings. Below them, files
   and whole folders can be **dropped** to upload them; the list and the total refresh when the upload ends.
-* Search, Shares, Uploads and Configuration are the same pages as in the normal view.
+* Search (its **Studies** and **Series** tabs), Shares, Uploads, Transfers and Configuration are the same pages as in
+  the normal view: every feature of the normal view is also in the simplified one.
 * **Help** (also a tab in the normal view) explains how to use the portal, in plain words for staff who are not
   administrators. It is written for the person reading it: only the parts their account can use (no word about
   uploading for someone who cannot upload), only the features switched on (Weasis, OHIF, thumbnails, email
@@ -558,8 +559,10 @@ links stay in the list (and in the database) until the audit retention setting r
 ## 9. Sending a study to a remote DICOM node
 
 Orthanc calls the remote systems it can talk to **DICOM modalities**. Administrators manage them in the
-portal's **Settings > DICOM nodes** tab: *Add node* (name, AE title, host, port), *Edit*, *Delete*, and **Test** (a DICOM
-ping, C-ECHO). The portal stores them in Orthanc itself through its REST API; they survive an Orthanc restart
+portal's **Settings > DICOM nodes** tab: *Add node* (name, AE title, host, port and an optional **description**
+such as "Radiology information system"), *Edit*, *Delete*, and **Test** (a DICOM ping, C-ECHO). Orthanc only
+knows the short name ("ris"): the description is kept by the portal and shown to the staff in the Send dialog and
+on the Transfers page. The portal stores them in Orthanc itself through its REST API; they survive an Orthanc restart
 only if Orthanc runs with `"DicomModalitiesInDatabase": true` (set in `deploy/orthanc.json`). You can also keep
 declaring them in Orthanc's `DicomModalities`. Do not forget to declare Orthanc's AE title and address on the
 other side.
@@ -567,9 +570,13 @@ other side.
 1. On the **Studies** tab, click **Send to...** on a study, pick the destination, **Send study**.
 2. The portal asks Orthanc to run a C-STORE job (`POST /modalities/{alias}/store` with
    `"Synchronous": false`), stores the job id and answers immediately.
-3. The **Transfers** tab shows each transfer with the live Orthanc job state
-   (Pending / Running / Success / Failure) and progress, refreshing every 3 seconds while a job is active.
-   Users see their own transfers; administrators see everyone's.
+3. The **Transfers** tab (a page of its own in the simplified view) shows each transfer with the live Orthanc job
+   state (Pending / Running / Success / Failure) and its **progress**: a bar with the percentage, how many images
+   were sent out of how many, how long it has been running and about how long is left, refreshing every 3 seconds
+   while a job is active. Once finished: "120 images in 2 min", or why it failed and how many images could not
+   be sent (kept by the portal, so it is still shown after Orthanc forgets the job). Resting the mouse on a
+   destination shows its description, AE title and address. Users see their own transfers; administrators see
+   everyone's.
 
 Needs the `send` permission. Destinations with `"AllowStore": false` are not offered. Every transfer is
 written to the audit log.
@@ -763,7 +770,7 @@ The code compiles without warnings on Rust 1.91, passes `cargo clippy --all-targ
 formatted with `rustfmt` (see `rustfmt.toml`), and its dependencies were checked against the RustSec advisory
 database (no known vulnerable version in `Cargo.lock`). The automated tests live in the **`tests/`** folder:
 
-* `tests/server_tests.sh`: **439 checks** of the server against a fake Orthanc (`tests/mock_orthanc.py`) and a
+* `tests/server_tests.sh`: **444 checks** of the server against a fake Orthanc (`tests/mock_orthanc.py`) and a
   fake mail server (`tests/mock_smtp.py`):
   the two doors (staff portal vs invitation links only, Cloudflare headers refused on the intranet port), creating
   links with the default and the limited validity/downloads, the password gate and its throttling, what a guest

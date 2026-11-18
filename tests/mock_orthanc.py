@@ -121,8 +121,37 @@ def demo_find(q):
             wanted = set(query["Modality"].split("\\"))
             items = [s for s in items if s["MainDicomTags"]["Modality"] in wanted]
         items = [s for s in items if like(s["MainDicomTags"]["SeriesDescription"], query.get("SeriesDescription"))]
+        if query.get("BodyPartExamined"):   # exact match, like Orthanc
+            items = [s for s in items if s["MainDicomTags"]["BodyPartExamined"].upper() == query["BodyPartExamined"].upper()]
     since = q.get("Since", 0)
     return items[since:since + q.get("Limit", 100)]
+
+
+DEMO_JOBS = {}
+
+
+def demo_store(alias, body):
+    """A transfer that takes about 25 seconds (images arrive gradually); "down" fails after 8 seconds."""
+    import time, uuid
+    job = str(uuid.uuid4())
+    study = DEMO_STUDIES.get((body.get("Resources") or [""])[0])
+    images = 40 * (int(study["RequestedTags"]["NumberOfStudyRelatedInstances"]) if study else 3)
+    DEMO_JOBS[job] = {"start": time.time(), "images": images, "alias": alias}
+    return {"ID": job, "Path": f"/jobs/{job}"}
+
+
+def demo_job(job_id):
+    import time
+    job = DEMO_JOBS[job_id]
+    elapsed = time.time() - job["start"]
+    content = {"InstancesCount": job["images"], "FailedInstancesCount": 0, "RemoteAet": MODALITIES[job["alias"]].get("AET", "")}
+    if job["alias"] == "down" and elapsed >= 8:
+        content["FailedInstancesCount"] = job["images"] - int(job["images"] * 0.3)
+        return {"ID": job_id, "Type": "DicomModalityStore", "State": "Failure", "Progress": 30, "EffectiveRuntime": 8.0,
+                "ErrorDescription": "Cannot connect to the remote DICOM node (DOWN at 10.9.9.9:104)", "Content": content}
+    progress = min(100, int(elapsed / 25 * 100))
+    return {"ID": job_id, "Type": "DicomModalityStore", "State": "Success" if progress >= 100 else "Running",
+            "Progress": progress, "EffectiveRuntime": round(min(elapsed, 25), 1), "Content": content}
 
 
 def demo_upload():
@@ -182,7 +211,12 @@ class H(BaseHTTPRequestHandler):
         if p == "/modalities": return self._json(MODALITIES)
         if p == f"/jobs/{JOB_ID}":
             log("jobs", {"path": p}); job_polls["n"] += 1
-            return self._json({"ID": JOB_ID, "Type": "DicomModalityStore", "State": "Running" if job_polls["n"] < 3 else "Success", "Progress": 40 if job_polls["n"] < 3 else 100})
+            running = job_polls["n"] < 3
+            return self._json({"ID": JOB_ID, "Type": "DicomModalityStore", "State": "Running" if running else "Success",
+                               "Progress": 40 if running else 100, "EffectiveRuntime": 1.5 if running else 3.5,
+                               "Content": {"InstancesCount": 120, "FailedInstancesCount": 0, "RemoteAet": "RIS"}})
+        if DEMO and p.startswith("/jobs/") and p[6:] in DEMO_JOBS:
+            return self._json(demo_job(p[6:]))
         if p == f"/studies/{STUDY_ID}": return self._json(STUDY)
         if p == f"/studies/{STUDY_ID}/series": return self._json([SERIES, SR_SERIES])
         if p == f"/series/{SERIES_ID}": return self._json(SERIES)
@@ -226,6 +260,9 @@ class H(BaseHTTPRequestHandler):
         if DEMO and self.path == "/instances":
             if body[:4] == b"BAD!": return self._json({"error": "bad"}, 400)
             return self._json({"ID": "x", "Status": "Success", "ParentStudy": demo_upload()})
+        m = re.match(r"^/modalities/([^/]+)/store$", self.path)
+        if DEMO and m and unquote(m.group(1)) in MODALITIES:
+            return self._json(demo_store(unquote(m.group(1)), json.loads(body)))
         if self.path == "/modalities/ris/store":
             log("store", json.loads(body)); return self._json({"ID": JOB_ID, "Path": f"/jobs/{JOB_ID}"})
         if self.path == "/instances":
