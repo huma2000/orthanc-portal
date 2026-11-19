@@ -151,6 +151,20 @@ PS=$(body $F $D /api/studies/$SID/share -X POST -H "$J" -d '{"patient":true}')
 ok "every study of the patient: one link for both" "$(echo "$PS" | py "d['studies']")" "2"
 ok "...several studies need the multi-study switch (403)" "$(put $A '{"multi_study_shares":false}' > /dev/null; code $F $D POST /api/studies/$SID/share -H "$J" -d '{"patient":true}')" "403"
 put $A '{"multi_study_shares":true}' > /dev/null
+S2=bbbbbbbb-cccccccc-dddddddd-eeeeeeee-ffffffff
+code $F $A PUT /api/studies/$SID/labels/teaching > /dev/null; code $F $A PUT /api/studies/$S2/labels/teaching > /dev/null
+ok "every study with a label: offered" "$(body $F $D /api/me | py "d['features']['share']['label']")" "True"
+LS=$(body $F $D /api/shares -X POST -H "$J" -d '{"label":"teaching"}')
+ok "...one link for every study with the label" "$(echo "$LS" | py "d['studies']")" "2"
+ok "...found by Orthanc (all the label, ids only)" "$(tail -1 $WORK/find.log | py "(d['Labels'], d['LabelsConstraint'], d['Expand'])")" "(['teaching'], 'All', False)"
+ok "...a label nobody has: refused (400)" "$(code $F $D POST /api/shares -H "$J" -d '{"label":"nobody-has-it"}')" "400"
+ok "...an invalid label: refused (400)" "$(code $F $D POST /api/shares -H "$J" -d '{"label":"no spaces please"}')" "400"
+ok "...a label AND a list of studies: refused (400)" "$(code $F $D POST /api/shares -H "$J" -d "{\"label\":\"teaching\",\"studies\":[\"$SID\"]}")" "400"
+put $A '{"share_label":false}' > /dev/null
+ok "...switched off: refused (403) and not offered" "$(code $F $D POST /api/shares -H "$J" -d '{"label":"teaching"}') $(body $F $D /api/me | py "d['features']['share']['label']")" "403 False"
+put $A '{"share_label":true,"labels_enabled":false}' > /dev/null
+ok "...labels switched off: refused too (403)" "$(code $F $D POST /api/shares -H "$J" -d '{"label":"teaching"}')" "403"
+put $A '{"labels_enabled":true}' > /dev/null
 OUT=$(curl -s -D - -H "Cookie: portal_session=$D" $F/api/shares/$LID/qr)
 has "the QR code of a link is an SVG picture" "$OUT" "content-type: image/svg+xml"
 has "...not kept by the browser" "$OUT" "no-store"

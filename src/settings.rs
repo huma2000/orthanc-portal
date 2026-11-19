@@ -433,6 +433,9 @@ pub struct Settings {
     /// The Share window offers "every study of this patient, in one link" (also needs `multi_study_shares`).
     #[serde(default = "default_true")]
     pub share_patient: bool,
+    /// The Shares page offers "every study with a label, in one link" (also needs `multi_study_shares`).
+    #[serde(default = "default_true")]
+    pub share_label: bool,
     /// QR codes of share and upload links (Share window, Shares list).
     #[serde(default = "default_true")]
     pub share_qr: bool,
@@ -838,6 +841,7 @@ impl Settings {
             share_anonymize: true,
             share_notify: true,
             share_patient: true,
+            share_label: true,
             share_qr: true,
             backups_enabled: true,
             account_self_service: true,

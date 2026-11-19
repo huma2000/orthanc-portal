@@ -82,8 +82,9 @@ the section in brackets has the details.
 
 **Sharing with people outside** (sections 8, 9c)
 
-* **Invitation links**: a link plus a generated password for one study (or *(switch)* several, or every study
-  of a patient), with a validity and a number of ZIP downloads; the guest views it in OHIF and downloads it,
+* **Invitation links**: a link plus a generated password for one study (or *(switch)* several ticked ones,
+  every study of a patient, or every study with a label, from **Shares > New share...**), with a validity and a
+  number of ZIP downloads; the guest views it in OHIF and downloads it,
   and sees the time and downloads left.
 * Optional per link: an **anonymized copy** instead of the original *(switch)*, an **email to the creator**
   when it is opened or downloaded *(switch)*, sending the invitation **by email** (password left out unless
@@ -801,7 +802,8 @@ studies). What exists is kept, so switching it on again picks up where it was.
 |---|---|---|
 | Two-step sign-in | *Two-step sign-in*: off / optional / required (Security & roles) | off |
 | Changing one's own password and email | *Let each person change their own password and email address* (Security & roles) | on |
-| Every study of the patient in one link | *Offer "Every study of this patient"* (Network & sharing; also needs *One link for several studies*) | on |
+| Every study of a patient in one link (Shares page) | *Offer "Every study of a patient"* (Network & sharing; also needs *One link for several studies*) | on |
+| Every study with a label in one link (Shares page) | *Offer "Every study with a label"* (Network & sharing; also needs labels and *One link for several studies*) | on |
 | Anonymized copies | *Offer "Share an anonymized copy"* (Network & sharing) | on |
 | Notifications of links (share and upload links) | *Offer "Email me..."* (Network & sharing; also needs a mail server) | on |
 | QR codes of links | *QR codes of the links* (Network & sharing) | on |
@@ -834,9 +836,15 @@ email address (used for link notifications), manage two-step sign-in.
 
 ### More for share links
 
-The **Share** window can also offer (each switchable in *Settings > Network & sharing > Share links*):
+The **Share** button of a study stays short (how long, how many downloads, a note, email). The less common
+options are folded under **More options**, and sharing several studies at once lives on the **Shares** page
+(each switchable in *Settings > Network & sharing > Share links*):
 
-* **Every study of this patient, in one link** (needs *One link for several studies*).
+* **Shares > New share...**: **every study of a patient** (type the patient ID) or **every study with a
+  label** (choose it), in one link. The window lists exactly which studies will be shared before anything is
+  created, then continues as for one study, with every option shown. Both need *One link for several
+  studies*; the label needs labels switched on. The server finds the studies itself (a label: every study that
+  has it at that moment), at most 50 per link.
 * **Share an anonymized copy**: Orthanc makes a copy with the patient renamed `ANONYMOUS` / `ANON-<code>` (labelled
   `shared-anonymized`) and the link shows the copy. The copy is deleted when the link is revoked, or 30 days after
   it expires (until then the link can still be extended); after that the link cannot come back.
@@ -1056,7 +1064,7 @@ All JSON. State-changing calls need the header `X-Requested-With: portal`.
 | `GET /api/admin/nodes`, `PUT/DELETE /api/admin/nodes/{name}`, `POST /api/admin/nodes/{name}/echo` | admin | Manage DICOM nodes, DICOM ping |
 | `POST /api/login/two-factor` `{ ticket, code }` | the ticket of `/api/login` | Second step of a two-step sign-in (`/api/login` then answers `{ two_factor: "code"\|"setup", ticket, qr?, secret? }`); a set-up at sign-in answers the `recovery_codes` too |
 | `PUT /api/account/email`, `POST /api/account/password`, `POST /api/account/two-factor/{setup,enable,disable,recovery}` | session | My account |
-| `GET /api/shares/{id}/qr` | share (creator) or admin | The link as an SVG QR code (`share` also takes `patient`, `anonymize`, `notify`) |
+| `GET /api/shares/{id}/qr` | share (creator) or admin | The link as an SVG QR code (`share` also takes `patient`, `anonymize`, `notify`; `POST /api/shares` takes `label` instead of `studies`) |
 | `GET/POST /api/upload-links`, `PUT /api/upload-links/{id}`, `POST .../{id}/revoke`, `POST .../{id}/password`, `GET .../{id}/qr`, `GET .../{id}/studies` | share + upload (+ feature) | Upload links |
 | `GET /api/export/cd?studies=a,b` | download (+ feature) | Patient CD / USB ZIP |
 | `GET/DELETE /api/recent`, `POST /api/recent/{id}` `{ uid }` | read | My recently viewed studies |
@@ -1140,7 +1148,7 @@ The code compiles without warnings on Rust 1.91, passes `cargo clippy --all-targ
 formatted with `rustfmt` (see `rustfmt.toml`), and its dependencies were checked against the RustSec advisory
 database (no known vulnerable version in `Cargo.lock`). The automated tests live in the **`tests/`** folder:
 
-* `tests/feature_tests.sh`: **166 checks** of the features of section 9c on a fresh portal: two-step sign-in
+* `tests/feature_tests.sh`: **174 checks** of the features of section 9c on a fresh portal: two-step sign-in
   (set-up, codes used once, recovery codes, required mode, reset), My account, link notifications (and that they
   never name the patient), anonymized copies (made, shown, deleted on revocation), whole-patient links, QR codes,
   upload links (password, nothing leaked, size limit, non-DICOM files, revocation), the patient CD export (with

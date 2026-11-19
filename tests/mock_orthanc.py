@@ -583,6 +583,9 @@ class H(BaseHTTPRequestHandler):
                     return self._json([{"ID": f"i-{u}", "Type": "Instance", "MainDicomTags": {"SOPInstanceUID": u}} for u in ("6.7", "6.8", "3")])
                 return self._json([SERIES])
             if q["Level"] != "Study": return self._json([SERIES])
+            if "Labels" in q and q.get("Expand") is False:   # ids of the studies with ALL these labels (share by label)
+                found = [st["ID"] for st in all_studies().values() if set(q["Labels"]) <= LABELS.get(st["ID"], set())]
+                return self._json(found[:q.get("Limit", 100)])
             if "StudyInstanceUID" in query:   # one study (or a list "a\\b"), as Orthanc matches UIDs
                 wanted = str(query["StudyInstanceUID"]).split("\\")
                 found = [with_labels(st) for st in all_studies().values() if st["MainDicomTags"]["StudyInstanceUID"] in wanted]
@@ -615,7 +618,7 @@ class H(BaseHTTPRequestHandler):
             LOG_LEVEL["level"] = raw.decode().strip(); log("loglevel", {"level": LOG_LEVEL["level"]}); return self._send(b"", "text/plain")
         m = re.match(r"^/studies/([^/]+)/labels/([^/]+)$", self.path)
         if m:
-            if m.group(1) not in (DEMO_STUDIES if DEMO else {STUDY_ID: 1, **ANON}): return self._json({"error": "nf"}, 404)
+            if m.group(1) not in (DEMO_STUDIES if DEMO else {STUDY_ID: 1, STUDY2_ID: 1, **ANON}): return self._json({"error": "nf"}, 404)
             log("labels", {"put": m.group(2), "study": m.group(1)})
             LABELS.setdefault(m.group(1), set()).add(unquote(m.group(2))); return self._json({})
         m = re.match(r"^/modalities/([^/]+)$", self.path)

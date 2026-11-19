@@ -45,6 +45,8 @@ pub struct ShareFeature {
     patient: bool,
     /// QR codes of links are offered.
     qr: bool,
+    /// "Every study with a label" is offered (Shares page).
+    label: bool,
 }
 
 /// Upload links (people outside send studies in), as the Shares page needs them.
@@ -184,6 +186,7 @@ async fn me_response(state: &AppState, user: User) -> Me {
         notify: settings.share_notify && settings.email_configured(),
         patient: settings.multi_study_shares && settings.share_patient,
         qr: settings.share_qr,
+        label: settings.multi_study_shares && settings.share_label && settings.labels_enabled,
     };
     let upload_links = UploadLinkFeature {
         enabled: settings.upload_links

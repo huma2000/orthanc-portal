@@ -2718,8 +2718,13 @@ function emailOutcome(email) {
     : h("p", { class: "form-error" }, t("The link is ready, but the email to {to} was not sent: {error}", { to: email.to, error: translateMessage(email.error) }));
 }
 
-/** Dialog to invite somebody outside to look at a study (the "Share..." button of a study). */
-function openShareDialog(studyOrList) {
+/**
+ * Dialog to invite somebody outside to look at a study (the "Share..." button of a study), or several.
+ * Kept short: how long, how many downloads, a note, email; the anonymized copy and "email me" are under
+ * "More options". `how` comes from the Shares page (advanced sharing): `{ patient: true }` = every study
+ * of the patient of `studyOrList[0]`, `{ label }` = every study with that label (the server finds them).
+ */
+function openShareDialog(studyOrList, how = null) {
   const studies = [].concat(studyOrList);
   const study = studies[0];
   const several = studies.length > 1;
@@ -2749,16 +2754,7 @@ function openShareDialog(studyOrList) {
     const emailOptions = buildEmailOptions(() => true);
     const note = h("input", { maxlength: 120, placeholder: "For your own records, e.g. Dr. Smith, second opinion", autocomplete: "off" });
     const submit = h("button", { class: "btn primary", type: "submit" }, "Create link and password");
-    // Options: every study of the patient, an anonymized copy, tell me when it is used.
-    const wholePatient = h("input", { type: "checkbox" });
-    const patientCount = h("span", { class: "muted" });
-    const patientOption = !several && feature.patient && study.patient_id
-      ? h("label", { class: "check" }, wholePatient, "Every study of this patient, in one link ", patientCount) : null;
-    if (patientOption) {
-      api("GET", `/api/studies?patient_id=${encodeURIComponent(`"${study.patient_id}"`)}&limit=50`)
-        .then((page) => { patientCount.textContent = t("({n} studies)", { n: page.items.length + (page.has_more ? "+" : "") }); })
-        .catch(() => {});
-    }
+    // Less common options: an anonymized copy, tell me when it is used.
     const anonymize = h("input", { type: "checkbox" });
     const anonymizeOption = feature.anonymize ? h("div", null,
       h("label", { class: "check" }, anonymize, "Share an anonymized copy"),
@@ -2781,11 +2777,14 @@ function openShareDialog(studyOrList) {
         try {
           const body = {
             minutes: duration.minutes, downloads: Number(downloads.value), note: note.value, email: emailOptions.value,
-            patient: wholePatient.checked, anonymize: anonymize.checked, notify: notify.checked,
+            anonymize: anonymize.checked, notify: notify.checked,
           };
-          showResult(several
-            ? await api("POST", "/api/shares", { ...body, studies: studies.map((s) => s.id) })
-            : await api("POST", `/api/studies/${study.id}/share`, body));
+          let result;
+          if (how && how.label) result = await api("POST", "/api/shares", { ...body, label: how.label });
+          else if (how && how.patient) result = await api("POST", `/api/studies/${study.id}/share`, { ...body, patient: true });
+          else if (several) result = await api("POST", "/api/shares", { ...body, studies: studies.map((s) => s.id) });
+          else result = await api("POST", `/api/studies/${study.id}/share`, body);
+          showResult(result);
         } catch (e) {
           error.textContent = e.message;
           error.hidden = false;
@@ -2794,14 +2793,23 @@ function openShareDialog(studyOrList) {
         }
       },
     },
-      h("h2", null, several ? t("Share {n} studies with somebody outside (one link)", { n: studies.length }) : "Share this study with somebody outside"),
+      h("h2", null, how && how.label ? t("Share every study with the label {label} (one link)", { label: how.label })
+        : how && how.patient ? t("Share every study of {name} (one link)", { name: formatName(study.patient_name) })
+          : several ? t("Share {n} studies with somebody outside (one link)", { n: studies.length }) : "Share this study with somebody outside"),
       who, error,
       duration.node,
       h("label", null, t("Downloads allowed as ZIP (0 = online viewing only, up to {max})", { max: feature.max_downloads }), downloads),
       h("label", null, "Note (optional)", note),
-      patientOption, anonymizeOption, notifyOption,
       emailOptions.node,
-      h("p", { class: "muted" }, "The person gets a link and a password that opens only this study. They can look at it online until the link expires; running out of downloads does not stop that."),
+      // Advanced sharing (from the Shares page) shows the options; a plain share keeps them folded away.
+      anonymizeOption || notifyOption
+        ? (how ? [anonymizeOption, notifyOption] : h("details", { class: "more-options" }, h("summary", null, "More options"), anonymizeOption, notifyOption))
+        : null,
+      h("p", { class: "muted" }, several || how
+        ? "The person gets a link and a password that opens only these studies. They can look at them online until the link expires; running out of downloads does not stop that."
+        : "The person gets a link and a password that opens only this study. They can look at it online until the link expires; running out of downloads does not stop that."),
+      !how && (feature.patient || feature.label) && can("read")
+        ? h("p", { class: "hint" }, "To share every study of a patient, or every study with a label, use \"New share...\" on the Shares page.") : null,
       h("div", { class: "dialog-actions" }, h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Cancel"), submit)));
   }
 
@@ -2829,6 +2837,7 @@ function openShareDialog(studyOrList) {
 
   showForm();
   dialog.showModal();
+  return dialog;
 }
 
 /** The QR code of a link (to print on a handout: the phone's camera opens it) and a download of it. */
@@ -3073,10 +3082,113 @@ function buildSharesView() {
 
   load();
   return h("div", { class: "view" },
-    h("div", { class: "page-head" }, h("h1", null, "Shares"), actionButton("button", "refresh", "Refresh", "Refresh the list", { class: "btn", type: "button", onclick: load })),
+    h("div", { class: "page-head" }, h("h1", null, "Shares"),
+      h("div", { class: "head-actions" },
+        actionButton("button", "refresh", "Refresh", "Refresh the list", { class: "btn", type: "button", onclick: load }),
+        (state.user.features.share.patient || state.user.features.share.label) && can("read")
+          ? h("button", { class: "btn primary", type: "button", onclick: () => openAdvancedShare(load) }, "New share...") : null)),
     tabs,
     h("p", { class: "muted" }, "Invitations for people outside: a link plus a password that opens one study. The password of an active link can be shown again (each time is recorded in the audit log); revoke a link if it was sent to the wrong person."),
     container);
+}
+
+/**
+ * Advanced sharing (Shares > New share...): every study of a patient, or every study with a label, in
+ * one link. Step 1 chooses and previews exactly which studies; step 2 is the Share window.
+ */
+function openAdvancedShare(reload) {
+  const feature = state.user.features.share;
+  const kinds = [
+    feature.patient ? ["patient", "Every study of a patient"] : null,
+    feature.label ? ["label", "Every study with a label"] : null,
+  ].filter(Boolean);
+  let kind = kinds[0][0];
+  let found = [];
+  const error = h("div", { class: "form-error", role: "alert", hidden: true });
+  const preview = h("div", { class: "share-preview" });
+  const next = h("button", { class: "btn primary", type: "submit", disabled: true }, "Continue");
+  const patientId = h("input", { name: "patient_id", placeholder: "e.g. P-001 (as shown in Search)", autocomplete: "off" });
+  const labelSelect = h("select", { name: "label" }, h("option", { value: "" }, "Choose a label"));
+  const patientField = h("label", null, "Patient ID", h("div", { class: "inline-field" }, patientId,
+    h("button", { class: "btn", type: "button", onclick: () => look() }, "Find")));
+  const labelField = h("label", null, "Label", labelSelect);
+  if (feature.label) {
+    api("GET", "/api/labels").then((r) => labelSelect.append(...r.labels.filter((l) => l.count !== 0).map((l) =>
+      h("option", { value: l.name }, l.count != null ? `${l.name} (${l.count})` : l.name)))).catch(() => {});
+  }
+  labelSelect.addEventListener("change", () => look());
+  patientId.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); look(); } });
+
+  /** Shows which studies would be shared (the same search as the Studies page). */
+  async function look() {
+    error.hidden = true;
+    next.disabled = true;
+    found = [];
+    const params = new URLSearchParams({ limit: 51 });
+    if (kind === "patient") {
+      if (!patientId.value.trim()) { preview.replaceChildren(); return; }
+      params.set("patient_id", `"${patientId.value.trim()}"`); // exactly this ID
+    } else {
+      if (!labelSelect.value) { preview.replaceChildren(); return; }
+      params.set("labels", labelSelect.value);
+      params.set("labels_mode", "all");
+    }
+    preview.replaceChildren(h("div", { class: "loading" }, "Loading..."));
+    try {
+      const page = await api("GET", `/api/studies?${params}`);
+      found = page.items;
+      if (!found.length) { preview.replaceChildren(h("p", { class: "muted" }, "No study found.")); return; }
+      if (found.length > 50 || page.has_more) {
+        preview.replaceChildren(h("p", { class: "form-error" }, "More than 50 studies: one link shares at most 50."));
+        return;
+      }
+      // The same ID under two names: say so, the person sharing decides.
+      const mixed = kind === "patient" && new Set(found.map((s) => s.patient_name)).size > 1
+        ? h("p", { class: "form-error" }, "These studies have different patient names: check that the ID is the right one.") : null;
+      preview.replaceChildren(mixed, h("p", null, h("b", null, t("{n} studies will be shared:", { n: found.length }))),
+        h("ul", null, found.slice(0, 10).map((s) => h("li", null, studyLine(s))), found.length > 10 ? h("li", null, t("and {n} more", { n: found.length - 10 })) : null));
+      next.disabled = false;
+    } catch (e) {
+      preview.replaceChildren();
+      error.textContent = e.message;
+      error.hidden = false;
+    }
+  }
+
+  const choice = kinds.length > 1 ? h("div", { class: "subtabs", role: "tablist", "aria-label": "What to share" },
+    kinds.map(([id, label]) => h("button", {
+      type: "button", role: "tab", "aria-selected": String(id === kind), "data-kind": id,
+      onclick: (e) => {
+        kind = id;
+        choice.querySelectorAll("[role=tab]").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.kind === id)));
+        patientField.hidden = kind !== "patient";
+        labelField.hidden = kind !== "label";
+        e.currentTarget.blur();
+        look();
+      },
+    }, label))) : h("p", null, h("b", null, kinds[0][1]));
+  patientField.hidden = kind !== "patient";
+  labelField.hidden = kind !== "label";
+
+  const dialog = h("dialog", { class: "share-dialog advanced-share" }, h("form", {
+    class: "dialog-form",
+    onsubmit: (event) => {
+      event.preventDefault();
+      if (!found.length) return;
+      const how = kind === "label" ? { label: labelSelect.value } : { patient: true };
+      dialog.close();
+      // The list is refreshed when the Share window closes (the new link is in it).
+      openShareDialog(found, how).addEventListener("close", () => reload(), { once: true });
+    },
+  },
+    h("h2", null, "New share"),
+    h("p", { class: "muted" }, "One link and one password for several studies: every study of a patient, or every study with a label. You see exactly which ones before creating the link."),
+    choice, patientField, labelField, error, preview,
+    h("div", { class: "dialog-actions" }, h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Cancel"), next)));
+  dialog.addEventListener("close", () => dialog.remove());
+  document.body.append(dialog);
+  dialog.showModal();
+  (kind === "patient" ? patientId : labelSelect).focus();
 }
 
 /* ---- Upload links: people outside send studies in ---- */
@@ -3445,9 +3557,12 @@ function helpSections() {
             [helpButton("revoke", "Revoke"), ": stops the link at once, for example if it was sent to the wrong person. This cannot be undone: create a new link if needed."],
             share.qr ? [helpButton("qr", "QR code"), ": the link as a QR code, to print on a handout (the phone's camera opens it; it does not contain the password)."] : null,
           ),
-          share.patient ? h("p", null, h("b", null, "Every study of this patient"), " in the Share window puts all the patient's studies in one link.") : null,
-          share.anonymize ? h("p", null, h("b", null, "Share an anonymized copy"), " shows the person a copy without the patient's name and ID (for teaching, a second opinion...). The copy is deleted when the link ends.") : null,
-          share.notify ? h("p", null, h("b", null, "Email me when the link is opened or downloaded"), " needs your email address in My account.") : null,
+          share.patient || share.label ? h("p", null, h("b", null, "New share..."), " on the Shares page puts ",
+            [share.patient ? "every study of a patient" : null, share.label ? "every study with a label" : null].filter(Boolean).join(" or "),
+            " in one link: type the patient ID or choose the label, check the list of studies, then continue as for one study.") : null,
+          share.anonymize || share.notify ? h("p", null, h("b", null, "More options"), " in the Share window: ",
+            [share.anonymize ? "share an anonymized copy (without the patient's name and ID; deleted when the link ends)" : null,
+              share.notify ? "email me when the link is opened or downloaded (needs your email address in My account)" : null].filter(Boolean).join("; "), ".") : null,
         ]),
     },
     {
@@ -3589,8 +3704,10 @@ const SETTINGS_FIELDS = {
       hint: "Only the person who created the link, or an administrator, and only while the link is active; every time is recorded in the audit log. A copy of the password is kept in the portal's database until the link is revoked, or 30 days after it expires (so it can still be extended with the same password). Untick it to show passwords only once, when the link is created (the copies kept so far are erased)." },
     { key: "share_anonymize", label: "Offer \"Share an anonymized copy\"", type: "checkbox", wide: true,
       hint: "Orthanc makes a copy without the patient's name and ID (labelled shared-anonymized) and the link shows that copy. The copy is deleted when the link is revoked, or 30 days after it expires." },
-    { key: "share_patient", label: "Offer \"Every study of this patient, in one link\"", type: "checkbox", wide: true,
+    { key: "share_patient", label: "Offer \"Every study of a patient, in one link\" (Shares page)", type: "checkbox", wide: true,
       hint: "Also needs \"One share link for several studies\" (Features)." },
+    { key: "share_label", label: "Offer \"Every study with a label, in one link\" (Shares page)", type: "checkbox", wide: true,
+      hint: "Also needs labels and \"One share link for several studies\" (Features). At most 50 studies per link." },
     { key: "share_qr", label: "QR codes of the links (share and upload links)", type: "checkbox", wide: true,
       hint: "In the Share window and the Shares list, to print on a handout. A QR code never contains the password." },
     { key: "share_notify", label: "Offer \"Email me when the link is opened or downloaded\"", type: "checkbox", wide: true,

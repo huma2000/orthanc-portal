@@ -157,6 +157,9 @@ pub struct CreateShare {
     /// Share EVERY study of the patient of this study (it comes first).
     #[serde(default)]
     patient: bool,
+    /// `POST /api/shares` only: share every study that has this label (instead of `studies`).
+    #[serde(default)]
+    label: Option<String>,
     /// Share anonymized copies (made now, deleted when the link ends), not the originals.
     #[serde(default)]
     anonymize: bool,
@@ -167,6 +170,39 @@ pub struct CreateShare {
 
 /// Label put on the anonymized copies made for links (so staff can recognise them in the archive).
 pub const ANONYMIZED_LABEL: &str = "shared-anonymized";
+
+/// Every study with this Orthanc label (at most [`MAX_STUDIES_PER_LINK`], newest study date first).
+/// The server finds them itself: the link shares exactly the studies that have the label now.
+async fn labelled_studies(state: &AppState, label: &str) -> AppResult<Vec<String>> {
+    let settings = state.settings.get();
+    feature(settings.share_label && settings.labels_enabled, "Sharing every study of a label is switched off")?;
+    let label = label.trim();
+    if !crate::routes::labels::valid_label(label) {
+        return Err(AppError::BadRequest("Invalid label".into()));
+    }
+    let body = json!({
+        "Level": "Study", "Query": {}, "Labels": [label], "LabelsConstraint": "All", "Expand": false,
+        "OrderBy": [{ "Type": "DicomTag", "Key": "StudyDate", "Direction": "DESC" }],
+        "Limit": MAX_STUDIES_PER_LINK + 1,
+    });
+    let ids: Vec<String> = state
+        .orthanc
+        .find(&body)
+        .await?
+        .iter()
+        .filter_map(|v| v.as_str().or_else(|| v["ID"].as_str()).map(str::to_string))
+        .filter(|id| is_valid_orthanc_id(id))
+        .collect();
+    if ids.is_empty() {
+        return Err(AppError::BadRequest(format!("No study has the label '{label}'")));
+    }
+    if ids.len() > MAX_STUDIES_PER_LINK {
+        return Err(AppError::BadRequest(format!(
+            "More than {MAX_STUDIES_PER_LINK} studies have the label '{label}': one link shares at most {MAX_STUDIES_PER_LINK}"
+        )));
+    }
+    Ok(ids)
+}
 
 /// Every study of the patient of study `id`, that one first (at most [`MAX_STUDIES_PER_LINK`]).
 async fn patient_studies(state: &AppState, id: &str) -> AppResult<Vec<String>> {
@@ -251,6 +287,12 @@ pub async fn create_multi_share(
 ) -> AppResult<Json<Value>> {
     user.require(Permission::Share)?;
     let mut ids = std::mem::take(&mut req.studies);
+    if let Some(label) = req.label.take() {
+        if !ids.is_empty() {
+            return Err(AppError::BadRequest("Share either a list of studies or a label, not both".into()));
+        }
+        ids = labelled_studies(&state, &label).await?;
+    }
     ids.dedup();
     feature(ids.len() < 2 || state.settings.get().multi_study_shares, "Links for several studies are switched off")?;
     if ids.is_empty() || ids.len() > MAX_STUDIES_PER_LINK {

@@ -731,11 +731,29 @@ async function newLink(admin, body) {
   await st.tab("Studies"); await until(() => st.$("tr.study"), 6000);
   st.click(st.button(st.$("tr.study"), "Share..."));
   const mailOn = (await (await st.call("GET", "/api/me")).json()).features.share.notify;
-  check("Share window: every study of the patient, anonymized copy (and notify me only with a mail server)", /Every study of this patient/.test(st.$("dialog[open]").textContent) && /Share an anonymized copy/.test(st.$("dialog[open]").textContent)
-    && /Email me when the link is opened/.test(st.$("dialog[open]").textContent) === mailOn, st.$("dialog[open]").textContent.slice(0, 300));
-  st.$("dialog[open]").removeAttribute("open");
   check("Download menu: Patient CD / USB", st.$$("tr.study .menu-item").some((a) => a.textContent.startsWith("Patient CD / USB")));
+  const direct = st.$("dialog[open]");
+  check("Share window of a study: short, the less common options folded under More options",
+    !/Every study of/.test(direct.querySelector("form").textContent.replace(/To share every study[^.]*\./, ""))
+      && !!direct.querySelector("details.more-options:not([open])") && /Share an anonymized copy/.test(direct.querySelector("details.more-options").textContent)
+      && /Email me when the link is opened/.test(direct.textContent) === mailOn,
+    direct.textContent.slice(0, 300));
+  check("...and it says where the advanced sharing is", /New share\.\.\." on the Shares page/.test(direct.textContent));
+  direct.querySelector("button[type=button]").click();
   await st.tab("Shares");
+  const sharesBefore = (await (await st.call("GET", "/api/shares")).json()).length;
+  st.click(st.button(st.$("main"), "New share..."));
+  const adv = st.$("dialog.advanced-share[open]");
+  check("Shares > New share: every study of a patient, or of a label", !!adv && /Every study of a patient/.test(adv.textContent) && /Every study with a label/.test(adv.textContent));
+  adv.querySelector("input[name=patient_id]").value = "P-001";
+  st.click(st.button(adv, "Find")); await until(() => /studies will be shared/.test(adv.textContent), 6000);
+  check("...it shows exactly which studies before the link is made", /studies will be shared/.test(adv.textContent) && adv.querySelectorAll(".share-preview li").length >= 1);
+  st.submit(adv.querySelector("form")); await sleep(300);
+  const second = st.$("dialog.share-dialog[open]");
+  check("...then the Share window, with the options shown", !!second && /Share every study of/.test(second.textContent) && !second.querySelector("details.more-options"));
+  st.submit(second.querySelector("form")); await until(() => /Link and password created/.test(second.textContent), 6000);
+  check("...and the link is created", (await (await st.call("GET", "/api/shares")).json()).length === sharesBefore + 1);
+  second.querySelector(".dialog-actions .btn:last-child").click();
   check("Shares: a tab for upload links", st.$$(".subtabs [role=tab]").some((b) => /Upload links/.test(b.textContent)));
 
   const ul = await (await admin.call("POST", "/api/upload-links", { note: "ui test" })).json();
