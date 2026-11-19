@@ -25,21 +25,106 @@ const state = {
   timer: null,
 };
 
+/* ---------------------------------------------------------------- translations */
+
+/*
+ * The same scheme as app.js (section 1b), smaller: English in the code, a dictionary
+ * static/i18n/<code>.json for another language. The portal's language comes from /api/public; a
+ * visitor may choose another one in the menu of the page (remembered in this browser).
+ */
+const LANGUAGE_KEY = "portal.language";
+const i18n = { lang: "en", dict: null, messages: {}, patterns: [], locale: undefined };
+
+/** The translation of a text as it is (surrounding spaces kept), or the text itself. */
+function lookup(text) {
+  if (!i18n.dict || typeof text !== "string" || !text) return text;
+  const direct = i18n.dict[text];
+  if (direct !== undefined) return direct;
+  const parts = /^(\s*)([\s\S]*?)(\s*)$/.exec(text);
+  if (parts[2] === text || !parts[2]) return text;
+  const core = i18n.dict[parts[2]];
+  return core === undefined ? text : parts[1] + core + parts[3];
+}
+
+/** Translates `text` and fills its {names}: t("{n} shared studies", { n: 2 }). */
+function t(text, values) {
+  const out = lookup(text);
+  return values ? out.replace(/\{(\w+)\}/g, (all, name) => (name in values ? String(values[name]) : all)) : out;
+}
+
+/** A message of the server: an exact key, or a key whose {names} match any value. */
+function translateMessage(message) {
+  if (!i18n.dict || typeof message !== "string" || !message) return message;
+  const text = message.trim();
+  if (i18n.messages[text] !== undefined) return i18n.messages[text];
+  const exact = lookup(text);
+  if (exact !== text) return exact;
+  for (const p of i18n.patterns) {
+    const m = p.regex.exec(text);
+    if (m) return p.template.replace(/\{(\w+)\}/g, (all, name) => { const i = p.names.indexOf(name); return i < 0 ? all : translateValue(m[i + 1]); });
+  }
+  return message;
+}
+
+/** A value inside a server message: translated when it is itself a known text or message. */
+const translateValue = (value) => (i18n.messages[value] !== undefined ? i18n.messages[value] : lookup(value));
+
+function buildPatterns(dict) {
+  const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return Object.keys(dict).filter((key) => /\{\w+\}/.test(key)).sort((a, b) => b.length - a.length).map((key) => {
+    const names = [];
+    const source = key.split(/(\{\w+\})/).map((piece) => {
+      const name = /^\{(\w+)\}$/.exec(piece);
+      if (!name) return escape(piece);
+      names.push(name[1]);
+      return "([\\s\\S]+?)";
+    }).join("");
+    return { regex: new RegExp(`^${source}$`), names, template: dict[key] };
+  });
+}
+
+/** The visitor's choice (this browser), or the portal's language. */
+function chosenLanguage(info) {
+  const offered = ((info && info.languages) || []).map(([code]) => code);
+  let mine = "";
+  try { mine = localStorage.getItem(LANGUAGE_KEY) || ""; } catch { /* private window */ }
+  if (offered.includes(mine)) return mine;
+  return offered.includes(info && info.language) ? info.language : "en";
+}
+
+async function loadLanguage(lang) {
+  let data = null;
+  if (lang !== "en") {
+    try {
+      const response = await fetch(`/static/i18n/${encodeURIComponent(lang)}.json`, { credentials: "same-origin" });
+      if (response.ok) data = await response.json();
+    } catch { /* stays in English */ }
+  }
+  const dict = data && data.texts ? data.texts : null;
+  i18n.lang = dict ? lang : "en";
+  i18n.dict = dict;
+  i18n.messages = (dict && data.messages) || {};
+  i18n.patterns = dict ? buildPatterns(i18n.messages) : [];
+  i18n.locale = dict ? ({ es: "es-ES" }[lang] || lang) : undefined;
+  document.documentElement.lang = i18n.lang;
+}
+
 /* ---------------------------------------------------------------- tiny helpers */
 
-/** Builds an element. Strings become text nodes, so nothing can inject HTML. */
+/** Builds an element. Strings become text nodes, so nothing can inject HTML. Texts are translated. */
+const TRANSLATED_ATTRIBUTES = new Set(["placeholder", "title", "aria-label", "alt"]);
 function h(tag, props, ...children) {
   const el = document.createElement(tag);
   for (const [key, value] of Object.entries(props || {})) {
     if (value === null || value === undefined || value === false) continue;
     if (key === "class") el.className = value;
     else if (key.startsWith("on") && typeof value === "function") el.addEventListener(key.slice(2), value);
-    else if (["value", "disabled", "hidden"].includes(key)) el[key] = value;
-    else el.setAttribute(key, value === true ? "" : value);
+    else if (["value", "disabled", "hidden", "selected"].includes(key)) el[key] = value;
+    else el.setAttribute(key, value === true ? "" : TRANSLATED_ATTRIBUTES.has(key) ? lookup(value) : value);
   }
   for (const child of children.flat(Infinity)) {
     if (child === null || child === undefined || child === false) continue;
-    el.append(child instanceof Node ? child : document.createTextNode(String(child)));
+    el.append(child instanceof Node ? child : document.createTextNode(typeof child === "string" ? lookup(child) : String(child)));
   }
   return el;
 }
@@ -59,12 +144,12 @@ async function api(method, url, body) {
   try {
     response = await fetch(url, options);
   } catch {
-    throw new ApiError("Cannot reach the server. Check your internet connection.", 0);
+    throw new ApiError(t("Cannot reach the server. Check your internet connection."), 0);
   }
   const text = await response.text();
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { /* not JSON */ }
-  if (!response.ok) throw new ApiError((data && data.error) || `Request failed (${response.status})`, response.status);
+  if (!response.ok) throw new ApiError(translateMessage(data && data.error) || t("Request failed ({status})", { status: response.status }), response.status);
   return data;
 }
 
@@ -73,7 +158,7 @@ const format = () => (state.brand && state.brand.format) || {};
 
 /** "DOE^JOHN" -> "DOE, JOHN" (or "JOHN DOE", or as stored). */
 function formatName(raw) {
-  if (!raw) return "(no name)";
+  if (!raw) return t("(no name)");
   if (format().name === "dicom") return raw.replace(/\^+$/, "");
   const parts = raw.split("^").map((p) => p.trim()).filter(Boolean);
   if (parts.length < 2) return parts[0] || raw;
@@ -92,7 +177,7 @@ function formatDate(value) {
   if (style === "mdy") return `${m}/${d}/${y}`;
   if (style === "dmy_dots") return `${d}.${m}.${y}`;
   const date = new Date(Number(value.slice(0, 4)), Number(value.slice(4, 6)) - 1, Number(value.slice(6, 8)));
-  return date.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
+  return date.toLocaleDateString(i18n.locale, { year: "numeric", month: "long", day: "numeric" });
 }
 
 /** Seconds -> "1 d 3 h 20 min" / "45 min" / "30 s". */
@@ -109,23 +194,43 @@ const nowSeconds = () => Date.now() / 1000 + state.clockOffset;
 
 /* ---------------------------------------------------------------- page frame */
 
+/** The last screen drawn, to draw it again in another language. */
+let redraw = null;
+
+/** The language menu of the page (none when the portal offers one language only). */
+function languageMenu() {
+  const list = state.languages || [];
+  if (list.length < 2) return null;
+  return h("select", {
+    class: "language-select", "aria-label": "Language", title: "Language",
+    onchange: async (event) => {
+      try { localStorage.setItem(LANGUAGE_KEY, event.target.value); } catch { /* only for this page */ }
+      await loadLanguage(event.target.value);
+      if (redraw) redraw();
+    },
+  }, list.map(([code, name]) => h("option", { value: code, selected: code === i18n.lang, lang: code }, name)));
+}
+
 /** Header with the practice's logo / name, then the given content. */
 function draw(...content) {
   const brand = state.brand;
   const head = h("header", { class: "share-head" },
     brand.logo ? h("img", { class: "brand-logo", src: brand.logo.url, alt: brand.show_name ? "" : brand.name }) : null,
-    brand.show_name ? h("span", { class: "brand-name" }, brand.name) : null);
+    brand.show_name ? h("span", { class: "brand-name" }, brand.name) : null,
+    languageMenu());
   root.replaceChildren(h("main", { class: "share-wrap" }, head, ...content));
 }
 
 /** A simple message card (link unavailable / expired / nothing to open). */
 function message(title, text) {
+  redraw = () => message(title, text);
   draw(h("section", { class: "share-card" }, h("h1", null, title), h("p", { class: "muted" }, text)));
 }
 
 /* ---------------------------------------------------------------- screens */
 
 function showPasswordForm() {
+  redraw = showPasswordForm;
   const error = h("div", { class: "form-error", role: "alert", hidden: true });
   const input = h("input", {
     id: "share-password", name: "password", type: "text", autocomplete: "off", autocapitalize: "characters",
@@ -171,6 +276,7 @@ async function showStudy() {
   }
   state.clockOffset = data.now - Date.now() / 1000;
   state.expiresAt = data.expires_at;
+  redraw = showStudy;
 
   const { downloads, viewer } = data;
   const studies = data.studies && data.studies.length ? data.studies : [{ patient: data.patient, study: data.study, series: data.series, index: 0, viewer_url: viewer.url }];
@@ -216,7 +322,7 @@ async function showStudy() {
   const remaining = h("b", { id: "share-remaining" });
   const left = h("b", { id: "share-downloads" });
   const meta = h("div", { class: "share-meta", "aria-live": "polite" },
-    h("div", null, "This link expires in ", remaining, h("span", { class: "muted" }, ` (${new Date(data.expires_at * 1000).toLocaleString()})`)),
+    h("div", null, "This link expires in ", remaining, h("span", { class: "muted" }, ` (${new Date(data.expires_at * 1000).toLocaleString(i18n.locale)})`)),
     h("div", null, "Downloads left: ", left));
 
   draw(h("section", { class: "share-card" },
@@ -243,7 +349,7 @@ function showStudies(data, studies) {
       h("dl", { class: "share-details" },
         row("Patient", formatName(patient.name)), row("Patient ID", patient.id), row("Accession", study.accession),
         row("Modalities", study.modalities.length ? study.modalities.map((m) => h("span", { class: "chip", "data-m": m }, m)) : ""),
-        row("Series", `${series.length} (${series.reduce((n, s) => n + (Number(s.images) || 0), 0)} images)`)),
+        row("Series", t("{n} ({images} images)", { n: series.length, images: series.reduce((n, s) => n + (Number(s.images) || 0), 0) }))),
       h("div", { class: "share-actions" },
         viewer.available ? h("a", { class: "btn", href: item.viewer_url, target: "_blank", rel: "noopener" }, "View online") : null,
         canDownload ? h("a", {
@@ -254,12 +360,12 @@ function showStudies(data, studies) {
   const remaining = h("b", { id: "share-remaining" });
   const left = h("b", { id: "share-downloads" });
   draw(h("section", { class: "share-card" },
-    h("h1", null, `${studies.length} shared studies`),
+    h("h1", null, t("{n} shared studies", { n: studies.length })),
     h("div", { class: "share-actions" },
       viewer.available ? h("a", { class: "btn primary big", href: viewer.url, target: "_blank", rel: "noopener" }, "View them all online") : null),
     blocks,
     h("div", { class: "share-meta", "aria-live": "polite" },
-      h("div", null, "This link expires in ", remaining, h("span", { class: "muted" }, ` (${new Date(data.expires_at * 1000).toLocaleString()})`)),
+      h("div", null, "This link expires in ", remaining, h("span", { class: "muted" }, ` (${new Date(data.expires_at * 1000).toLocaleString(i18n.locale)})`)),
       h("div", null, "Downloads left: ", left, h("span", { class: "muted" }, " (each study downloaded uses one)"))),
     h("p", { class: "muted" }, "You can look at the studies online until the link expires, even when no downloads are left."),
     h("button", { class: "btn small", type: "button", onclick: closeSession }, "Close this session")));
@@ -280,7 +386,7 @@ function paintCountdown(downloads) {
   const remaining = document.getElementById("share-remaining");
   const left = document.getElementById("share-downloads");
   if (remaining) remaining.textContent = formatDuration(seconds);
-  if (left && state.downloads) left.textContent = state.downloads.max === 0 ? "none (online viewing only)" : `${state.downloads.left} of ${state.downloads.max}`;
+  if (left && state.downloads) left.textContent = state.downloads.max === 0 ? t("none (online viewing only)") : t("{done} of {total}", { done: state.downloads.left, total: state.downloads.max });
 }
 
 /** Re-reads the downloads left (they change when a download starts). */
@@ -325,8 +431,10 @@ function applyTheme(theme) {
   try {
     const info = await api("GET", "/api/public");
     state.brand = { name: info.name, show_name: info.show_name, logo: info.logo, format: info.format || {} };
+    state.languages = info.languages || [];
     applyTheme(info.theme);
-  } catch { /* the page still works without branding */ }
+    await loadLanguage(chosenLanguage(info));
+  } catch { /* the page still works without branding (in English) */ }
   if (!TOKEN) return message("Open your invitation link", "This address only serves studies that were shared with you. Use the link you were sent.");
   let status;
   try {

@@ -11,7 +11,7 @@
   request (the window title and website icon chosen in Settings > Branding). There are no
   external resources (fonts, CDNs): everything is served by the portal itself.
 -->
-<html lang="en">
+<html lang="{{LANG}}">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -25,7 +25,7 @@
   </head>
   <body class="share-body">
     <div id="app"></div>
-    <noscript>This page needs JavaScript.</noscript>
+    <noscript>{{NOSCRIPT}}</noscript>
     <script src="/static/share.js"></script>
   </body>
 </html>

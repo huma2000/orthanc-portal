@@ -43,7 +43,7 @@ pub async fn index(State(state): State<AppState>) -> Response {
     render_template(&state, INDEX_HTML)
 }
 
-/// Fills the `{{TITLE}}` / `{{FAVICON_URL}}` / `{{FAVICON_TYPE}}` markers of a page template
+/// Fills the `{{TITLE}}` / `{{FAVICON_URL}}` / `{{FAVICON_TYPE}}` / `{{LANG}}` / `{{NOSCRIPT}}` markers of a page template
 /// with the window title and website icon chosen in Settings. Shared by the staff page and
 /// the invitation page, so both wear the same branding.
 pub fn render_template(state: &AppState, template: &str) -> Response {
@@ -56,7 +56,10 @@ pub fn render_template(state: &AppState, template: &str) -> Response {
         .replace("{{TITLE}}", &html_escape(settings.window_title()))
         .replace("{{FAVICON_URL}}", &html_escape(favicon_url))
         .replace("{{FAVICON_TYPE}}", &html_escape(favicon_type))
-        .replace("{{CUSTOM_CSS}}", &custom_css_link(&settings.custom_css));
+        .replace("{{CUSTOM_CSS}}", &custom_css_link(&settings.custom_css))
+        // The portal's language (the page switches it when a person chose another one).
+        .replace("{{LANG}}", settings.language.code())
+        .replace("{{NOSCRIPT}}", settings.language.noscript());
     ([(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, "no-cache")], html).into_response()
 }
 

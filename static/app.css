@@ -802,3 +802,9 @@ dialog.wide-dialog { width: min(1100px, calc(100vw - 2rem)); }
 /* A panel holding text (headings, paragraphs, details) rather than a full-width table */
 .panel.pad { padding: 1.1rem 1.2rem; display: grid; gap: 0.8rem; }
 .panel.pad > h2 { margin: 0; }
+/* Language menu: header of the portal, login page, invitation page */
+.head-right { display: flex; align-items: center; gap: 0.9rem; margin-left: auto; }
+.language-select { width: auto; padding: 0.2rem 0.4rem; font-size: 0.85rem; background: transparent; color: inherit; border-color: currentColor; opacity: 0.85; }
+.language-select option { color: var(--ink); background: var(--panel); }
+.login-language { margin-top: 0.9rem; display: flex; justify-content: flex-end; }
+.share-head .language-select { margin-left: auto; }

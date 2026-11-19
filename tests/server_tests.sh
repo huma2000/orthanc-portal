@@ -92,6 +92,16 @@ ok "the auto-refresh settings reach every user" "$(body $F $V /api/me | py "' '.
 put $A '{"auto_refresh_seconds":30,"transfers_auto_refresh":true}' > /dev/null
 put $A '{"color_accent":"#AA3311","theme_mode":"dark"}' > /dev/null
 ok "saved colours reach the public page (lower-cased)" "$(curl -s $F/api/public | py "d['theme']['accent']+' '+d['theme']['mode']")" "#aa3311 dark"
+# Translations: the portal's language (Settings > Appearance), the dictionary on both listeners
+ok "languages: English by default, Spanish offered" "$(curl -s $G/api/public | py "d['language']+' '+','.join(c for c,_ in d['languages'])")" "en en,es"
+ok "the Spanish dictionary, on both listeners (the invitation page needs it too)" "$(curl -s $F/static/i18n/es.json | py "str(len(d['texts'])>500 and len(d['messages'])>100)")/$(curl -s $G/static/i18n/es.json | py "d['texts']['Password']")" "True/Contraseña"
+ok "...a JSON file the browser may keep (ETag)" "$(curl -s -o /dev/null -w '%{content_type}' $F/static/i18n/es.json)/$(curl -s -D - -o /dev/null $F/static/i18n/es.json | grep -ci '^etag:')" "application/json; charset=utf-8/1"
+ok "only the languages the portal has (400)" "$(put $A '{"language":"fr"}' | tail -1)" "400"
+put $A '{"language":"es"}' > /dev/null
+ok "the portal in Spanish: the pages say so (lang, and the text without JavaScript)" "$(curl -s $F/ | grep -c '<html lang="es">')$(curl -s $G/s/0123 | grep -c 'Esta página necesita JavaScript')" "11"
+ok "...and /api/public too" "$(curl -s $G/api/public | py "d['language']")" "es"
+put $A '{"language":"en"}' > /dev/null
+ok "back in English" "$(curl -s $F/ | grep -c '<html lang="en">')" "1"
 put $A '{"simplified_recent_count":8,"simplified_upload_text":"Drop here"}' > /dev/null
 ok "every user gets the home page options" "$(body $F $V /api/me | py "str(d['features']['simplified']['recent_count'])+' '+d['features']['simplified']['upload_text']")" "8 Drop here"
 ok "there is a single view: nothing about choosing one" "$(body $F $V /api/me | py "'interface' in d['features'] or 'interface_switch' in d['features']")" "False"
@@ -295,6 +305,12 @@ MAIL=$(lastmail)
 has "...it says it was updated" "$MAIL" "has updated your link"
 has "...with the new time" "$MAIL" "1 hour 30 minutes"
 has "...and the kept password" "$MAIL" "Password: $M2PW"
+put $A '{"language":"es"}' > /dev/null
+ok "with the portal in Spanish (Settings > Appearance)..." "$(body $F $SH /api/shares/$M2ID -X PUT -H "$J" -d '{"email":{"to":"a@example.org"}}' | py "d['email']['sent']")" "True"
+MAIL=$(lastmail)
+has "...the email is in Spanish" "$MAIL" "ha actualizado su enlace a un estudio de imagen compartido"
+has "...the password part too" "$MAIL" "Se le facilitará por separado"
+put $A '{"language":"en"}' > /dev/null
 has "every email is in the audit log" "$(body $F $A '/api/admin/audit?limit=20')" "share_emailed"
 ok "at most 30 invitation emails per person and per hour (429)" "$(code $F $SH POST /api/studies/$SID/share -H "$J" -d "{\"email\":{\"to\":\"$(python3 -c "print(','.join(f'p{i}@example.org' for i in range(10)))")\"}}" > /dev/null; code $F $SH POST /api/studies/$SID/share -H "$J" -d "{\"email\":{\"to\":\"$(python3 -c "print(','.join(f'q{i}@example.org' for i in range(10)))")\"}}" > /dev/null; code $F $SH POST /api/studies/$SID/share -H "$J" -d "{\"email\":{\"to\":\"$(python3 -c "print(','.join(f'r{i}@example.org' for i in range(10)))")\"}}")" "429"
 put $A '{"smtp_port":18026}' > /dev/null   # nothing listens there

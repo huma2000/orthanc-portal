@@ -110,6 +110,7 @@ async fn send_invitation(
         message: &email.message,
         updated,
         footer: &settings.email_footer,
+        language: settings.language,
     };
     match mailer::send(settings, email.to, &invitation.subject(), &invitation.body()).await {
         Ok(()) => {
@@ -363,7 +364,7 @@ pub async fn show_password(
     }
     let password = state.db.share_password(id, now_unix())?.ok_or_else(|| {
         AppError::Conflict(
-            "This password cannot be shown: the link is no longer active, or it was created before passwords              were kept. Revoke it and create a new one if needed."
+            "This password cannot be shown: the link is no longer active, or it was created before passwords were kept. Revoke it and create a new one if needed."
                 .into(),
         )
     })?;

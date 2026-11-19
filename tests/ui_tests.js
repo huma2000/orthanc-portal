@@ -636,6 +636,55 @@ async function newLink(admin, body) {
   const searchDefaults = (await (await admin.call("GET", "/api/admin/settings")).json()).defaults;
   await admin.call("PUT", "/api/admin/settings", { study_columns: searchDefaults.study_columns, study_search_fields: searchDefaults.study_search_fields });
 
+  console.log("--- translations: Spanish (the language menu, the portal's language, the invitation page)");
+  {
+    // Every text given to t() (also t(x ? "a" : "b")) in app.js and share.js has its Spanish translation.
+    const es = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "static", "i18n", "es.json"), "utf8"));
+    const unquote = (q) => JSON.parse(`"${q}"`);
+    const keys = new Set();
+    for (const m of (APP + SHARE).matchAll(/\bt\(\s*"((?:[^"\\]|\\.)*)"/g)) keys.add(unquote(m[1]));
+    for (const m of (APP + SHARE).matchAll(/\bt\([^()"]*\?\s*"((?:[^"\\]|\\.)*)"\s*:\s*"((?:[^"\\]|\\.)*)"/g)) { keys.add(unquote(m[1])); keys.add(unquote(m[2])); }
+    const missing = [...keys].filter((k) => !(k.trim() in es.texts));
+    check(`every text given to t() has its Spanish translation (${keys.size} texts)`, keys.size > 100 && missing.length === 0, missing.slice(0, 8).join(" | "));
+    const holders = (text) => [...text.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort().join();
+    const badHolders = Object.entries({ ...es.texts, ...es.messages }).filter(([k, v]) => holders(k) !== holders(v)).map(([k]) => k);
+    check("...with the same {names} in each translation", badHolders.length === 0, badHolders.slice(0, 5).join(" | "));
+
+    const spanish = await makeDom(STAFF);
+    await spanish.login("admin", "SuperSecret123");
+    const menu = spanish.$(".simple-head select.language-select");
+    check("a language menu in the header (English first)", !!menu && menu.value === "en" && menu.options.length === 2);
+    menu.value = "es"; menu.dispatchEvent(new spanish.window.Event("change"));
+    await until(() => spanish.window.document.documentElement.lang === "es" && spanish.$$(".side-btn").some((b) => b.dataset.tip === "Inicio"), 6000);
+    check("...Spanish: the icons, the header and the home page", spanish.$$(".side-btn").map((b) => b.dataset.tip).includes("Inicio")
+      && /Total de estudios/.test(spanish.$(".simple-head").textContent) && /Estudios recientes/.test(spanish.text()), spanish.$$(".side-btn").map((b) => b.dataset.tip).join());
+    check("...remembered in this browser", spanish.window.localStorage.getItem("portal.language") === "es");
+    check("...the icon buttons too (their tooltip and name for screen readers)", !!spanish.$("[data-tip='Actualizar los estudios recientes'][aria-label='Actualizar los estudios recientes']"));
+    spanish.click(spanish.$$(".side-btn").find((b) => b.dataset.tip === "Configuración")); await until(() => spanish.$("form.settings-form"), 6000);
+    check("...Settings: the tabs, and the portal's language in Appearance", spanish.$$(".subtabs [role=tab]").map((b) => b.textContent).slice(0, 4).join() === "General,Apariencia,Búsqueda y etiquetas,Funciones"
+      && spanish.$$("section.settings-section h2").some((h) => h.textContent === "Idioma, fechas, nombres y estilo"), spanish.$$(".subtabs [role=tab]").map((b) => b.textContent).join());
+    const back = spanish.$(".simple-head select.language-select");
+    back.value = "en"; back.dispatchEvent(new spanish.window.Event("change"));
+    await until(() => spanish.window.document.documentElement.lang === "en", 6000); await sleep(300);
+    check("...and back to English", spanish.$$(".subtabs [role=tab]").map((b) => b.textContent).slice(0, 2).join() === "General,Appearance");
+
+    await admin.call("PUT", "/api/admin/settings", { language: "es" });
+    const login = await makeDom(STAFF); await until(() => login.$(".login-card"), 6000); await sleep(300);
+    check("the portal's language (Settings > Appearance): the login page is in Spanish", /Iniciar sesión/.test(login.text()) && login.window.document.documentElement.lang === "es", login.text().slice(0, 120));
+    await login.login("nobody-here", "wrong-password-1");
+    check("...and so are the server's messages", /Usuario o contraseña incorrectos/.test(login.$(".form-error").textContent), login.$(".form-error").textContent);
+    const link = await newLink(admin, { minutes: 90, downloads: 2 });
+    const guestEs = await guestOpens(link.token, link.password);
+    check("...and the invitation page", /Estudio compartido/.test(guestEs.text()) && /Descargas restantes/.test(guestEs.text()) && guestEs.window.document.documentElement.lang === "es", guestEs.text().slice(0, 160));
+    const guestMenu = guestEs.$(".share-head select.language-select");
+    guestMenu.value = "en"; guestMenu.dispatchEvent(new guestEs.window.Event("change"));
+    await until(() => /Shared study/.test(guestEs.text()), 6000);
+    check("...where a visitor can choose another language", /Shared study/.test(guestEs.text()) && /Downloads left/.test(guestEs.text()));
+    await admin.call("PUT", "/api/admin/settings", { language: "en" });
+    check("no JavaScript errors in the translated pages", [spanish, login, guestEs].every((d) => d.errors.length === 0), [spanish, login, guestEs].flatMap((d) => d.errors).join("|"));
+    spanish.window.close(); login.window.close(); guestEs.window.close();
+  }
+
   console.log("--- search keeps working (modality filter)");
   await admin.tab("Studies");
   admin.click(admin.$$(".mod-picker .chip-toggle").find((b) => b.textContent === "RX")); await sleep(1000);

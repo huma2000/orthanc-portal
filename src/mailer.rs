@@ -10,7 +10,7 @@
 //! * Addresses are checked here before anything is created or changed, so a typo never leaves a
 //!   half-done invitation.
 
-use crate::settings::{Settings, SmtpSecurity};
+use crate::settings::{Language, Settings, SmtpSecurity};
 use lettre::message::header::ContentType;
 use lettre::message::Mailbox;
 use lettre::transport::smtp::authentication::Credentials;
@@ -120,20 +120,28 @@ pub async fn send(settings: &Settings, to: Vec<Mailbox>, subject: &str, body: &s
 
 /// "2 days 5 hours 20 minutes" (the parts that are not zero).
 pub fn duration_words(minutes: u64) -> String {
+    duration_words_in(minutes, Language::En)
+}
+
+/// [`duration_words`] in a language: "2 días 5 horas 20 minutos".
+pub fn duration_words_in(minutes: u64, lang: Language) -> String {
     let (d, h, m) = (minutes / 1440, (minutes % 1440) / 60, minutes % 60);
-    let part = |n: u64, one: &str, many: &str| match n {
+    let words: [(&str, &str); 3] = match lang {
+        Language::En => [("day", "days"), ("hour", "hours"), ("minute", "minutes")],
+        Language::Es => [("día", "días"), ("hora", "horas"), ("minuto", "minutos")],
+    };
+    let part = |n: u64, (one, many): (&str, &str)| match n {
         0 => None,
         1 => Some(format!("1 {one}")),
         n => Some(format!("{n} {many}")),
     };
-    let parts: Vec<String> = [part(d, "day", "days"), part(h, "hour", "hours"), part(m, "minute", "minutes")]
-        .into_iter()
-        .flatten()
-        .collect();
-    if parts.is_empty() {
-        "less than a minute".into()
-    } else {
+    let parts: Vec<String> = [part(d, words[0]), part(h, words[1]), part(m, words[2])].into_iter().flatten().collect();
+    if !parts.is_empty() {
         parts.join(" ")
+    } else if lang == Language::Es {
+        "menos de un minuto".into()
+    } else {
+        "less than a minute".into()
     }
 }
 
@@ -152,52 +160,130 @@ pub struct Invitation<'a> {
     pub updated: bool,
     /// Settings > Email > Text at the end of every email (address, phone...).
     pub footer: &'a str,
+    /// The language of the email (Settings > Appearance > Language).
+    pub language: Language,
 }
 
+/// The sentences of an invitation email, in one language. {portal}, {sender}, {duration}, {n} and
+/// {password} are filled in.
+struct Words {
+    subject_updated: &'static str,
+    subject_new: &'static str,
+    hello: &'static str,
+    updated: &'static str,
+    shared: &'static str,
+    message_from: &'static str,
+    open_here: &'static str,
+    works_for: &'static str,
+    view_only: &'static str,
+    download_once: &'static str,
+    download_times: &'static str,
+    password: &'static str,
+    password_separately: &'static str,
+    sent_by: &'static str,
+}
+
+const ENGLISH: Words = Words {
+    subject_updated: "{portal}: your link to a shared study was updated",
+    subject_new: "{portal}: an imaging study has been shared with you",
+    hello: "Hello,",
+    updated: "{sender} at {portal} has updated your link to a shared imaging study.",
+    shared: "{sender} at {portal} has shared an imaging study with you.",
+    message_from: "Message from {sender}:",
+    open_here: "Open the study here:",
+    works_for: "The link works for {duration} from the time of this email.",
+    view_only: "You can look at the study online (downloading it is not allowed).",
+    download_once: "You can look at the study online and download it once.",
+    download_times: "You can look at the study online and download it {n} times.",
+    password: "Password: {password}\n(capital letters, spaces and dashes do not matter)",
+    password_separately:
+        "You need a password to open it. It will be given to you separately (for example by phone or text message).",
+    sent_by: "This email was sent by {portal}. If you were not expecting it, you can ignore it.",
+};
+
+const SPANISH: Words = Words {
+    subject_updated: "{portal}: se ha actualizado su enlace a un estudio compartido",
+    subject_new: "{portal}: se ha compartido con usted un estudio de imagen",
+    hello: "Hola:",
+    updated: "{sender}, de {portal}, ha actualizado su enlace a un estudio de imagen compartido.",
+    shared: "{sender}, de {portal}, ha compartido con usted un estudio de imagen.",
+    message_from: "Mensaje de {sender}:",
+    open_here: "Abra el estudio aquí:",
+    works_for: "El enlace funciona durante {duration} a partir del envío de este correo.",
+    view_only: "Puede ver el estudio en línea (no se permite descargarlo).",
+    download_once: "Puede ver el estudio en línea y descargarlo una vez.",
+    download_times: "Puede ver el estudio en línea y descargarlo {n} veces.",
+    password: "Contraseña: {password}\n(no importan las mayúsculas, los espacios ni los guiones)",
+    password_separately:
+        "Necesita una contraseña para abrirlo. Se le facilitará por separado (por ejemplo, por teléfono o por SMS).",
+    sent_by: "Este correo lo ha enviado {portal}. Si no lo esperaba, puede ignorarlo.",
+};
+
 impl Invitation<'_> {
-    pub fn subject(&self) -> String {
-        if self.updated {
-            format!("{}: your link to a shared study was updated", self.portal_name)
-        } else {
-            format!("{}: an imaging study has been shared with you", self.portal_name)
+    fn words(&self) -> &'static Words {
+        match self.language {
+            Language::En => &ENGLISH,
+            Language::Es => &SPANISH,
         }
     }
 
+    /// A sentence with its {portal} and {sender} filled in.
+    fn fill(&self, text: &str) -> String {
+        text.replace("{portal}", self.portal_name).replace("{sender}", self.sender)
+    }
+
+    pub fn subject(&self) -> String {
+        let w = self.words();
+        self.fill(if self.updated { w.subject_updated } else { w.subject_new })
+    }
+
     pub fn body(&self) -> String {
-        let mut text = String::from("Hello,\n\n");
-        if self.updated {
-            text +=
-                &format!("{} at {} has updated your link to a shared imaging study.\n", self.sender, self.portal_name);
-        } else {
-            text += &format!("{} at {} has shared an imaging study with you.\n", self.sender, self.portal_name);
-        }
+        let w = self.words();
+        let mut text = format!("{}\n\n", w.hello);
+        text += &self.fill(if self.updated { w.updated } else { w.shared });
+        text += "\n";
         if !self.message.is_empty() {
-            text += &format!("\nMessage from {}:\n", self.sender);
+            text += &format!("\n{}\n", self.fill(w.message_from));
             for line in self.message.lines() {
                 text += &format!("  {line}\n");
             }
         }
-        text += &format!("\nOpen the study here:\n{}\n\n", self.url);
-        text += &format!("The link works for {} from the time of this email.\n", duration_words(self.minutes_left));
+        text += &format!("\n{}\n{}\n\n", w.open_here, self.url);
+        text += &w.works_for.replace("{duration}", &duration_words_in(self.minutes_left, self.language));
+        text += "\n";
         text += &match self.downloads_left {
-            0 => "You can look at the study online (downloading it is not allowed).\n".to_string(),
-            1 => "You can look at the study online and download it once.\n".to_string(),
-            n => format!("You can look at the study online and download it {n} times.\n"),
+            0 => w.view_only.to_string(),
+            1 => w.download_once.to_string(),
+            n => w.download_times.replace("{n}", &n.to_string()),
         };
+        text += "\n\n";
         text += &match self.password {
-            Some(p) => format!("\nPassword: {p}\n(capital letters, spaces and dashes do not matter)\n"),
-            None => "\nYou need a password to open it. It will be given to you separately (for example by phone \
-                     or text message).\n"
-                .to_string(),
+            Some(p) => w.password.replace("{password}", p),
+            None => w.password_separately.to_string(),
         };
-        text += &format!(
-            "\nThis email was sent by {}. If you were not expecting it, you can ignore it.\n",
-            self.portal_name
-        );
+        text += &format!("\n\n{}\n", self.fill(w.sent_by));
         if !self.footer.is_empty() {
             text += &format!("\n--\n{}\n", self.footer);
         }
         text
+    }
+}
+
+/// The test email of Settings > Email: (subject, body).
+pub fn test_email(portal: &str, admin: &str, lang: Language) -> (String, String) {
+    match lang {
+        Language::En => (
+            format!("{portal}: test email"),
+            format!(
+                "This is a test email from {portal}.\n\nIt was sent by {admin} from Settings > Email. If you received it, the portal can send share invitations by email.\n"
+            ),
+        ),
+        Language::Es => (
+            format!("{portal}: correo de prueba"),
+            format!(
+                "Este es un correo de prueba de {portal}.\n\nLo ha enviado {admin} desde Ajustes > Correo electrónico. Si lo ha recibido, el portal puede enviar invitaciones por correo.\n"
+            ),
+        ),
     }
 }
 
@@ -244,6 +330,7 @@ mod tests {
             message: "Second opinion please",
             updated: false,
             footer: "1 High Street",
+            language: Language::En,
         };
         let body = inv.body();
         assert!(body.contains("https://x/s/abc") && body.contains("2 days") && body.contains("download it once"));
@@ -251,5 +338,28 @@ mod tests {
         assert!(body.contains("  Second opinion please") && body.ends_with("1 High Street\n"));
         inv.password = Some("ABCD-EFGH-JKLM");
         assert!(inv.body().contains("Password: ABCD-EFGH-JKLM"));
+    }
+
+    #[test]
+    fn invitations_can_be_in_spanish() {
+        let inv = Invitation {
+            portal_name: "Demo",
+            sender: "doctor",
+            url: "https://x/s/abc",
+            minutes_left: 1500,
+            downloads_left: 3,
+            password: None,
+            message: "",
+            updated: false,
+            footer: "",
+            language: Language::Es,
+        };
+        assert_eq!(inv.subject(), "Demo: se ha compartido con usted un estudio de imagen");
+        let body = inv.body();
+        assert!(body.starts_with("Hola:\n\ndoctor, de Demo, ha compartido"), "{body}");
+        assert!(body.contains("durante 1 día 1 hora a partir") && body.contains("descargarlo 3 veces"), "{body}");
+        assert!(body.contains("Se le facilitará por separado") && !body.contains("Contraseña:"), "{body}");
+        assert_eq!(duration_words_in(2, Language::Es), "2 minutos");
+        assert_eq!(duration_words_in(0, Language::Es), "menos de un minuto");
     }
 }

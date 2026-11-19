@@ -213,7 +213,7 @@ screens whose changes apply at once.
 | **Appearance > Colours** | Light / dark / automatic, and the **accent**, **header**, **icon column** and **page background** colours (each can go back to the built-in one). Previewed at once, kept when saved (see [The layout and the colours](#the-layout-and-the-colours)) |
 | **Search & labels** | The modality buttons; the columns of the studies tables and the boxes of the Studies search (which ones, in which order); the fields of the study window; live search on or off and its minimum number of letters; endless lists on or off; **labels on or off altogether**, the allowed labels and whether their counts are shown |
 | **Features** | Every optional feature of section 9b, each on or off, the name of downloaded ZIP files, and the **More viewers** (Stone Web Viewer, VolView, whole-slide viewer: automatic / always / never; a MedDream address; the OHIF modes offered) |
-| **Appearance > Dates, names and style** | How dates (2024-05-17, 17/05/2024, 05/17/2024, 17.05.2024, 17 May 2024) and patient names (DOE, JOHN / JOHN DOE / DOE^JOHN) are written everywhere, and **custom CSS** added after the portal's own (also on the invitation page; no `@import` or `url(...)`) |
+| **Appearance > Language, dates, names and style** | The **language** of the portal (English or Spanish, see [Languages](#languages-english-and-spanish)), how dates (2024-05-17, 17/05/2024, 05/17/2024, 17.05.2024, 17 May 2024) and patient names (DOE, JOHN / JOHN DOE / DOE^JOHN) are written everywhere, and **custom CSS** added after the portal's own (also on the invitation page; no `@import` or `url(...)`) |
 | **Appearance > Home page and icons** | How many recent studies the home page shows, which ones (last received / newest study date) and how (the Studies table, or cards with big previews), card size, the two texts of the home page, the total of studies in the header, names under the icons; auto-refresh of the recent studies and of Transfers (each on or off) and its interval (30 s by default, 5 s to 1 hour) |
 | **General > Viewers and uploads** | Show the **Weasis** button (on / off), show the **OHIF** button (automatic / always / never), largest uploaded file, preview thumbnails on/off and their cache size |
 | **Orthanc > Orthanc connection** | Address; **with an account** (user name + password, write-only: never sent back to the browser) **or without an account** (for an Orthanc that only accepts a list of allowed computers); **Test connection** (mode used, version, DICOMweb/OHIF plugins, number of DICOM nodes; works on values you have typed but not yet saved); the optional **folder of Orthanc's log files**, for the System page |
@@ -248,6 +248,25 @@ only*, a search box, *Refresh* and *Download the file*. Only plain log-file name
 * **Option A** (your own Orthanc in Docker): start Orthanc with `--logdir`, mount that folder into the portal
   container read-only and enter its path in the setting (or set `ORTHANC_LOG_DIR` before the first start).
 * **Option C** (bare metal): enter Orthanc's log folder; the portal's account must be allowed to read it.
+
+### Languages: English and Spanish
+
+The portal speaks **English** and **Spanish (Spain)**. *Settings > Appearance > Language* sets the language for
+everyone: the staff portal, the **invitation page** guests see and the **invitation emails** (and the test email).
+Each person can still choose the other language **for their own browser** in the small menu at the top of the
+page (also on the login page and on the invitation page); the choice is remembered in that browser. Dates and
+numbers follow the language (17 may 2024, 1.234), and the server's messages (errors, test results) are translated
+too. `PORTAL_LANGUAGE=es` sets the language before the first start (like the other start-up values).
+
+How it works, for whoever maintains it: the interface is written in English in `static/app.js` and
+`static/share.js`. `static/i18n/es.json` maps each English text to its translation: `texts` for the interface,
+`messages` for the server's messages (their `{names}` match any value, so "Unknown setting 'x'" is found). Plain
+texts are translated as the page builds them; a text with values goes through `t("Send {n} studies", { n })`.
+A text missing from the file simply shows in English. `tests/ui_tests.js` checks that every `t()` text has its
+Spanish translation with the same `{names}`. To add a language: copy `es.json` to `<code>.json` and translate
+the values, then add the code to `Language` (`src/settings.rs`), to `LANGUAGES` (`src/routes/settings.rs`), to the
+`language` options of Settings (`static/app.js`), to the emails (`src/mailer.rs`) and serve the file
+(`src/routes/mod.rs`).
 
 ### Branding: make it yours
 
@@ -665,10 +684,9 @@ permission: hiding a button is only the visible part.
 | **Jobs page** | on | *Configuration > Jobs*, see section 4 |
 | **System page** | on | *Configuration > System*, see section 4 |
 | **Read Orthanc's REST API** | off | On the System page: GET only, addresses checked (no `..`, no files, archives or pictures), each read audited |
-| **Dates, names, custom CSS** | ISO, DOE, JOHN, none | *Appearance > Dates, names and style* |
+| **Language, dates, names, custom CSS** | English, ISO, DOE, JOHN, none | *Appearance > Language, dates, names and style*; see [Languages](#languages-english-and-spanish) |
 
-Not included on purpose: an "inbox" processing page, administrator-defined custom buttons, single sign-on and
-translations.
+Not included on purpose: an "inbox" processing page, administrator-defined custom buttons and single sign-on.
 
 ---
 
@@ -852,7 +870,7 @@ Cargo.toml            dependencies
 Dockerfile            container image
 deploy/               option B: docker-compose.yml (preconfigured Orthanc + portal + tunnel), .env.example, orthanc.json; cloudflared-config.yml (tunnel run on the host, option C)
 deploy/existing-orthanc/  option A: docker-compose.yml + .env.example (portal + tunnel, for an Orthanc you already have)
-static/               staff UI: index.html + app.js; guest page: share.html + share.js; app.css (both), favicon.svg (the default mark); all embedded in the binary. The two HTML files are templates: title and icon are filled in per request
+static/               staff UI: index.html + app.js; guest page: share.html + share.js; app.css (both), favicon.svg (the default mark); i18n/es.json (the Spanish translation); all embedded in the binary. The two HTML files are templates: title, icon and language are filled in per request
 src/main.rs           start-up, background cleanup, graceful shutdown
 src/config.rs         the few bootstrap values from the environment
 src/settings.rs       every web-editable setting: defaults, validation, saved copy, roles
@@ -881,7 +899,7 @@ The code compiles without warnings on Rust 1.91, passes `cargo clippy --all-targ
 formatted with `rustfmt` (see `rustfmt.toml`), and its dependencies were checked against the RustSec advisory
 database (no known vulnerable version in `Cargo.lock`). The automated tests live in the **`tests/`** folder:
 
-* `tests/server_tests.sh`: **592 checks** of the server against a fake Orthanc (`tests/mock_orthanc.py`) and a
+* `tests/server_tests.sh`: **602 checks** of the server against a fake Orthanc (`tests/mock_orthanc.py`) and a
   fake mail server (`tests/mock_smtp.py`):
   the two doors (staff portal vs invitation links only, Cloudflare headers refused on the intranet port), creating
   links with the default and the limited validity/downloads, the password gate and its throttling, what a guest
@@ -890,14 +908,17 @@ database (no known vulnerable version in `Cargo.lock`). The automated tests live
   running out of downloads while viewing continues, expiry, revocation, search and modality filters,
   thumbnails, sending and job tracking, upload/download, branding including malicious files, live settings,
   login hardening, caps, ETag/headers, concurrent administrators, and **talking to Orthanc with an account, without
-  one, and when it refuses the portal** (what is sent, what is not, the message for each case), and an
-  administrator changing their own password (every other session of that account is signed out);
-* `tests/ui_tests.js`: **178 checks** of both web pages in a simulated browser (jsdom): the Share dialog and the
+  one, and when it refuses the portal** (what is sent, what is not, the message for each case), an
+  administrator changing their own password (every other session of that account is signed out), and the
+  portal in Spanish (the setting, the dictionary on both listeners, the pages and the invitation emails);
+* `tests/ui_tests.js`: **191 checks** of both web pages in a simulated browser (jsdom): the Share dialog and the
   Shares tab, the guest page (password, study, series, countdown, downloads left, expiry, revoked, 0-download
-  links, no OHIF), what each kind of staff account sees, search, the with/without-account choice in Settings;
-* `cargo test`: **42 unit tests** (image validation; password and link generation; the rules that confine a guest
+  links, no OHIF), what each kind of staff account sees, search, the with/without-account choice in Settings,
+  and the translations (every `t()` text translated, the language menu, the portal's language, the server's
+  messages and the invitation page in Spanish);
+* `cargo test`: **43 unit tests** (image validation; password and link generation; the rules that confine a guest
   to one study; account / no account and the wording of Orthanc refusals; the thumbnail cache; tokens and sessions;
-  the role of a user, settings saved by earlier versions, the appearance settings; email addresses, invitation texts, the hourly email limit and
+  the role of a user, settings saved by earlier versions, the appearance settings; email addresses, invitation texts (English and Spanish), the hourly email limit and
   the rule that the mail server password never travels unencrypted).
 
 **Trying it by hand: `tests/dev_env.sh`.** It builds the portal and starts it with the fake Orthanc in a demo

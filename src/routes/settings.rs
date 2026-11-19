@@ -35,6 +35,10 @@ use serde_json::{json, Map, Value};
 
 // ------------------------------------------------------------------ public
 
+/// The languages of the interface: code and name (in that language). Each has its translation file
+/// in static/i18n/ (English is the text of the code itself).
+const LANGUAGES: [[&str; 2]; 2] = [["en", "English"], ["es", "Español"]];
+
 /// Name and notice shown on the login page. Deliberately tiny: nothing sensitive.
 pub async fn public_info(State(state): State<AppState>) -> Json<Value> {
     let settings = state.settings.get();
@@ -50,6 +54,9 @@ pub async fn public_info(State(state): State<AppState>) -> Json<Value> {
         "theme": settings.theme(),
         // How dates and names are written (the invitation page follows it too).
         "format": { "date": settings.date_format, "name": settings.name_format },
+        // The language of the interface (each browser may choose another one).
+        "language": settings.language,
+        "languages": LANGUAGES,
     }))
 }
 
@@ -223,12 +230,8 @@ pub async fn test_email(
     let settings = state.settings.get();
     let to = crate::mailer::parse_recipients(&req.to).map_err(AppError::BadRequest)?;
     let to_text = crate::mailer::addresses(&to);
-    let body = format!(
-        "This is a test email from {}.\n\nIt was sent by {} from Settings > Email. If you received it, the portal can \
-         send share invitations by email.\n",
-        settings.portal_name, admin.username
-    );
-    let result = crate::mailer::send(&settings, to, &format!("{}: test email", settings.portal_name), &body).await;
+    let (subject, body) = crate::mailer::test_email(&settings.portal_name, &admin.username, settings.language);
+    let result = crate::mailer::send(&settings, to, &subject, &body).await;
     state.db.audit(
         &admin.username,
         "email_test",

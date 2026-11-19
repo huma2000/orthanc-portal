@@ -13,7 +13,7 @@
   The Content-Security-Policy sent by the server also forbids inline
   scripts and inline styles, so keep JS and CSS in their own files.
 -->
-<html lang="en">
+<html lang="{{LANG}}">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -28,7 +28,7 @@
     <div id="app"></div>
     <!-- Small notifications (errors, confirmations) appear here -->
     <div id="toasts" role="status" aria-live="polite"></div>
-    <noscript>This application needs JavaScript.</noscript>
+    <noscript>{{NOSCRIPT}}</noscript>
     <script src="/static/app.js"></script>
   </body>
 </html>

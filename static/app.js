@@ -7,7 +7,8 @@
 
   Sections
     1. Settings and state
-    2. Tiny DOM helper `h()`        (builds elements safely, never uses innerHTML)
+   1b. Translations                 (t(), the dictionary of the chosen language)
+    2. Tiny DOM helper `h()`        (builds elements safely, never uses innerHTML; translates its texts)
     3. API helper `api()`           (adds the CSRF header, handles errors / expired sessions)
     4. Formatting helpers           (DICOM names, dates)
     5. Shell: login, sign out, colours (theme)
@@ -71,6 +72,133 @@ const hasOhif = () => !!(state.user && state.user.features && state.user.feature
 const hasWeasis = () => !!(state.user && state.user.features && state.user.features.weasis);
 
 /* ====================================================================
+   1b. TRANSLATIONS
+   The interface is written in English in this file. For another language the server sends a
+   dictionary, static/i18n/<code>.json: { "texts": { "English text": "translation" }, "messages": {...} }
+   ("messages" = the server's messages, see translateMessage). Plain texts given to h()
+   (children, and the placeholder / title / aria-label / alt / data-tip attributes) are translated
+   when the element is built, so most code just writes English. A text with values in it goes
+   through t("Send {n} studies", { n }): the dictionary key keeps the {names}. Messages from the
+   server are translated by translateMessage(): a key's {names} then match any value.
+   The portal's language is a setting (Settings > Appearance); each person may choose another one
+   for their browser (the menu in the header and on the login page), remembered in this browser.
+   ==================================================================== */
+
+const LANGUAGE_KEY = "portal.language";
+const i18n = {
+  lang: "en",
+  dict: null,      // the texts of the interface; null = English: nothing to translate
+  messages: {},    // the server's messages
+  patterns: [],    // the server's messages with {names}: [{ regex, names, template }]
+  locale: undefined, // dates and numbers: the browser's own format in English, Spanish (Spain) in Spanish
+};
+
+/** The translation of a text as it is (surrounding spaces kept), or the text itself. */
+function lookup(text) {
+  if (!i18n.dict || typeof text !== "string" || !text) return text;
+  const direct = i18n.dict[text];
+  if (direct !== undefined) return direct;
+  const parts = /^(\s*)([\s\S]*?)(\s*)$/.exec(text);
+  if (parts[2] === text || !parts[2]) return text;
+  const core = i18n.dict[parts[2]];
+  return core === undefined ? text : parts[1] + core + parts[3];
+}
+
+/** Translates `text` and fills its {names} from `values`: t("Send {n} studies", { n: 3 }). */
+function t(text, values) {
+  const out = lookup(text);
+  return values ? out.replace(/\{(\w+)\}/g, (all, name) => (name in values ? String(values[name]) : all)) : out;
+}
+
+/** "1 series" / "3 series" and "1 image" / "3 images": the singular has its own key (it differs in Spanish). */
+const seriesCount = (n) => (Number(n) === 1 ? t("1 series") : t("{series} series", { series: n ?? "?" }));
+const imagesCount = (n) => (Number(n) === 1 ? t("1 image") : t("{n} images", { n }));
+
+/**
+ * A message of the server in the chosen language: an exact key, or a key with {names} whose
+ * literal parts match ("Unknown setting: {name}"). The values are kept (translated themselves when
+ * they are a known text). Unknown messages stay in English.
+ */
+function translateMessage(message) {
+  if (!i18n.dict || typeof message !== "string" || !message) return message;
+  const text = message.trim();
+  if (i18n.messages[text] !== undefined) return i18n.messages[text];
+  const exact = lookup(text);
+  if (exact !== text) return exact;
+  for (const p of i18n.patterns) {
+    const m = p.regex.exec(text);
+    if (m) return p.template.replace(/\{(\w+)\}/g, (all, name) => { const i = p.names.indexOf(name); return i < 0 ? all : translateValue(m[i + 1]); });
+  }
+  return message;
+}
+
+/** A value inside a server message: translated when it is itself a known text or message. */
+const translateValue = (value) => (i18n.messages[value] !== undefined ? i18n.messages[value] : lookup(value));
+
+/** Turns the keys with {names} into patterns (longest first, so the most precise one wins). */
+function buildPatterns(dict) {
+  const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return Object.keys(dict).filter((key) => /\{\w+\}/.test(key)).sort((a, b) => b.length - a.length).map((key) => {
+    const names = [];
+    const source = key.split(/(\{\w+\})/).map((piece) => {
+      const name = /^\{(\w+)\}$/.exec(piece);
+      if (!name) return escape(piece);
+      names.push(name[1]);
+      return "([\\s\\S]+?)";
+    }).join("");
+    return { regex: new RegExp(`^${source}$`), names, template: dict[key] };
+  });
+}
+
+/** The languages offered (from /api/public): [[code, name]]. */
+const languages = () => (state.brand && state.brand.languages) || [["en", "English"]];
+
+/** The language of this browser: the person's own choice, or the portal's. */
+function chosenLanguage() {
+  let mine = "";
+  try { mine = localStorage.getItem(LANGUAGE_KEY) || ""; } catch { /* private window */ }
+  const offered = languages().map(([code]) => code);
+  if (offered.includes(mine)) return mine;
+  return offered.includes(state.brand && state.brand.language) ? state.brand.language : "en";
+}
+
+/** Loads the dictionary of a language (English needs none). Falls back to English on any problem. */
+async function loadLanguage(lang) {
+  if (lang === i18n.lang && (lang === "en" || i18n.dict)) return;
+  let data = null;
+  if (lang !== "en") {
+    try {
+      const response = await fetch(`/static/i18n/${encodeURIComponent(lang)}.json`, { credentials: "same-origin" });
+      if (response.ok) data = await response.json();
+    } catch { /* stays in English */ }
+  }
+  const dict = data && data.texts ? data.texts : null;
+  i18n.lang = dict ? lang : "en";
+  i18n.dict = dict;
+  i18n.messages = (dict && data.messages) || {};
+  i18n.patterns = dict ? buildPatterns(i18n.messages) : [];
+  i18n.locale = dict ? ({ es: "es-ES" }[lang] || lang) : undefined;
+  document.documentElement.lang = i18n.lang;
+}
+
+/** A person chose a language in the menu: remembered in this browser, and the page is redrawn. */
+async function setLanguage(lang) {
+  try { localStorage.setItem(LANGUAGE_KEY, lang); } catch { /* only for this page */ }
+  await loadLanguage(lang);
+  renderApp();
+}
+
+/** The language menu (header and login page); none when the portal offers only one language. */
+function languageMenu() {
+  const list = languages();
+  if (list.length < 2) return null;
+  return h("select", {
+    class: "language-select", "aria-label": "Language", title: "Language",
+    onchange: (event) => setLanguage(event.target.value),
+  }, list.map(([code, name]) => h("option", { value: code, selected: code === i18n.lang, lang: code }, name)));
+}
+
+/* ====================================================================
    2. DOM HELPER
    ==================================================================== */
 
@@ -78,7 +206,9 @@ const hasWeasis = () => !!(state.user && state.user.features && state.user.featu
  * h("div", { class: "x", onclick: fn }, child1, [child2, child3], "text")
  * Creates an element. Strings become text nodes (safe), arrays are flattened,
  * null/false children are skipped. Props named onXxx add event listeners.
+ * Texts and the attributes people read are translated (section 1b).
  */
+const TRANSLATED_ATTRIBUTES = new Set(["placeholder", "title", "aria-label", "alt", "data-tip"]);
 function h(tag, props, ...children) {
   const el = document.createElement(tag);
   for (const [key, value] of Object.entries(props || {})) {
@@ -86,11 +216,11 @@ function h(tag, props, ...children) {
     if (key === "class") el.className = value;
     else if (key.startsWith("on") && typeof value === "function") el.addEventListener(key.slice(2), value);
     else if (["value", "checked", "disabled", "hidden", "selected"].includes(key)) el[key] = value;
-    else el.setAttribute(key, value === true ? "" : value);
+    else el.setAttribute(key, value === true ? "" : TRANSLATED_ATTRIBUTES.has(key) ? lookup(value) : value);
   }
   for (const child of children.flat(Infinity)) {
     if (child === null || child === undefined || child === false) continue;
-    el.append(child instanceof Node ? child : document.createTextNode(String(child)));
+    el.append(child instanceof Node ? child : document.createTextNode(typeof child === "string" ? lookup(child) : String(child)));
   }
   return el;
 }
@@ -130,7 +260,7 @@ async function api(method, url, body) {
   try {
     response = await fetch(url, options);
   } catch {
-    throw new ApiError("Cannot reach the portal. Check your network connection.", 0);
+    throw new ApiError(t("Cannot reach the portal. Check your network connection."), 0);
   }
   const text = await response.text();
   let data = null;
@@ -139,7 +269,7 @@ async function api(method, url, body) {
   if (!response.ok) {
     // 401 while signed in = the session expired or the account was disabled.
     if (response.status === 401 && state.user && url !== "/api/login") sessionExpired();
-    throw new ApiError((data && data.error) || text.slice(0, 200) || `Request failed (${response.status})`, response.status);
+    throw new ApiError(translateMessage((data && data.error) || text.slice(0, 200)) || t("Request failed ({status})", { status: response.status }), response.status);
   }
   return data;
 }
@@ -167,7 +297,7 @@ const formatOptions = () => (state.user && state.user.features && state.user.fea
 
 /** DICOM person name "DOE^JOHN^^^" -> "DOE, JOHN" (or "JOHN DOE", or as stored: Settings > Appearance). */
 function formatName(raw) {
-  if (!raw) return "(no name)";
+  if (!raw) return t("(no name)");
   const style = formatOptions().name;
   if (style === "dicom") return raw.replace(/\^+$/, "");
   const parts = raw.split("^").map((p) => p.trim()).filter(Boolean);
@@ -175,7 +305,10 @@ function formatName(raw) {
   return style === "first_last" ? `${parts.slice(1).join(" ")} ${parts[0]}` : `${parts[0]}, ${parts.slice(1).join(" ")}`;
 }
 
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const MONTHS = {
+  en: ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+  es: ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sept", "oct", "nov", "dic"],
+};
 
 /** DICOM date "20240517" -> "2024-05-17" (or 17/05/2024...: Settings > Appearance). Anything else is shown unchanged. */
 function formatDicomDate(value) {
@@ -185,13 +318,13 @@ function formatDicomDate(value) {
     case "dmy": return `${d}/${m}/${y}`;
     case "mdy": return `${m}/${d}/${y}`;
     case "dmy_dots": return `${d}.${m}.${y}`;
-    case "long": return `${Number(d)} ${MONTHS[Number(m) - 1] || m} ${y}`;
+    case "long": return `${Number(d)} ${(MONTHS[i18n.lang] || MONTHS.en)[Number(m) - 1] || m} ${y}`;
     default: return `${y}-${m}-${d}`;
   }
 }
 
 /** Unix seconds -> local date/time string. */
-const formatTimestamp = (unixSeconds) => (unixSeconds ? new Date(unixSeconds * 1000).toLocaleString() : "never");
+const formatTimestamp = (unixSeconds) => (unixSeconds ? new Date(unixSeconds * 1000).toLocaleString(i18n.locale) : t("never"));
 
 /** Coloured modality badge (colours defined in app.css through data-m). */
 const chip = (modality) => h("span", { class: "chip", "data-m": modality, title: modalityName(modality) }, modality || "?");
@@ -224,10 +357,10 @@ const MODALITY_NAMES = {
  * for exactly this code wins (their wording, their language); otherwise the DICOM name.
  */
 function modalityName(code) {
-  if (!code) return "Modality not recorded";
+  if (!code) return t("Modality not recorded");
   const button = modalityButtons().find((b) => b.codes.length === 1 && b.codes[0] === code && b.title);
-  const name = button ? button.title : MODALITY_NAMES[code];
-  return name ? `${code}: ${name}` : `${code}: modality code`;
+  const name = button ? button.title : MODALITY_NAMES[code] && t(MODALITY_NAMES[code]);
+  return name ? `${code}: ${name}` : t("{code}: modality code", { code });
 }
 
 /** Grey placeholder for empty values. */
@@ -356,7 +489,10 @@ function applyBrand() {
 /** Reloads the identity from the server (after an administrator changes it). */
 async function refreshBrand() {
   state.brand = await api("GET", "/api/public");
+  const before = i18n.lang;
+  await loadLanguage(chosenLanguage());
   applyBrand();
+  return before !== i18n.lang; // the language changed (Settings > Appearance): the caller redraws
 }
 
 /** Login screen. */
@@ -390,7 +526,8 @@ function buildLogin() {
       h("div", { class: "brand brand-slot", "data-size": "28", "data-heading": "1" }, ...brandContent(28, true)),
       h("p", { class: "muted" }, "Sign in to search, view and manage imaging studies."),
       state.brand.login_notice ? h("p", { class: "login-notice" }, state.brand.login_notice) : null,
-      form));
+      form,
+      languageMenu() ? h("div", { class: "login-language" }, languageMenu()) : null));
 }
 
 async function signOut() {
@@ -586,12 +723,14 @@ function renderSimplified() {
     h("div", { class: "side-group" }, pages.filter((p) => !p.bottom).map(pageButton)),
     h("div", { class: "side-group" },
       pages.filter((p) => p.bottom).map(pageButton),
-      sideButton(`Log out (${state.user.username})`, "logout", signOut)));
+      sideButton(t("Log out ({user})", { user: state.user.username }), "logout", signOut)));
 
   const showTotal = options.show_total !== false && can("read");
   const head = h("header", { class: "simple-head" },
     h("div", { class: "brand brand-slot", "data-size": "40" }, ...brandContent(40, false)),
-    showTotal ? h("div", { class: "simple-total" }, "Total studies: ", h("b", { id: "total-studies" }, totalStudies.text)) : null);
+    h("div", { class: "head-right" },
+      showTotal ? h("div", { class: "simple-total" }, "Total studies: ", h("b", { id: "total-studies" }, totalStudies.text)) : null,
+      languageMenu()));
 
   // Red notice (administrators only) when Orthanc is unreachable or too old.
   const banner = h("div", { id: "orthanc-banner", class: "banner", role: "alert", hidden: true });
@@ -616,7 +755,7 @@ async function refreshTotalStudies(force = false) {
   totalStudies.at = Date.now();
   try {
     const stats = await api("GET", "/api/stats");
-    totalStudies.text = typeof stats.studies === "number" ? stats.studies.toLocaleString() : "?";
+    totalStudies.text = typeof stats.studies === "number" ? stats.studies.toLocaleString(i18n.locale) : "?";
   } catch {
     totalStudies.text = "?"; // Orthanc unreachable: the administrators' red notice explains it
     totalStudies.at = 0;     // try again at the next page
@@ -645,16 +784,16 @@ function autoRefresh(key, node, refresh) {
   const countdown = h("span", { class: "auto-refresh-time", "aria-hidden": "true" });
   const button = h("button", {
     type: "button", class: "chip-toggle auto-refresh has-tip", "data-name": "auto-refresh",
-    "aria-label": `Refresh automatically every ${seconds} seconds`,
+    "aria-label": t("Refresh automatically every {n} seconds", { n: seconds }),
   }, "Auto-refresh · ", countdown);
 
   /** "24 s", "refreshing", "waiting" or "paused", and the tooltip that explains it. */
   function show(waiting = false) {
     button.setAttribute("aria-pressed", String(on));
-    countdown.textContent = !on ? "paused" : waiting ? "waiting" : left <= 0 ? "refreshing" : `${left} s`;
-    button.dataset.tip = !on ? "Paused. Click to refresh the list automatically again."
-      : waiting ? "Waiting: the list is not refreshed while a window is open, series are shown or the tab is in the background."
-        : `The list refreshes itself every ${seconds} seconds (next in ${Math.max(left, 0)} s). Click to pause.`;
+    countdown.textContent = !on ? t("paused") : waiting ? t("waiting") : left <= 0 ? t("refreshing") : `${left} s`;
+    button.dataset.tip = !on ? t("Paused. Click to refresh the list automatically again.")
+      : waiting ? t("Waiting: the list is not refreshed while a window is open, series are shown or the tab is in the background.")
+        : t("The list refreshes itself every {n} seconds (next in {left} s). Click to pause.", { n: seconds, left: Math.max(left, 0) });
   }
   button.addEventListener("click", () => {
     on = !on;
@@ -757,7 +896,7 @@ function openStudyDialog(study) {
     accession: study.accession_number, referring: study.referring_physician ? formatName(study.referring_physician) : "",
     requesting: study.requesting_physician ? formatName(study.requesting_physician) : "", institution: study.institution,
     modalities: study.modalities.length ? h("span", null, study.modalities.map(chip)) : null,
-    series: `${study.series_count ?? "?"} series${study.instances_count != null ? `, ${study.instances_count} images` : ""}`,
+    series: study.instances_count != null ? `${seriesCount(study.series_count)}, ${imagesCount(study.instances_count)}` : seriesCount(study.series_count),
     study_uid: study.study_instance_uid,
   };
   const fields = (opts().detail_fields || ["patient_id", "sex", "birth_date", "study_date", "description", "modalities", "series", "labels"])
@@ -1047,7 +1186,7 @@ function buildLabelPicker(initial, onChange) {
     const known = labels.map((l) => l.name);
     const all = [...labels, ...[...selected].filter((n) => !known.includes(n)).map((name) => ({ name, count: null }))];
     box.replaceChildren(...[
-      ...all.map((l) => toggle(selected.has(l.name), l.count == null ? l.name : `${l.name} (${l.count})`, `Studies labelled ${l.name}`,
+      ...all.map((l) => toggle(selected.has(l.name), l.count == null ? l.name : `${l.name} (${l.count})`, t("Studies labelled {label}", { label: l.name }),
         () => { none = false; if (selected.has(l.name)) selected.delete(l.name); else selected.add(l.name); draw(); onChange(); })),
       toggle(none, "Without labels", "Studies that have no label at all", () => { none = !none; selected.clear(); draw(); onChange(); }),
       selected.size > 1
@@ -1088,7 +1227,7 @@ function openLabelsDialog(study, onChange) {
   function draw() {
     list.replaceChildren(...(study.labels.length
       ? study.labels.map((l) => h("span", { class: "chip label-chip" }, l,
-        h("button", { type: "button", class: "chip-remove", "aria-label": `Take the label ${l} off`, title: "Take it off", onclick: () => change("DELETE", l) }, "×")))
+        h("button", { type: "button", class: "chip-remove", "aria-label": t("Take the label {label} off", { label: l }), title: "Take it off", onclick: () => change("DELETE", l) }, "×")))
       : [h("span", { class: "muted" }, "No label yet.")]));
   }
   async function change(method, label) {
@@ -1113,7 +1252,7 @@ function openLabelsDialog(study, onChange) {
     h("div", { class: "inline-field" }, input, h("button", { class: "btn primary", type: "submit" }, "Add")),
     datalist,
     h("p", { class: "hint" }, allowed.length
-      ? `Allowed labels: ${allowed.join(", ")}.`
+      ? t("Allowed labels: {labels}.", { labels: allowed.join(", ") })
       : "Letters, digits, - and _ only (no spaces). Labels are shared: everyone sees them and can search by them."),
     h("div", { class: "dialog-actions" }, h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Close"))));
   dialog.addEventListener("close", () => dialog.remove());
@@ -1289,7 +1428,7 @@ function buildSearchView(cfg) {
   /** "Showing 1-25   [Previous] [Next]". */
   function buildPager(page) {
     return h("div", { class: "pager" },
-      h("span", { class: "muted" }, `Showing ${offset + 1}-${offset + page.items.length}`),
+      h("span", { class: "muted" }, t("Showing {from}-{to}", { from: offset + 1, to: offset + page.items.length })),
       h("div", { class: "actions" },
         h("button", { class: "btn small", type: "button", disabled: offset === 0, onclick: () => run(Math.max(0, offset - PAGE_SIZE)) }, "Previous"),
         h("button", { class: "btn small", type: "button", disabled: !page.has_more, onclick: () => run(offset + PAGE_SIZE) }, "Next")));
@@ -1302,7 +1441,7 @@ function buildSearchView(cfg) {
   function buildLoadMore() {
     const loadMore = () => { if (hasMore && !loading) run(offset + PAGE_SIZE, true); };
     const footer = h("div", { class: "pager load-more" },
-      h("span", { class: "muted" }, `${shownCount} shown`),
+      h("span", { class: "muted" }, t("{n} shown", { n: shownCount })),
       hasMore ? h("button", { class: "btn small", type: "button", onclick: loadMore }, "Load more") : h("span", { class: "muted" }, "That is all."));
     if (hasMore && "IntersectionObserver" in window) {
       const observer = new IntersectionObserver((entries) => {
@@ -1320,7 +1459,7 @@ function buildSearchView(cfg) {
   },
     h("div", { class: "filter-grid" }, fieldNodes),
     h("div", { class: "filter-actions" },
-      h("button", { class: "btn primary", type: "submit" }, `Search ${cfg.title.toLowerCase()}`),
+      h("button", { class: "btn primary", type: "submit" }, cfg.id === "series" ? "Search series" : "Search studies"),
       h("button", {
         class: "btn", type: "button",
         onclick: () => { for (const input of Object.values(inputs)) input.value = ""; delete memory.sort; delete memory.dir; run(0); },
@@ -1346,7 +1485,7 @@ function columnHeader(title, sortKey, sorting, extraClass = null) {
   const active = sorting.sort === sortKey;
   const arrow = active ? (sorting.dir === "desc" ? " ▼" : " ▲") : "";
   return h("th", { class: extraClass, "aria-sort": active ? (sorting.dir === "desc" ? "descending" : "ascending") : null },
-    h("button", { type: "button", class: "sort-header", title: `Sort by ${title.toLowerCase()}`, onclick: () => sorting.onSort(sortKey) }, title, arrow));
+    h("button", { type: "button", class: "sort-header", title: t("Sort by {column}", { column: lookup(title).toLowerCase() }), onclick: () => sorting.onSort(sortKey) }, title, arrow));
 }
 
 /**
@@ -1369,7 +1508,7 @@ const STUDY_COLUMNS = {
   requesting: { title: "Requesting physician", sort: "requesting", cell: (s) => h("td", null, s.requesting_physician ? formatName(s.requesting_physician) : dash()) },
   institution: { title: "Institution", sort: "institution", cell: (s) => h("td", null, s.institution || dash()) },
   modalities: { title: "Modality", cell: (s) => h("td", null, s.modalities.length ? s.modalities.map(chip) : dash()) },
-  series: { title: "Series / images", cell: (s) => h("td", null, `${s.series_count ?? "?"} series`, s.instances_count != null ? h("div", { class: "sub" }, `${s.instances_count} images`) : null) },
+  series: { title: "Series / images", cell: (s) => h("td", null, seriesCount(s.series_count), s.instances_count != null ? h("div", { class: "sub" }, imagesCount(s.instances_count)) : null) },
   labels: { title: "Labels", cell: (s) => h("td", { class: "labels-cell" }, labelChips(s.labels)) },
 };
 /** The fields the study window can show (Settings > Search & labels), and their titles. */
@@ -1612,10 +1751,12 @@ async function openSendDialog(studyOrList) {
   }
 
   const error = h("div", { class: "form-error", role: "alert", hidden: true });
-  const kindName = { peer: " [Orthanc peer]", dicomweb: " [DICOMweb]" };
+  const kindName = { peer: "[Orthanc peer]", dicomweb: "[DICOMweb]" };
   const target = h("select", null, nodes.map((n) =>
-    h("option", { value: n.id }, [n.description ? `${n.description}: ${n.id}` : n.id, n.aet ? `  (${n.aet} at ${n.host}:${n.port})` : n.url ? `  (${n.url})` : "", kindName[n.kind] || ""].join(""))));
-  const submit = h("button", { class: "btn primary", type: "submit" }, studies.length > 1 ? `Send ${studies.length} studies` : "Send study");
+    h("option", { value: n.id }, [n.description ? `${n.description}: ${n.id}` : n.id,
+      n.aet ? `  ${t("({aet} at {address})", { aet: n.aet, address: `${n.host}:${n.port}` })}` : n.url ? `  (${n.url})` : "",
+      kindName[n.kind] ? ` ${t(kindName[n.kind])}` : ""].join(""))));
+  const submit = h("button", { class: "btn primary", type: "submit" }, studies.length > 1 ? t("Send {n} studies", { n: studies.length }) : "Send study");
 
   const dialog = h("dialog", null, h("form", {
     onsubmit: async (event) => {
@@ -1625,12 +1766,12 @@ async function openSendDialog(studyOrList) {
       try {
         if (studies.length > 1) {
           const r = await api("POST", "/api/send", { target: target.value, studies: studies.map((s) => s.id) });
-          if (r.errors.length) toast(`${r.errors.length} could not be sent: ${r.errors[0]}`, "error", 10000);
+          if (r.errors.length) toast(t("{n} could not be sent: {error}", { n: r.errors.length, error: translateMessage(r.errors[0]) }), "error", 10000);
         } else {
           await api("POST", `/api/studies/${study.id}/send`, { target: target.value });
         }
         dialog.close();
-        toast(`Transfer to ${target.value} started. Follow it on the Transfers page.`, "info", 7000);
+        toast(t("Transfer to {target} started. Follow it on the Transfers page.", { target: target.value }), "info", 7000);
       } catch (e) {
         error.textContent = e.message;
         error.hidden = false;
@@ -1638,9 +1779,9 @@ async function openSendDialog(studyOrList) {
       }
     },
   },
-    h("h2", null, studies.length > 1 ? `Send ${studies.length} studies` : "Send study to a DICOM destination"),
+    h("h2", null, studies.length > 1 ? t("Send {n} studies", { n: studies.length }) : "Send study to a DICOM destination"),
     studies.length > 1
-      ? h("ul", null, studies.slice(0, 8).map((s) => h("li", null, studyLine(s))), studies.length > 8 ? h("li", null, `and ${studies.length - 8} more`) : null)
+      ? h("ul", null, studies.slice(0, 8).map((s) => h("li", null, studyLine(s))), studies.length > 8 ? h("li", null, t("and {n} more", { n: studies.length - 8 })) : null)
       : h("p", null, h("b", null, formatName(study.patient_name)), " ", formatDicomDate(study.study_date), study.study_description ? `, ${study.study_description}` : ""),
     error,
     h("label", null, "Destination", target),
@@ -1694,8 +1835,8 @@ function formatBytes(bytes) {
 /** A name for an upload: the dropped folder or file, or "12 files". */
 function describeUpload(files) {
   const folder = (files[0].webkitRelativePath || "").split("/")[0];
-  if (folder && files.every((f) => (f.webkitRelativePath || "").startsWith(`${folder}/`))) return `Folder ${folder}`;
-  return files.length === 1 ? files[0].name : `${files.length} files`;
+  if (folder && files.every((f) => (f.webkitRelativePath || "").startsWith(`${folder}/`))) return t("Folder {name}", { name: folder });
+  return files.length === 1 ? files[0].name : t("{n} files", { n: files.length });
 }
 
 /** Starts a fresh batch (counters to zero) when nothing is running. */
@@ -1748,7 +1889,7 @@ function pump() {
       if (reloadRecentStudies) reloadRecentStudies();
       refreshTotalStudies(true);
     }
-    toast(`Upload finished: ${upload.uploaded} new, ${upload.duplicates} already stored, ${upload.failed} failed.`,
+    toast(t("Upload finished: {new} new, {duplicates} already stored, {failed} failed.", { new: upload.uploaded, duplicates: upload.duplicates, failed: upload.failed }),
       upload.failed ? "error" : "info", 8000);
   }
 }
@@ -1783,13 +1924,13 @@ function sendFile(item) {
         if (data && data.Status === "AlreadyStored") { upload.duplicates++; b.duplicates++; } else { upload.uploaded++; b.uploaded++; }
         if (data && data.ParentStudy) { upload.studyIds.add(data.ParentStudy); b.studyIds.add(data.ParentStudy); }
       } else {
-        failFile(item, (data && data.error) || `HTTP ${xhr.status}`);
+        failFile(item, translateMessage(data && data.error) || `HTTP ${xhr.status}`);
         if (xhr.status === 401) { upload.pending = []; upload.next = 0; sessionExpired(); } // stop: we are signed out
       }
       fileDone(item);
       resolve();
     };
-    xhr.onerror = () => { failFile(item, "Network error"); fileDone(item); resolve(); };
+    xhr.onerror = () => { failFile(item, t("Network error")); fileDone(item); resolve(); };
     xhr.send(item.file);
   });
 }
@@ -1847,24 +1988,24 @@ function renderUploadHistory() {
     const started = running && (done > 0 || sent > 0);
     const seconds = ((b.finishedAt || now) - b.started) / 1000;
     let detail;
-    if (!running) detail = `${formatBytes(b.bytesTotal)} in ${formatDuration(Math.max(1, seconds))}`;
+    if (!running) detail = t("{size} in {time}", { size: formatBytes(b.bytesTotal), time: formatDuration(Math.max(1, seconds)) });
     else if (!started) detail = "Waiting for the uploads before it";
     else {
       const speed = sent / Math.max(seconds, 0.5);   // bytes per second since it started
       const left = speed > 0 ? (b.bytesTotal - sent) / speed : 0;
-      detail = `${formatBytes(sent)} of ${formatBytes(b.bytesTotal)} · ${formatBytes(speed)}/s · about ${formatDuration(Math.max(1, left))} left`;
+      detail = t("{sent} of {total} · {speed}/s · about {time} left", { sent: formatBytes(sent), total: formatBytes(b.bytesTotal), speed: formatBytes(speed), time: formatDuration(Math.max(1, left)) });
     }
     const fill = h("span");
     fill.style.width = `${Math.round(fraction * 100)}%`;
     const [stateClass, stateText] = running ? (started ? ["state-running", "Uploading"] : ["state-pending", "Waiting"])
       : b.failed ? ["state-failure", b.failed === b.total ? "Failed" : "Done with errors"] : ["state-success", "Done"];
     return h("tr", null,
-      h("td", { class: "nowrap" }, new Date(b.started).toLocaleTimeString()),
-      h("td", null, h("div", { class: "patient" }, b.label), h("div", { class: "sub" }, `${b.total} ${b.total === 1 ? "file" : "files"}, ${formatBytes(b.bytesTotal)}`)),
+      h("td", { class: "nowrap" }, new Date(b.started).toLocaleTimeString(i18n.locale)),
+      h("td", null, h("div", { class: "patient" }, b.label), h("div", { class: "sub" }, t(b.total === 1 ? "{n} file, {size}" : "{n} files, {size}", { n: b.total, size: formatBytes(b.bytesTotal) }))),
       h("td", { class: "upload-progress-cell" },
         h("div", { class: "upload-progress-line" }, h("div", { class: "progress" }, fill), h("b", null, `${Math.floor(fraction * 100)}%`)),
         h("div", { class: "sub" }, detail)),
-      h("td", { class: "num nowrap" }, `${done} of ${b.total}`),
+      h("td", { class: "num nowrap" }, t("{done} of {total}", { done, total: b.total })),
       h("td", { class: "num" }, b.uploaded),
       h("td", { class: "num" }, b.duplicates),
       h("td", { class: b.failed ? "num error-line" : "num" }, b.failed),
@@ -1900,7 +2041,7 @@ function updateUploadUi() {
   for (const item of upload.inFlight.values()) partial += item.file.size ? item.loaded / item.file.size : 0;
   ui.bar.style.width = upload.total ? `${Math.min(100, ((done + partial) / upload.total) * 100)}%` : "0%";
 
-  ui.statDone.textContent = `${done} of ${upload.total}`;
+  ui.statDone.textContent = t("{done} of {total}", { done, total: upload.total });
   ui.statNew.textContent = upload.uploaded;
   ui.statDup.textContent = upload.duplicates;
   ui.statFail.textContent = upload.failed;
@@ -1934,7 +2075,7 @@ async function filesFromDrop(dataTransfer) {
     .filter(Boolean);
   if (!entries.length) return Array.from(dataTransfer.files);
   // A name for the list of the Uploads page: "Folder CT_2024", "scan.dcm" or "3 items".
-  const label = entries.length === 1 ? (entries[0].isDirectory ? `Folder ${entries[0].name}` : entries[0].name) : `${entries.length} items`;
+  const label = entries.length === 1 ? (entries[0].isDirectory ? t("Folder {name}", { name: entries[0].name }) : entries[0].name) : t("{n} items", { n: entries.length });
 
   const files = [];
   async function walk(entry) {
@@ -2067,12 +2208,12 @@ function buildTransfersView() {
   /** The destination: its short name, with its description and address in a tooltip and under it. */
   function destinationCell(alias) {
     const n = nodes.get(alias);
-    const address = n && n.aet ? `AE title ${n.aet} at ${n.host}:${n.port}` : "";
+    const address = n && n.aet ? t("AE title {aet} at {address}", { aet: n.aet, address: `${n.host}:${n.port}` }) : "";
     const tip = n
       ? [n.description, address].filter(Boolean).join(" — ") || alias
-      : `${alias}: no longer among the DICOM destinations`;
+      : t("{alias}: no longer among the DICOM destinations", { alias });
     return h("td", null,
-      h("span", { class: "chip has-tip", "data-tip": tip, "aria-label": `${alias}: ${tip}`, tabindex: "0" }, alias),
+      h("span", { class: "chip has-tip", "data-tip": tip, "aria-label": tip.startsWith(alias) ? tip : `${alias}: ${tip}`, tabindex: "0" }, alias),
       n && n.description ? h("div", { class: "sub" }, n.description) : null);
   }
 
@@ -2088,20 +2229,26 @@ function buildTransfersView() {
     if (r.state === "Pending") detail = "Waiting to start";
     else if (r.state === "Running" || r.state === "Retry") {
       const parts = [];
-      if (images) parts.push(`${Math.round((images * r.progress) / 100)} of ${images} images`);
+      if (images) parts.push(t("{done} of {total} images", { done: Math.round((images * r.progress) / 100), total: images }));
       if (ran) parts.push(ran);
-      if (r.runtime && r.progress > 0 && r.progress < 100) parts.push(`about ${formatDuration((r.runtime * (100 - r.progress)) / r.progress)} left`);
+      if (r.runtime && r.progress > 0 && r.progress < 100) parts.push(t("about {time} left", { time: formatDuration((r.runtime * (100 - r.progress)) / r.progress) }));
       detail = parts.join(" · ") || (retrieved ? "Retrieving" : "Sending");
     } else if (r.state === "Success") {
-      detail = images ? `${images} images ${retrieved ? "retrieved" : "sent"} in ${ran || "a moment"}` : (retrieved ? "Retrieved" : "Sent");
-    } else if (r.state === "Failure") detail = images && r.failed ? `${r.failed} of ${images} images could not be ${retrieved ? "retrieved" : "sent"}` : "";
+      detail = images
+        ? t(retrieved ? "{n} images retrieved in {time}" : "{n} images sent in {time}", { n: images, time: ran || t("a moment") })
+        : (retrieved ? "Retrieved" : "Sent");
+    } else if (r.state === "Failure") {
+      detail = images && r.failed
+        ? t(retrieved ? "{failed} of {total} images could not be retrieved" : "{failed} of {total} images could not be sent", { failed: r.failed, total: images })
+        : "";
+    }
     else if (r.state === "Unknown") detail = "Orthanc no longer remembers this transfer";
     else if (r.state === "Unavailable") detail = "Orthanc did not answer: trying again";
     const running = ["Pending", "Running", "Retry"].includes(r.state);
     return h("td", { class: "transfer-progress" },
       running ? h("div", { class: "upload-progress-line" }, h("div", { class: "progress" }, fill), h("b", null, `${r.progress}%`)) : null,
       detail ? h("div", { class: "sub" }, detail) : null,
-      r.error ? h("div", { class: "error-line" }, r.error) : null);
+      r.error ? h("div", { class: "error-line" }, translateMessage(r.error)) : null);
   }
 
   function renderTransfers(rows) {
@@ -2170,7 +2317,7 @@ function buildUsersView() {
             h("button", {
               class: "btn small danger", type: "button", disabled: u.id === state.user.id,
               onclick: async () => {
-                if (!confirm(`Delete the user "${u.username}"? This cannot be undone.`)) return;
+                if (!confirm(t('Delete the user "{user}"? This cannot be undone.', { user: u.username }))) return;
                 try { await api("DELETE", `/api/admin/users/${u.id}`); toast("User deleted."); load(); } catch (e) { toastError(e); }
               },
             }, "Delete"))))))));
@@ -2245,7 +2392,7 @@ function openUserDialog(user, meta, reload) {
       }
     },
   },
-    h("h2", null, isNew ? "New user" : `Edit ${user.username}`),
+    h("h2", null, isNew ? "New user" : t("Edit {name}", { name: user.username })),
     error,
     h("label", null, "Username", username),
     h("label", null, isNew ? "Password" : "New password (optional)", password),
@@ -2341,8 +2488,8 @@ function formatDuration(seconds) {
 /** "2 days 5 hours 20 minutes" for a number of minutes (the parts that are not zero). */
 function durationWords(totalMinutes) {
   const d = Math.floor(totalMinutes / 1440), hh = Math.floor((totalMinutes % 1440) / 60), mm = totalMinutes % 60;
-  const part = (n, one, many) => (n ? `${n} ${n === 1 ? one : many}` : "");
-  return [part(d, "day", "days"), part(hh, "hour", "hours"), part(mm, "minute", "minutes")].filter(Boolean).join(" ") || "0 minutes";
+  const part = (n, one, many) => (n ? `${n} ${t(n === 1 ? one : many)}` : "");
+  return [part(d, "day", "days"), part(hh, "hour", "hours"), part(mm, "minute", "minutes")].filter(Boolean).join(" ") || t("0 minutes");
 }
 
 /**
@@ -2358,12 +2505,12 @@ function buildDurationInput(totalMinutes, maxHours, legend) {
   const part = (input, text) => h("label", { class: "duration-field" }, input, h("span", null, text));
   const total = () => (Number(days.value) || 0) * 1440 + (Number(hours.value) || 0) * 60 + (Number(minutes.value) || 0);
   return {
-    node: h("fieldset", { class: "duration" }, h("legend", null, `${legend} (at most ${durationWords(maxMinutes)})`),
+    node: h("fieldset", { class: "duration" }, h("legend", null, t("{what} (at most {duration})", { what: lookup(legend), duration: durationWords(maxMinutes) })),
       part(days, "days"), part(hours, "hours"), part(minutes, "minutes")),
     get minutes() { return total(); },
     problem() {
-      if (total() < 1) return "Choose how long the link works: at least 1 minute.";
-      if (total() > maxMinutes) return `A link can work for at most ${durationWords(maxMinutes)}.`;
+      if (total() < 1) return t("Choose how long the link works: at least 1 minute.");
+      if (total() > maxMinutes) return t("A link can work for at most {duration}.", { duration: durationWords(maxMinutes) });
       return "";
     },
   };
@@ -2397,11 +2544,11 @@ function buildEmailOptions(canIncludePassword) {
     const possible = canIncludePassword();
     withPassword.disabled = !possible;
     if (!possible) withPassword.checked = false;
-    passwordHint.textContent = !possible
+    passwordHint.textContent = t(!possible
       ? "This link's password is not kept, so it cannot go in the email: tick \"Give the link a new password\" to include one."
       : withPassword.checked
         ? "Anyone who can read this email can open the study. Safer: leave it out and give the password by phone or text message."
-        : "The email says the password will be given separately (by phone or text message): safer.";
+        : "The email says the password will be given separately (by phone or text message): safer.");
   }
   send.addEventListener("change", () => { refresh(); if (send.checked) to.focus(); });
   withPassword.addEventListener("change", refresh);
@@ -2419,8 +2566,8 @@ function buildEmailOptions(canIncludePassword) {
 function emailOutcome(email) {
   if (!email) return null;
   return email.sent
-    ? h("p", { class: "notice" }, `Invitation emailed to ${email.to}.`)
-    : h("p", { class: "form-error" }, `The link is ready, but the email to ${email.to} was not sent: ${email.error}`);
+    ? h("p", { class: "notice" }, t("Invitation emailed to {to}.", { to: email.to }))
+    : h("p", { class: "form-error" }, t("The link is ready, but the email to {to} was not sent: {error}", { to: email.to, error: translateMessage(email.error) }));
 }
 
 /** Dialog to invite somebody outside to look at a study (the "Share..." button of a study). */
@@ -2434,7 +2581,7 @@ function openShareDialog(studyOrList) {
   document.body.append(dialog);
   const close = h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Close");
   const who = several
-    ? h("ul", null, studies.slice(0, 8).map((s) => h("li", null, studyLine(s))), studies.length > 8 ? h("li", null, `and ${studies.length - 8} more`) : null)
+    ? h("ul", null, studies.slice(0, 8).map((s) => h("li", null, studyLine(s))), studies.length > 8 ? h("li", null, t("and {n} more", { n: studies.length - 8 })) : null)
     : h("p", null, h("b", null, formatName(study.patient_name)), " ", formatDicomDate(study.study_date), study.study_description ? `, ${study.study_description}` : "");
 
   /** Step 1: how long and how many downloads. */
@@ -2474,10 +2621,10 @@ function openShareDialog(studyOrList) {
         }
       },
     },
-      h("h2", null, several ? `Share ${studies.length} studies with somebody outside (one link)` : "Share this study with somebody outside"),
+      h("h2", null, several ? t("Share {n} studies with somebody outside (one link)", { n: studies.length }) : "Share this study with somebody outside"),
       who, error,
       duration.node,
-      h("label", null, `Downloads allowed as ZIP (0 = online viewing only, up to ${feature.max_downloads})`, downloads),
+      h("label", null, t("Downloads allowed as ZIP (0 = online viewing only, up to {max})", { max: feature.max_downloads }), downloads),
       h("label", null, "Note (optional)", note),
       emailOptions.node,
       h("p", { class: "muted" }, "The person gets a link and a password that opens only this study. They can look at it online until the link expires; running out of downloads does not stop that."),
@@ -2486,9 +2633,9 @@ function openShareDialog(studyOrList) {
 
   /** Step 2: the link and the password. */
   function showResult(result) {
-    const expires = new Date(result.expires_at * 1000).toLocaleString();
+    const expires = new Date(result.expires_at * 1000).toLocaleString(i18n.locale);
     const link = h("input", { readonly: true, value: result.url, "aria-label": "Link", onfocus: (e) => e.target.select() });
-    const invitation = () => `You have been invited to look at an imaging study.\nLink: ${result.url}\nThe link works until ${expires}.\nThe password is sent to you separately.`;
+    const invitation = () => t("You have been invited to look at an imaging study.\nLink: {url}\nThe link works until {expires}.\nThe password is sent to you separately.", { url: result.url, expires });
     dialog.replaceChildren(h("div", { class: "dialog-form" },
       h("h2", null, "Link and password created"),
       who,
@@ -2498,7 +2645,7 @@ function openShareDialog(studyOrList) {
       result.password_kept
         ? h("p", { class: "muted" }, "Give the password to the person by a different channel than the link (a phone call, an SMS). You can see it again in the Shares list while the link is active.")
         : h("p", { class: "form-error" }, "The password is shown only now and cannot be recovered. Give it to the person by a different channel than the link (a phone call, an SMS)."),
-      h("p", { class: "muted" }, `Valid until ${expires}. Downloads allowed: ${result.max_downloads}.`),
+      h("p", { class: "muted" }, t("Valid until {expires}. Downloads allowed: {n}.", { expires, n: result.max_downloads })),
       emailOutcome(result.email),
       h("div", { class: "dialog-actions" }, copyButton("Copy invitation text (without the password)", invitation), close)));
   }
@@ -2520,11 +2667,14 @@ async function showSharePassword(share) {
     "Give it by a different channel than the link (a phone call, an SMS). Showing it was recorded in the audit log.");
 }
 
+/** The name of a link: "DOE JOHN - 20240517 - CT", with "+ 2 more" for a link to several studies. */
+const shareLabel = (label) => label.replaceAll(" | ", " - ").replace(/ \+ (\d+) more$/, (all, n) => ` ${t("+ {n} more", { n })}`);
+
 /** A small dialog with a link's password and a copy button. */
 function passwordDialog(share, title, password, message) {
   const dialog = h("dialog", null, h("div", { class: "dialog-form" },
     h("h2", null, title),
-    h("p", null, share.label.replaceAll(" | ", " - "), share.note ? h("span", { class: "muted" }, ` (${share.note})`) : null),
+    h("p", null, shareLabel(share.label), share.note ? h("span", { class: "muted" }, ` (${share.note})`) : null),
     h("div", { class: "secret-box" }, h("span", { class: "password" }, password), copyButton("Copy password", () => password)),
     h("p", { class: "muted" }, message),
     h("div", { class: "dialog-actions" }, h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Close"))));
@@ -2605,8 +2755,8 @@ function openShareEditor(share, reload) {
         dialog.close();
         reload();
         if (r.email) {
-          if (r.email.sent) toast(`Invitation emailed to ${r.email.to}.`);
-          else toast(`The link was updated, but the email was not sent: ${r.email.error}`, "error", 10000);
+          if (r.email.sent) toast(t("Invitation emailed to {to}.", { to: r.email.to }));
+          else toast(t("The link was updated, but the email was not sent: {error}", { error: translateMessage(r.email.error) }), "error", 10000);
         }
         if (r.password) {
           passwordDialog(share, "New password of the link", r.password, r.password_kept
@@ -2623,13 +2773,13 @@ function openShareEditor(share, reload) {
     },
   },
     h("h2", null, "Change the link"),
-    h("p", null, h("b", null, share.label.replaceAll(" | ", " - "))),
+    h("p", null, h("b", null, shareLabel(share.label))),
     h("p", { class: "muted" }, active
-      ? `It works for ${formatDuration(share.expires_at - now)} more (until ${formatTimestamp(share.expires_at)}). ${share.downloads_used} of ${share.max_downloads} downloads used.`
-      : `It ended on ${formatTimestamp(share.expires_at)}: saving makes it work again. ${share.downloads_used} of ${share.max_downloads} downloads used.`),
+      ? t("It works for {time} more (until {until}). {used} of {max} downloads used.", { time: formatDuration(share.expires_at - now), until: formatTimestamp(share.expires_at), used: share.downloads_used, max: share.max_downloads })
+      : t("It ended on {date}: saving makes it work again. {used} of {max} downloads used.", { date: formatTimestamp(share.expires_at), used: share.downloads_used, max: share.max_downloads })),
     error,
     duration.node,
-    h("label", null, `Downloads left from now on (0 = online viewing only, up to ${feature.max_downloads})`, left),
+    h("label", null, t("Downloads left from now on (0 = online viewing only, up to {max})", { max: feature.max_downloads }), left),
     h("label", null, "Note (for your own records)", note),
     h("label", { class: "check" }, newPassword, "Give the link a new password (the current one stops working)"),
     emailOptions.node,
@@ -2659,12 +2809,12 @@ function buildSharesView() {
     return h("div", { class: "table-wrap" }, h("table", { class: "data" },
       h("thead", null, h("tr", null, ["Study", "By", "Created", "Time left", "Downloads left", "Opened", "Status", "Actions"].map((t) => h("th", { class: t === "Actions" ? "num" : null }, t)))),
       h("tbody", null, shares.map((s) => h("tr", null,
-        h("td", null, s.label.replaceAll(" | ", " - "), s.note ? h("div", { class: "sub" }, s.note) : null),
+        h("td", null, shareLabel(s.label), s.note ? h("div", { class: "sub" }, s.note) : null),
         h("td", null, s.created_by),
         h("td", { class: "nowrap" }, formatTimestamp(s.created_at)),
         timeLeftCell(s, now),
         downloadsCell(s),
-        h("td", { class: "nowrap" }, s.access_count ? `${s.access_count}x, last ${formatTimestamp(s.last_access_at)}` : "never"),
+        h("td", { class: "nowrap" }, s.access_count ? t("{n}x, last {date}", { n: s.access_count, date: formatTimestamp(s.last_access_at) }) : "never"),
         h("td", null, h("span", { class: `chip ${s.status === "active" ? "status-on" : "status-off"}` }, s.status)),
         h("td", null, h("div", { class: "actions" },
           s.url && s.status === "active" ? copyButton("Copy link", () => s.url, "link") : null,
@@ -2679,7 +2829,7 @@ function buildSharesView() {
             ? actionButton("button", "revoke", "Revoke", "Revoke this link", {
                 class: "btn small danger", type: "button",
                 onclick: async () => {
-                  if (!confirm("Revoke this link? The person will not be able to open it any more.")) return;
+                  if (!confirm(t("Revoke this link? The person will not be able to open it any more."))) return;
                   try { await api("POST", `/api/shares/${s.id}/revoke`); toast("Link revoked."); load(); } catch (e) { toastError(e); }
                 },
               })
@@ -2688,7 +2838,7 @@ function buildSharesView() {
 
   /** How long the link still works, and until when (amber in its last hour). */
   function timeLeftCell(s, now) {
-    const until = `until ${formatTimestamp(s.expires_at)}`;
+    const until = t("until {date}", { date: formatTimestamp(s.expires_at) });
     if (s.status === "revoked") return h("td", { class: "nowrap muted" }, "withdrawn");
     if (s.status !== "active") return h("td", { class: "nowrap" }, h("span", { class: "muted" }, "ended"), h("div", { class: "sub" }, formatTimestamp(s.expires_at)));
     const left = s.expires_at - now;
@@ -2699,11 +2849,11 @@ function buildSharesView() {
   function downloadsCell(s) {
     if (!s.max_downloads) return h("td", { class: "nowrap" }, "view only", h("div", { class: "sub" }, "no download allowed"));
     // A withdrawn or expired link allows nothing any more: only say what was used.
-    if (s.status !== "active") return h("td", { class: "nowrap muted" }, `${s.downloads_used} of ${s.max_downloads} used`);
+    if (s.status !== "active") return h("td", { class: "nowrap muted" }, t("{used} of {max} used", { used: s.downloads_used, max: s.max_downloads }));
     const left = Math.max(0, s.max_downloads - s.downloads_used);
     return h("td", { class: "nowrap" },
-      h("span", { class: left === 0 ? "soon" : null }, left === 0 ? "none left" : `${left} left`),
-      h("div", { class: "sub" }, `${s.downloads_used} of ${s.max_downloads} used`));
+      h("span", { class: left === 0 ? "soon" : null }, left === 0 ? "none left" : t("{n} left", { n: left })),
+      h("div", { class: "sub" }, t("{used} of {max} used", { used: s.downloads_used, max: s.max_downloads })));
   }
 
   load();
@@ -2724,7 +2874,7 @@ function buildSharesView() {
 /** A small inline copy of an icon, to show in the text which button is meant. */
 const helpIcon = (name) => h("span", { class: "help-icon", "aria-hidden": "true" }, icon(name));
 /** A button as it appears on screen: its icon, then its name. */
-const helpButton = (iconName, text) => [helpIcon(iconName), ` (${text})`];
+const helpButton = (iconName, text) => [helpIcon(iconName), " (", text, ")"];
 /** A bullet list: one bullet per argument (an argument may be several pieces: text, icons...); null = left out. */
 const ul = (...items) => h("ul", null, items.filter(Boolean).map((item) => h("li", null, item)));
 
@@ -2757,9 +2907,12 @@ function helpSections() {
     {
       id: "home", title: "The home page", show: true,
       body: () => [
-        h("p", null, `It lists the ${f.simplified && f.simplified.recent_count ? f.simplified.recent_count : ""} most recent studies, ${f.simplified && f.simplified.recent_order === "study_date" ? "the newest examination dates" : "the last ones received by the archive"} first. `,
+        h("p", null, t("It lists the {n} most recent studies, {order} first.", {
+          n: f.simplified && f.simplified.recent_count ? f.simplified.recent_count : "",
+          order: t(f.simplified && f.simplified.recent_order === "study_date" ? "the newest examination dates" : "the last ones received by the archive"),
+        }), " ",
           helpButton("refresh", "Refresh"), " updates the list.",
-          f.simplified && f.simplified.recent_auto_refresh ? ` It also refreshes itself every ${f.simplified.refresh_seconds} seconds; the "Auto-refresh" button next to it counts down the seconds to the next update; click it to pause (or start again). It waits while a window is open or the series of a study are shown.` : ""),
+          f.simplified && f.simplified.recent_auto_refresh ? " " + t("It also refreshes itself every {n} seconds; the \"Auto-refresh\" button next to it counts down the seconds to the next update; click it to pause (or start again). It waits while a window is open or the series of a study are shown.", { n: f.simplified.refresh_seconds }) : ""),
         can("read") ? h("p", null, "Each study has the same buttons as on the Search page (see below). The small arrow ▸ at the start of a row shows the series of the study.") : null,
         can("upload") ? h("p", null, "At the bottom, drag files or a whole folder onto the upload area to add them to the archive (see Uploading images).") : null,
       ],
@@ -2796,7 +2949,7 @@ function helpSections() {
         h("p", null, "Labels are short words you put on studies to find them again: urgent, insurance, second-opinion, teaching... Everyone sees them, in the Labels column and in the study window, and can search by them."),
         ul(
           [helpButton("tag", "Labels"), " on a study: type a label (or choose a suggested one) and press ", h("b", null, "Add"), "; the × of a label takes it off."],
-          (searchOptions().allowed_labels || []).length ? `Only these labels can be used: ${searchOptions().allowed_labels.join(", ")}.` : "Letters, digits, - and _ only (no spaces).",
+          (searchOptions().allowed_labels || []).length ? t("Only these labels can be used: {labels}.", { labels: searchOptions().allowed_labels.join(", ") }) : "Letters, digits, - and _ only (no spaces).",
         ),
       ],
     },
@@ -2883,7 +3036,7 @@ function helpSections() {
           "Follow it on the ", helpIcon("transfers"), " ", h("b", null, "Transfers"), " page",
           ": while it runs it shows the percentage, how many images were sent, how long it has been running and about how long is left (the list updates itself); then how many images were sent, or why it failed."),
         h("p", null, "Rest the mouse on the name of a destination (for example \"ris\") to see what it is and where it is."),
-        f.simplified && f.simplified.transfers_auto_refresh ? h("p", null, `The Transfers page also refreshes itself every ${f.simplified.refresh_seconds} seconds, to show transfers started by colleagues; "Auto-refresh" next to Refresh pauses it.`) : null,
+        f.simplified && f.simplified.transfers_auto_refresh ? h("p", null, t("The Transfers page also refreshes itself every {n} seconds, to show transfers started by colleagues; \"Auto-refresh\" next to Refresh pauses it.", { n: f.simplified.refresh_seconds })) : null,
       ],
     },
     {
@@ -2895,7 +3048,7 @@ function helpSections() {
           h("p", null, h("b", null, "To share a study:")),
           h("ol", null,
             h("li", null, "Find the study and press ", helpButton("share", "Share..."), "."),
-            h("li", null, `Choose how long the link works (in days, hours and minutes, at most ${durationWords((share.max_hours || 0) * 60)}) and how many times the study may be downloaded (0 = online viewing only). Add a note for yourself if you like (for example "Dr. Smith, second opinion"): the person does not see it.`),
+            h("li", null, t("Choose how long the link works (in days, hours and minutes, at most {duration}) and how many times the study may be downloaded (0 = online viewing only). Add a note for yourself if you like (for example \"Dr. Smith, second opinion\"): the person does not see it.", { duration: durationWords((share.max_hours || 0) * 60) })),
             share.email ? h("li", null, "If you want, tick ", h("b", null, "Send the invitation by email"), " and type their email address and a message.") : null,
             h("li", null, "Press ", h("b", null, "Create link and password"), ". Copy the link and the password with the copy buttons.")),
           h("p", null, h("b", null, "Give the password by a different way than the link"), ": for example, email the link and say the password on the phone or send it by text message. ",
@@ -2956,7 +3109,7 @@ function buildHelpView() {
     }, s.title)));
   return h("div", { class: "view help" },
     h("div", { class: "page-head" }, h("h1", null, "Help")),
-    h("p", { class: "muted" }, `How to use ${state.brand.name}. This page describes what your account can do.`),
+    h("p", { class: "muted" }, t("How to use {portal}. This page describes what your account can do.", { portal: state.brand.name })),
     toc, blocks);
 }
 
@@ -2974,7 +3127,7 @@ function paintOrthancBanner() {
   slot.hidden = !state.orthancProblem;
   if (state.orthancProblem) {
     slot.append(
-      h("span", null, `Orthanc: ${state.orthancProblem} `),
+      h("span", null, `Orthanc: ${translateMessage(state.orthancProblem)} `),
       h("button", { class: "btn small", type: "button", onclick: () => openSettings("orthanc") }, "Open settings"));
   }
 }
@@ -3097,6 +3250,8 @@ const SETTINGS_FIELDS = {
   formatting: [
     { key: "date_format", label: "Dates", type: "select", options: [["iso", "2024-05-17"], ["dmy", "17/05/2024"], ["mdy", "05/17/2024"], ["dmy_dots", "17.05.2024"], ["long", "17 May 2024"]] },
     { key: "name_format", label: "Patient names", type: "select", options: [["last_first", "DOE, JOHN"], ["first_last", "JOHN DOE"], ["dicom", "DOE^JOHN (as stored)"]] },
+    { key: "language", label: "Language", type: "select", options: [["en", "English"], ["es", "Español"]],
+      hint: "The language of the portal for everyone, of the invitation page and of the invitation emails. Each person can still choose another language for their own browser (the menu at the top of the page)." },
     { key: "custom_css", label: "Custom CSS (advanced)", type: "textarea", wide: true, maxlength: 50000, rows: 6, placeholder: ".simple-head { border-bottom: 3px solid #c00; }",
       hint: "Extra style rules for the portal and the invitation page. No @import or url(...): everything stays on this server." },
   ],
@@ -3156,7 +3311,7 @@ function buildBrandImagePicker(kind, title, hint, accept) {
     try {
       await api("PUT", `/api/admin/branding/${kind}`, file);
       await refreshBrand();
-      toast(`${title} saved.`);
+      toast(t("{what} saved.", { what: lookup(title) }));
     } catch (e) { toastError(e); }
     draw();
   }
@@ -3164,7 +3319,7 @@ function buildBrandImagePicker(kind, title, hint, accept) {
     try {
       await api("DELETE", `/api/admin/branding/${kind}`);
       await refreshBrand();
-      toast(`${title} removed: the default is used again.`);
+      toast(t("{what} removed: the default is used again.", { what: lookup(title) }));
     } catch (e) { toastError(e); }
     draw();
   }
@@ -3219,7 +3374,7 @@ function buildPickList(what, catalog, chosen, defaults) { // `what`: "columns", 
   function draw(focus) {
     list.replaceChildren(...rows.map((row, i) => {
       const move = (step, symbol, label) => h("button", {
-        class: "btn small", type: "button", "aria-label": `${label} ${titles.get(row.key)}`, title: label, disabled: i + step < 0 || i + step >= rows.length,
+        class: "btn small", type: "button", "aria-label": `${lookup(label)} ${lookup(titles.get(row.key))}`, title: label, disabled: i + step < 0 || i + step >= rows.length,
         "data-control": symbol,
         onclick: () => { [rows[i], rows[i + step]] = [rows[i + step], rows[i]]; draw([i + step, symbol]); },
       }, symbol);
@@ -3237,7 +3392,7 @@ function buildPickList(what, catalog, chosen, defaults) { // `what`: "columns", 
   draw();
   return {
     node: h("div", { class: "pick-editor" }, list,
-      h("div", { class: "filter-actions" }, h("button", { class: "btn small", type: "button", onclick: () => { rows = make(defaults); draw(); } }, `Restore the default ${what}`))),
+      h("div", { class: "filter-actions" }, h("button", { class: "btn small", type: "button", onclick: () => { rows = make(defaults); draw(); } }, t("Restore the default {what}", { what: lookup(what) })))),
     get: () => rows.filter((r) => r.on).map((r) => r.key),
   };
 }
@@ -3265,7 +3420,7 @@ function buildModalityButtonsEditor(buttons, defaults) {
   function draw(focus) {
     list.replaceChildren(...rows.map((row, index) => {
       const move = (step, name, symbol, label) => h("button", {
-        class: "btn small", type: "button", "data-control": name, "aria-label": `${label} ${row.label || "this button"}`, title: label,
+        class: "btn small", type: "button", "data-control": name, "aria-label": `${lookup(label)} ${row.label || t("this button")}`, title: label,
         disabled: index + step < 0 || index + step >= rows.length,
         onclick: () => {
           [rows[index], rows[index + step]] = [rows[index + step], rows[index]];
@@ -3464,7 +3619,7 @@ function buildSettingsView() {
       testButton.disabled = true;
       testBox.hidden = false;
       testBox.className = "test-result";
-      testBox.textContent = "Testing...";
+      testBox.textContent = t("Testing...");
       try {
         const r = await api("POST", "/api/admin/orthanc/test", {
           // Without an account the user name is sent empty; the server then ignores any saved password.
@@ -3472,9 +3627,11 @@ function buildSettingsView() {
         });
         testBox.className = `test-result ${r.ok ? "ok" : "bad"}`;
         const details = r.version
-          ? ` Plugins: ${r.plugins.join(", ") || "none"}. DICOMweb: ${r.dicomweb ? "yes" : "no"}. OHIF: ${r.ohif ? "yes" : "no"}. DICOM nodes: ${r.modalities}.`
+          ? " " + t("Plugins: {plugins}. DICOMweb: {dicomweb}. OHIF: {ohif}. DICOM nodes: {nodes}.", {
+            plugins: r.plugins.join(", ") || t("none"), dicomweb: t(r.dicomweb ? "yes" : "no"), ohif: t(r.ohif ? "yes" : "no"), nodes: r.modalities,
+          })
           : "";
-        testBox.textContent = r.message + (r.ok ? "." : "") + details;
+        testBox.textContent = translateMessage(r.message) + (r.ok ? "." : "") + details;
       } catch (e) {
         testBox.className = "test-result bad";
         testBox.textContent = e.message;
@@ -3498,11 +3655,11 @@ function buildSettingsView() {
       testMailButton.disabled = true;
       testMailBox.hidden = false;
       testMailBox.className = "test-result";
-      testMailBox.textContent = "Sending...";
+      testMailBox.textContent = t("Sending...");
       try {
         const r = await api("POST", "/api/admin/email/test", { to: testTo.value });
         testMailBox.className = `test-result ${r.ok ? "ok" : "bad"}`;
-        testMailBox.textContent = r.message;
+        testMailBox.textContent = translateMessage(r.message);
       } catch (e) {
         testMailBox.className = "test-result bad";
         testMailBox.textContent = e.message;
@@ -3524,7 +3681,7 @@ function buildSettingsView() {
     inputs.theme_mode = themeMode;
     const colorFields = COLOR_FIELDS.map((def) => {
       const saved = s[def.key] || "";
-      const picker = h("input", { type: "color", value: saved || def.fallback, disabled: !saved, "aria-label": `${def.label} colour` });
+      const picker = h("input", { type: "color", value: saved || def.fallback, disabled: !saved, "aria-label": t("{name} colour", { name: lookup(def.label) }) });
       const useDefault = h("input", { type: "checkbox", checked: !saved });
       useDefault.addEventListener("change", () => { picker.disabled = useDefault.checked; previewTheme(); });
       picker.addEventListener("input", previewTheme);
@@ -3564,11 +3721,11 @@ function buildSettingsView() {
       : "Two listeners: the intranet one (the whole portal, for staff) and the internet one (ONLY invitation links, for the Cloudflare Tunnel). Changing an address re-opens the listener right away; if the new address cannot be opened (for example because another program uses that port), nothing is changed.";
 
     const listenerInfo = h("ul", { class: "listener-status wide" }, doc.listeners.map((l) =>
-      h("li", null, h("b", null, l.name), ": ", l.running ? `listening on ${l.addr}` : "not running")));
+      h("li", null, h("b", null, l.name), ": ", l.running ? t("listening on {address}", { address: l.addr }) : "not running")));
 
     // ---- Notices: what the last save did, and a reconnect link if this page's port is no longer the intranet port
     const notices = [];
-    messages.forEach((m) => notices.push(h("p", null, m)));
+    messages.forEach((m) => notices.push(h("p", null, translateMessage(m))));
     const intranet = doc.listeners[0];
     const newPort = intranet && intranet.addr ? intranet.addr.split(":").pop() : "";
     const thisPort = window.location.port || (window.location.protocol === "https:" ? "443" : "80");
@@ -3610,13 +3767,14 @@ function buildSettingsView() {
         }
         try {
           doc = await api("PUT", "/api/admin/settings", body);
-          await refreshBrand();
+          const languageChanged = await refreshBrand();
           // Viewer buttons, thumbnails and the "Share..." dialog follow the features: take the
           // server's fresh view of them (it also knows whether Orthanc has the OHIF plugin), so
           // what was just saved applies right away, without signing in again.
           try { state.user.features = (await api("GET", "/api/me")).features; } catch { /* keep the old ones */ }
           refreshOrthancStatus(true);
-          toast("Settings saved.");
+          toast(t("Settings saved."));
+          if (languageChanged) { renderApp(); return; } // everything in the new language
           draw(doc.messages || []);
         } catch (e) {
           toastError(e);
@@ -3642,7 +3800,7 @@ function buildSettingsView() {
         themeFields),
       section("simplified", "Home page and icons", "The portal shows the logo, the practice name and the total of studies at the top, a column of icons (Home, Search, Shares, Uploads, Transfers, Help, Configuration, Log out) on the left, and a home page with the most recent studies and an area to drop files into. Each person sees only the icons their permissions allow.",
         SETTINGS_FIELDS.simplified.map(field)),
-      section("formatting", "Dates, names and style", "How dates and patient names are written everywhere (also on the invitation page), and extra style rules.",
+      section("formatting", "Language, dates, names and style", "The language of the portal, how dates and patient names are written everywhere (also on the invitation page), and extra style rules.",
         SETTINGS_FIELDS.formatting.map(field)),
       section("features", "Optional features", "Switch on only what your practice needs. Each feature also needs its permission (Security & roles, Users): delete, edit, retrieve, worklists... Administrators may use all of them.",
         SETTINGS_FIELDS.features.map(field)),
@@ -3706,7 +3864,7 @@ function buildNodesView() {
             onclick: async (event) => {
               const button = event.currentTarget;
               button.disabled = true;
-              try { await api("POST", `/api/admin/nodes/${encodeURIComponent(n.id)}/echo`); toast(`${n.id} answered the DICOM ping.`); } catch (e) { toastError(e); }
+              try { await api("POST", `/api/admin/nodes/${encodeURIComponent(n.id)}/echo`); toast(t("{node} answered the DICOM ping.", { node: n.id })); } catch (e) { toastError(e); }
               button.disabled = false;
             },
           }, "Test"),
@@ -3714,7 +3872,7 @@ function buildNodesView() {
           h("button", {
             class: "btn small danger", type: "button",
             onclick: async () => {
-              if (!confirm(`Delete the DICOM node "${n.id}"?`)) return;
+              if (!confirm(t('Delete the DICOM node "{node}"?', { node: n.id }))) return;
               try { await api("DELETE", `/api/admin/nodes/${encodeURIComponent(n.id)}`); toast("Node deleted."); load(); } catch (e) { toastError(e); }
             },
           }, "Delete"))))))));
@@ -3758,7 +3916,7 @@ function openNodeDialog(node, reload) {
       }
     },
   },
-    h("h2", null, isNew ? "Add a DICOM node" : `Edit ${node.id}`),
+    h("h2", null, isNew ? "Add a DICOM node" : t("Edit {name}", { name: node.id })),
     error,
     h("label", null, "Name (used in Orthanc)", name),
     h("label", null, "AE title of the remote system", aet),
@@ -3814,13 +3972,13 @@ function archiveChanged() {
  * lists. Orthanc does the work in the background: leaving the page does not stop it.
  */
 async function followJob(jobId, what) {
-  toast(`${what}: started. It continues even if you leave the page.`, "info", 5000);
+  toast(t("{what}: started. It continues even if you leave the page.", { what: lookup(what) }), "info", 5000);
   for (let i = 0; i < 600; i++) {
     await new Promise((r) => setTimeout(r, i < 5 ? 1000 : 3000));
     let job;
     try { job = await api("GET", `/api/jobs/${encodeURIComponent(jobId)}`); } catch (e) { toastError(e); return; }
-    if (job.state === "Success") { toast(`${what}: done.`, "info", 6000); archiveChanged(); return; }
-    if (job.state === "Failure") { toast(`${what} failed: ${job.error || "see the Jobs page"}`, "error", 10000); return; }
+    if (job.state === "Success") { toast(t("{what}: done.", { what: lookup(what) }), "info", 6000); archiveChanged(); return; }
+    if (job.state === "Failure") { toast(t("{what} failed: {error}", { what: lookup(what), error: job.error ? translateMessage(job.error) : t("see the Jobs page") }), "error", 10000); return; }
   }
 }
 
@@ -3920,7 +4078,7 @@ function buildBulkBar(block) {
     const clear = () => { block.querySelectorAll("input.pick").forEach((b) => { b.checked = false; }); draw(); };
     const viewers = can("visualize") ? viewerLinks(picked) : [];
     bar.replaceChildren(
-      h("b", null, `${picked.length} selected`),
+      h("b", null, t("{n} selected", { n: picked.length })),
       viewers.length ? h("details", { class: "menu" },
         h("summary", { class: "btn small" }, "Open together"),
         h("div", { class: "menu-list" }, viewers.map(([text, href]) => h("a", { class: "menu-item", href, target: "_blank", rel: "noopener", onclick: closeMenu }, text)))) : null,
@@ -3941,7 +4099,7 @@ function buildBulkBar(block) {
 
 /** The tick box of one study row (it carries the study). */
 function pickBox(study) {
-  const box = h("input", { type: "checkbox", class: "pick", "aria-label": `Select ${formatName(study.patient_name)}` });
+  const box = h("input", { type: "checkbox", class: "pick", "aria-label": t("Select {name}", { name: formatName(study.patient_name) }) });
   box.study = study;
   return box;
 }
@@ -3966,7 +4124,7 @@ function openBulkLabelDialog(studies) {
   const datalist = h("datalist", { id: "bulk-label-list" });
   loadLabels().then((list) => datalist.replaceChildren(...[...new Set([...allowed, ...list.map((l) => l.name)])].map((n) => h("option", { value: n }))));
   const action = h("select", null, h("option", { value: "add" }, "Put this label on them"), h("option", { value: "remove" }, "Take this label off"));
-  formDialog(`Labels of ${studies.length} studies`, null,
+  formDialog(t("Labels of {n} studies", { n: studies.length }), null,
     [h("label", null, "Label", label, datalist), h("label", null, "What to do", action)], "Apply", async () => {
       const name = label.value.trim();
       for (const s of studies) {
@@ -3974,7 +4132,7 @@ function openBulkLabelDialog(studies) {
         s.labels = labels.labels || labels;
       }
       labelsCache = null;
-      toast(`Label ${name} ${action.value === "add" ? "put on" : "taken off"} ${studies.length} studies.`);
+      toast(t(action.value === "add" ? "Label {label} put on {n} studies." : "Label {label} taken off {n} studies.", { label: name, n: studies.length }));
       archiveChanged();
     });
 }
@@ -3982,12 +4140,12 @@ function openBulkLabelDialog(studies) {
 /** Deletes studies after a clear confirmation. */
 function deleteStudies(studies, done = () => {}) {
   const many = studies.length > 1;
-  formDialog(many ? `Delete ${studies.length} studies?` : "Delete this study?",
+  formDialog(many ? t("Delete {n} studies?", { n: studies.length }) : "Delete this study?",
     "The images are removed from the archive for good. This cannot be undone.",
-    h("ul", null, studies.slice(0, 10).map((s) => h("li", null, studyLine(s))), studies.length > 10 ? h("li", null, `and ${studies.length - 10} more`) : null),
-    many ? `Delete ${studies.length} studies` : "Delete the study", async () => {
+    h("ul", null, studies.slice(0, 10).map((s) => h("li", null, studyLine(s))), studies.length > 10 ? h("li", null, t("and {n} more", { n: studies.length - 10 })) : null),
+    many ? t("Delete {n} studies", { n: studies.length }) : "Delete the study", async () => {
       for (const s of studies) await api("DELETE", `/api/studies/${s.id}`);
-      toast(many ? `${studies.length} studies deleted.` : "Study deleted.");
+      toast(many ? t("{n} studies deleted.", { n: studies.length }) : "Study deleted.");
       done();
       archiveChanged();
     }, true);
@@ -4042,15 +4200,15 @@ async function openInstancesDialog(series) {
       picture.append(h("div", { class: "loading" }, "Loading the picture..."));
       fetch(`/api/instances/${image.id}/preview?width=1024`, { credentials: "same-origin" })
         .then(async (r) => {
-          if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || "No picture for this image.");
+          if (!r.ok) throw new Error(translateMessage((await r.json().catch(() => ({}))).error) || t("No picture for this image."));
           const url = URL.createObjectURL(await r.blob());
-          picture.replaceChildren(h("img", { src: url, alt: `Image ${image.number}` }));
+          picture.replaceChildren(h("img", { src: url, alt: t("Image {n}", { n: image.number || "" }) }));
         })
         .catch((e) => picture.replaceChildren(h("p", { class: "muted" }, e.message)));
     } else if (image.is_pdf) {
       picture.append(h("p", { class: "muted" }, "A PDF report."));
     }
-    viewer.replaceChildren(h("h3", null, `Image ${image.number || ""}`), actions, picture);
+    viewer.replaceChildren(h("h3", null, t("Image {n}", { n: image.number || "" })), actions, picture);
   }
 
   async function showTags(image) {
@@ -4067,7 +4225,7 @@ async function openInstancesDialog(series) {
       };
       filter.addEventListener("input", draw);
       draw();
-      viewer.replaceChildren(h("h3", null, `DICOM tags of image ${image.number || ""}`),
+      viewer.replaceChildren(h("h3", null, t("DICOM tags of image {n}", { n: image.number || "" })),
         h("div", { class: "actions" }, filter, h("button", { class: "btn small", type: "button", onclick: () => showImage(image) }, "Back to the image")),
         h("div", { class: "table-wrap tags-table" }, h("table", { class: "data" },
           h("thead", null, h("tr", null, h("th", null, "Tag"), h("th", null, "Name"), h("th", null, "Value"))), body)));
@@ -4078,9 +4236,9 @@ async function openInstancesDialog(series) {
 
   const list = h("div", { class: "instance-list" }, images.length ? images.map((image) => h("button", {
     type: "button", class: "btn small", onclick: () => showImage(image),
-  }, image.is_pdf ? `PDF ${image.number || ""}` : `Image ${image.number || "?"}`)) : h("p", { class: "muted" }, "No image."));
+  }, image.is_pdf ? `PDF ${image.number || ""}` : t("Image {n}", { n: image.number || "?" }))) : h("p", { class: "muted" }, "No image."));
   dialog.append(h("div", { class: "dialog-form" },
-    h("h2", null, `${series.description || "Series"} (${series.modality || "?"}): ${images.length} images`),
+    h("h2", null, t("{series} ({modality}): {n} images", { series: series.description || t("Series"), modality: series.modality || "?", n: images.length })),
     h("div", { class: "instances" }, list, viewer),
     h("div", { class: "dialog-actions" }, h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Close"))));
   dialog.addEventListener("close", () => dialog.remove());
@@ -4094,10 +4252,10 @@ function flattenTags(tags, depth = 0, out = []) {
   for (const [tag, item] of Object.entries(tags || {})) {
     const name = `${"  ".repeat(depth)}${item.Name || ""}`;
     if (item.Type === "Sequence") {
-      out.push([tag, name, `${(item.Value || []).length} item(s)`, depth]);
+      out.push([tag, name, t("{n} item(s)", { n: (item.Value || []).length }), depth]);
       (item.Value || []).forEach((child) => flattenTags(child, depth + 1, out));
     } else {
-      const value = item.Type === "String" ? item.Value : item.Type === "TooLong" ? "(too long to show)" : item.Type === "Null" ? "" : `(${item.Type || "binary"})`;
+      const value = item.Type === "String" ? item.Value : item.Type === "TooLong" ? t("(too long to show)") : item.Type === "Null" ? "" : `(${item.Type || "binary"})`;
       out.push([tag, name, value == null ? "" : String(value), depth]);
     }
   }
@@ -4139,7 +4297,7 @@ function openModifyDialog(kind, item) {
         const input = label.querySelector("input");
         if (input.value.trim() !== input.original) replace[input.dataset.tag] = input.value.trim();
       }
-      if (!Object.keys(replace).length) throw new Error("Nothing was changed.");
+      if (!Object.keys(replace).length) throw new Error(t("Nothing was changed."));
       const r = await api("POST", `/api/${kind}/${item.id}/modify`, { replace, keep_uids: keep.checked });
       followJob(r.job_id, kind === "studies" ? "Changing the study" : "Changing the series");
     });
@@ -4168,7 +4326,7 @@ function openMoveStudyDialog(study) {
   formDialog("Move the study to another patient", studyLine(study),
     [h("div", { class: "actions" }, query, h("button", { class: "btn small", type: "button", onclick: find }, "Find")), results],
     "Move the study", async () => {
-      if (!chosen) throw new Error("Choose the patient first.");
+      if (!chosen) throw new Error(t("Choose the patient first."));
       const r = await api("POST", `/api/studies/${study.id}/move`, { patient_from_study: chosen.id });
       followJob(r.job_id, "Moving the study");
     });
@@ -4181,7 +4339,7 @@ async function openMoveSeriesDialog(series, study) {
   const target = h("select", null, h("option", { value: "new" }, "A new study of this patient"), others.map((s) => h("option", { value: s.id }, studyLine(s))));
   const description = h("input", { maxlength: 64, placeholder: "Description of the new study" });
   target.addEventListener("change", () => { description.parentElement.hidden = target.value !== "new"; });
-  formDialog("Move the series", `${series.description || "Series"} (${series.modality})`,
+  formDialog("Move the series", `${series.description || t("Series")} (${series.modality})`,
     [h("label", null, "Move it to", target), h("label", null, "Description of the new study", description)],
     "Move the series", async () => {
       const r = await api("POST", `/api/series/${series.id}/move`, { study: target.value, description: description.value });
@@ -4207,14 +4365,14 @@ function openAnonymizeDialog(kind, item) {
 function openAddSeriesDialog(study) {
   const files = h("input", { type: "file", multiple: true, accept: "application/pdf,image/png,image/jpeg", required: true });
   const description = h("input", { maxlength: 64, placeholder: "Report, Photos..." });
-  formDialog("Add a series to the study", `${studyLine(study)}. PDF files become reports (one per file); PNG and JPEG pictures become one series of images.`,
+  formDialog("Add a series to the study", t("{study}. PDF files become reports (one per file); PNG and JPEG pictures become one series of images.", { study: studyLine(study) }),
     [h("label", null, "Files", files), h("label", null, "Series description", description)], "Add the series", async () => {
       const list = Array.from(files.files || []);
-      if (!list.length) throw new Error("Choose the files first.");
-      const read = (f) => new Promise((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(r.result); r.onerror = () => reject(new Error(`Cannot read ${f.name}`)); r.readAsDataURL(f); });
+      if (!list.length) throw new Error(t("Choose the files first."));
+      const read = (f) => new Promise((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(r.result); r.onerror = () => reject(new Error(t("Cannot read {file}", { file: f.name }))); r.readAsDataURL(f); });
       const data = await Promise.all(list.map(read));
       const r = await api("POST", `/api/studies/${study.id}/add-series`, { description: description.value, files: data });
-      toast(`Series added (${r.created} ${r.created === 1 ? "file" : "files"}).`);
+      toast(t(r.created === 1 ? "Series added ({n} file)." : "Series added ({n} files).", { n: r.created }));
       archiveChanged();
     });
 }
@@ -4253,7 +4411,7 @@ function buildRetrieveView() {
   const source = h("select", { name: "source", "aria-label": "System" }, h("option", { value: "" }, "Loading..."));
   api("GET", "/api/retrieve/sources").then((list) => {
     source.replaceChildren(...(list.length ? list.map((n) => h("option", { value: n.id },
-      [n.description || n.id, n.kind === "dicomweb" ? " (DICOMweb)" : n.aet ? ` (${n.aet} at ${n.host}:${n.port})` : ""].join(""))) : [h("option", { value: "" }, "No other system is set up in Orthanc")]));
+      [n.description || n.id, n.kind === "dicomweb" ? " (DICOMweb)" : n.aet ? ` ${t("({aet} at {address})", { aet: n.aet, address: `${n.host}:${n.port}` })}` : ""].join(""))) : [h("option", { value: "" }, "No other system is set up in Orthanc")]));
   }).catch(toastError);
   const box = (name, label, type = "text") => h("label", null, label, h("input", { name, type }));
   const form = h("form", {
@@ -4371,7 +4529,7 @@ function openWorklistDialog(w, reload) {
 function buildOrthancLogPanel() {
   const panel = h("section", { class: "panel pad", id: "orthanc-log" }, h("h2", null, "Orthanc log"), h("div", { class: "loading" }, "Loading..."));
   const fileSelect = h("select", { "aria-label": "Log file" });
-  const lineCount = h("select", { "aria-label": "Lines" }, [200, 500, 2000, 5000].map((n) => h("option", { value: n, selected: n === 500 }, `last ${n} lines`)));
+  const lineCount = h("select", { "aria-label": "Lines" }, [200, 500, 2000, 5000].map((n) => h("option", { value: n, selected: n === 500 }, t("last {n} lines", { n }))));
   const level = h("select", { "aria-label": "Levels" },
     h("option", { value: "" }, "every level"), h("option", { value: "EW" }, "warnings and errors"), h("option", { value: "E" }, "errors only"));
   const search = h("input", { type: "search", placeholder: "Search the lines", "aria-label": "Search the lines" });
@@ -4387,7 +4545,7 @@ function buildOrthancLogPanel() {
     const q = search.value.trim().toLowerCase();
     const shown = lines.filter((l) => (!level.value || level.value.includes(levelOf(l))) && (!q || l.toLowerCase().includes(q)));
     box.replaceChildren(...shown.map((l) => h("span", { class: `log-line log-${levelOf(l) || "x"}` }, l, "\n")));
-    if (!shown.length) box.textContent = lines.length ? "No line matches." : "The file is empty.";
+    if (!shown.length) box.textContent = t(lines.length ? "No line matches." : "The file is empty.");
     box.scrollTop = box.scrollHeight; // the newest lines
   }
 
@@ -4406,13 +4564,16 @@ function buildOrthancLogPanel() {
       return;
     }
     if (!r.file) {
-      panel.replaceChildren(h("h2", null, "Orthanc log"), h("p", { class: "muted" }, `No log file in ${r.folder}. Orthanc writes them there only when it is started with --logdir (or --logfile).`));
+      panel.replaceChildren(h("h2", null, "Orthanc log"), h("p", { class: "muted" }, t("No log file in {folder}. Orthanc writes them there only when it is started with --logdir (or --logfile).", { folder: r.folder })));
       return;
     }
     fileSelect.replaceChildren(...r.files.map((f) => h("option", { value: f.name, selected: f.name === r.file },
       `${f.name} (${formatBytes(f.size)}, ${formatTimestamp(f.modified)})`)));
     lines = r.lines;
-    info.textContent = `${r.lines.length} lines${r.truncated ? " (the end of the file)" : ""} of ${r.file}, ${formatBytes(r.size)}, last written ${formatTimestamp(r.modified)}. Every read is recorded in the audit log: the log can contain patient names and IDs.`;
+    info.textContent = t(r.truncated
+      ? "{n} lines (the end of the file) of {file}, {size}, last written {date}. Every read is recorded in the audit log: the log can contain patient names and IDs."
+      : "{n} lines of {file}, {size}, last written {date}. Every read is recorded in the audit log: the log can contain patient names and IDs.",
+    { n: r.lines.length, file: r.file, size: formatBytes(r.size), date: formatTimestamp(r.modified) });
     download.href = `/api/admin/system/log/download?file=${encodeURIComponent(r.file)}`;
     if (!panel.contains(box)) {
       panel.replaceChildren(h("h2", null, "Orthanc log"),
@@ -4438,7 +4599,7 @@ function buildJobsView() {
       const jobs = await api("GET", "/api/admin/jobs");
       const act = (j, action, label) => h("button", {
         class: "btn small", type: "button",
-        onclick: async () => { try { await api("POST", `/api/admin/jobs/${j.id}/${action}`); toast(`${label}: ${j.type}`); load(); } catch (e) { toastError(e); } },
+        onclick: async () => { try { await api("POST", `/api/admin/jobs/${j.id}/${action}`); toast(`${lookup(label)}: ${j.type}`); load(); } catch (e) { toastError(e); } },
       }, label);
       container.replaceChildren(jobs.length ? h("div", { class: "table-wrap" }, h("table", { class: "data" },
         h("thead", null, h("tr", null, ["Created", "Type", "State", "Progress", "Run time", "Details", ""].map((t) => h("th", null, t)))),
@@ -4470,10 +4631,10 @@ function orthancTime(text) {
 function jobSummary(content) {
   if (!content || typeof content !== "object") return "";
   const parts = [];
-  if (content.RemoteAet) parts.push(`to ${content.RemoteAet}`);
-  if (content.Peer) parts.push(`to ${[].concat(content.Peer).join(", ")}`);
-  if (content.InstancesCount != null) parts.push(`${content.InstancesCount} images`);
-  if (content.FailedInstancesCount) parts.push(`${content.FailedInstancesCount} failed`);
+  if (content.RemoteAet) parts.push(t("to {target}", { target: content.RemoteAet }));
+  if (content.Peer) parts.push(t("to {target}", { target: [].concat(content.Peer).join(", ") }));
+  if (content.InstancesCount != null) parts.push(imagesCount(content.InstancesCount));
+  if (content.FailedInstancesCount) parts.push(t("{n} failed", { n: content.FailedInstancesCount }));
   if (content.Description) parts.push(content.Description);
   return parts.join(", ");
 }
@@ -4489,7 +4650,7 @@ function buildSystemView() {
     const mb = (v) => (v == null ? null : formatBytes(Number(v) * 1024 * 1024));
     const level = h("select", { "aria-label": "Log level" }, ["default", "verbose", "trace"].map((l) => h("option", { value: l, selected: l === info.log_level }, l)));
     level.addEventListener("change", async () => {
-      try { await api("PUT", "/api/admin/system/log-level", { level: level.value }); toast(`Orthanc's log level is now ${level.value}.`); } catch (e) { toastError(e); }
+      try { await api("PUT", "/api/admin/system/log-level", { level: level.value }); toast(t("Orthanc's log level is now {level}.", { level: level.value })); } catch (e) { toastError(e); }
     });
     const metrics = h("pre", { class: "raw-box", hidden: true });
     const panels = [
@@ -4506,7 +4667,7 @@ function buildSystemView() {
           row("Patients", st.CountPatients), row("Studies", st.CountStudies), row("Series", st.CountSeries), row("Images", st.CountInstances),
           row("Disk used", st.TotalDiskSizeMB != null ? mb(st.TotalDiskSizeMB) : st.TotalDiskSize != null ? formatBytes(Number(st.TotalDiskSize)) : null),
           row("Uncompressed size", st.TotalUncompressedSizeMB != null ? mb(st.TotalUncompressedSizeMB) : null))),
-      h("section", { class: "panel pad" }, h("h2", null, `Plugins (${(info.plugins || []).length})`),
+      h("section", { class: "panel pad" }, h("h2", null, t("Plugins ({n})", { n: (info.plugins || []).length })),
         h("div", { class: "table-wrap" }, h("table", { class: "data" },
           h("thead", null, h("tr", null, h("th", null, "Plugin"), h("th", null, "Version"), h("th", null, "Description"))),
           h("tbody", null, (info.plugins || []).map((p) => h("tr", null, h("td", { class: "mono" }, p.name), h("td", null, p.version || dash()), h("td", null, p.description || dash()))))))),
@@ -4515,7 +4676,7 @@ function buildSystemView() {
         h("button", {
           class: "btn small", type: "button",
           onclick: async () => {
-            try { const r = await fetch("/api/admin/system/metrics", { credentials: "same-origin" }); metrics.textContent = r.ok ? await r.text() : (await r.json()).error; } catch (e) { metrics.textContent = e.message; }
+            try { const r = await fetch("/api/admin/system/metrics", { credentials: "same-origin" }); metrics.textContent = r.ok ? await r.text() : translateMessage((await r.json()).error); } catch (e) { metrics.textContent = e.message; }
             metrics.hidden = false;
           },
         }, "Show the metrics"), metrics),
@@ -4530,7 +4691,7 @@ function buildSystemView() {
           const text = await r.text();
           let shown = text;
           try { shown = JSON.stringify(JSON.parse(text), null, 2); } catch { /* text */ }
-          out.textContent = r.ok ? shown : (JSON.parse(text).error || text);
+          out.textContent = r.ok ? shown : (translateMessage(JSON.parse(text).error) || text);
         } catch (e) { out.textContent = e.message; }
       };
       path.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); read(); } });
@@ -4555,6 +4716,7 @@ function buildSystemView() {
 (async function boot() {
   readSearchFromAddress(); // a link with filters (e.g. /?patient_id=P-001) opens the Search page, after signing in if needed
   try { state.brand = await api("GET", "/api/public"); } catch { /* keep the default identity */ }
+  await loadLanguage(chosenLanguage());
   applyBrand();
   try { state.user = await api("GET", "/api/me"); } catch { state.user = null; }
   renderApp();

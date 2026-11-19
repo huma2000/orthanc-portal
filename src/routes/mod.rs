@@ -22,7 +22,7 @@
 //! ```text
 //! -- intranet listener (staff) --
 //! /                        web UI (single page, embedded in the binary)
-//! /static/app.js|css       UI assets
+//! /static/app.js|css       UI assets (and /static/i18n/es.json, the Spanish translation)
 //! /api/login|logout|me     session endpoints
 //! /api/studies, /series    consult / search               (permission: read)
 //! /api/stats               number of studies in the PACS  (permission: read)
@@ -40,7 +40,7 @@
 //!
 //! -- internet listener (guests with an invitation) --
 //! /s/<token>               the invitation page (asks for the password)
-//! /static/share.js|app.css assets of that page
+//! /static/share.js|app.css assets of that page (and /static/i18n/es.json)
 //! /api/share/<token>/*     status, unlock (password), study details, ZIP download
 //! /dicom-web/*, /wado, /ohif/*   the viewer, confined to the shared study (routes/viewer.rs)
 //! /branding/*, /api/public, /healthz   public
@@ -102,6 +102,8 @@ pub fn router(state: AppState, audience: Audience) -> Router {
 fn common_routes() -> Router<AppState> {
     Router::new()
         .route("/static/app.css", get(|headers: HeaderMap| serve_static(&APP_CSS, headers)))
+        // Translations of the interface (both pages use them: the invitation page too).
+        .route("/static/i18n/es.json", get(|headers: HeaderMap| serve_static(&I18N_ES, headers)))
         .route("/favicon.svg", get(|headers: HeaderMap| serve_static(&DEFAULT_MARK, headers)))
         .route("/healthz", get(|| async { "ok" }))
         // --- public branding images (login / invitation pages and the browser tab need them) ---
@@ -293,6 +295,12 @@ static SHARE_JS: StaticFile = StaticFile {
 static APP_CSS: StaticFile = StaticFile {
     content_type: "text/css; charset=utf-8",
     body: include_str!("../../static/app.css"),
+    etag: OnceLock::new(),
+};
+/// Spanish (Spain): English text -> translation (the keys are the English texts of app.js, share.js and the server's messages).
+static I18N_ES: StaticFile = StaticFile {
+    content_type: "application/json; charset=utf-8",
+    body: include_str!("../../static/i18n/es.json"),
     etag: OnceLock::new(),
 };
 static DEFAULT_MARK: StaticFile =

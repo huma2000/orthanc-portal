@@ -86,6 +86,45 @@ pub enum NameFormat {
     Dicom,
 }
 
+/// The language of the interface (Settings > Appearance). Each person can still pick another one
+/// in their browser; invitation emails and the invitation page use this one by default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Language {
+    /// English
+    #[default]
+    En,
+    /// Spanish (Spain)
+    Es,
+}
+
+impl Language {
+    /// `"en"` / `"es"`, as in the settings and the translation file names.
+    pub fn code(self) -> &'static str {
+        match self {
+            Language::En => "en",
+            Language::Es => "es",
+        }
+    }
+
+    /// What a browser without JavaScript shows (the pages are built by JavaScript).
+    pub fn noscript(self) -> &'static str {
+        match self {
+            Language::En => "This page needs JavaScript.",
+            Language::Es => "Esta página necesita JavaScript.",
+        }
+    }
+
+    /// `"es"`, `"es-ES"`, `"ES"`... (anything else, or empty = none).
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().get(..2) {
+            Some("en") => Some(Language::En),
+            Some("es") => Some(Language::Es),
+            _ => None,
+        }
+    }
+}
+
 /// The OHIF modes that can be offered (each one a button), with the address of each.
 pub const OHIF_MODES: [&str; 6] = ["viewer", "mpr", "volume", "tmtv", "segmentation", "microscopy"];
 
@@ -526,6 +565,9 @@ pub struct Settings {
     pub date_format: DateFormat,
     #[serde(default)]
     pub name_format: NameFormat,
+    /// The language of the interface, the invitation page and the invitation emails.
+    #[serde(default)]
+    pub language: Language,
     /// Extra CSS rules added after the portal's own (staff portal and invitation page).
     #[serde(default)]
     pub custom_css: String,
@@ -734,6 +776,7 @@ impl Settings {
             download_name_template: default_download_name(),
             date_format: DateFormat::Iso,
             name_format: NameFormat::LastFirst,
+            language: Language::En,
             custom_css: String::new(),
         }
     }
@@ -753,6 +796,9 @@ impl Settings {
         }
         if let Some(v) = env_opt("ORTHANC_LOG_DIR") {
             s.orthanc_log_dir = v;
+        }
+        if let Some(v) = env_opt("PORTAL_LANGUAGE") {
+            s.language = Language::parse(&v).ok_or_else(|| anyhow!("PORTAL_LANGUAGE must be en or es"))?;
         }
         if let Some(v) = env_opt("BIND_ADDR") {
             s.bind_addr = v;
@@ -1442,6 +1488,11 @@ mod tests {
         assert!(!ok(json!({ "custom_css": "@import 'http://evil';" })));
         assert!(!ok(json!({ "custom_css": "body { background: url(http://x) }" })));
         assert!(!ok(json!({ "date_format": "yyyy" })));
+        assert!(ok(json!({ "language": "es" })) && ok(json!({ "language": "en" })));
+        assert!(!ok(json!({ "language": "fr" })), "only the languages the portal has");
+        assert_eq!(Language::parse(" es-ES "), Some(Language::Es));
+        assert_eq!(Language::parse("EN"), Some(Language::En));
+        assert_eq!(Language::parse("de"), None);
         assert!(ok(json!({ "meddream_url": "https://md.example.com/?study={study_uid}" })));
         assert!(!ok(json!({ "meddream_url": "javascript:alert(1)//{study_uid}" })));
         assert!(!ok(json!({ "meddream_url": "https://md.example.com/" })), "no {{study_uid}}");
