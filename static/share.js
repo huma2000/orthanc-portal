@@ -17,6 +17,8 @@
 const root = document.getElementById("app");
 /** The random part of the address: /s/<48 hex characters>. */
 const TOKEN = (location.pathname.match(/^\/s\/([0-9a-f]{48})\/?$/i) || [])[1] || "";
+/** An UPLOAD link instead (/u/<48 hex characters>): the visitor sends studies in (see the end of this file). */
+const UPLOAD_TOKEN = (location.pathname.match(/^\/u\/([0-9a-f]{48})\/?$/i) || [])[1] || "";
 
 const state = {
   brand: { name: "", show_name: true, logo: null },
@@ -425,6 +427,167 @@ function applyTheme(theme) {
   if (isColor(t.background)) html.style.setProperty("--paper", t.background);
 }
 
+/* ---------------------------------------------------------------- upload links */
+
+/*
+ * An upload link: the visitor types the password, then drops files or a whole folder (a CD).
+ * Each file is sent on its own; the server answers only "accepted" or "not a DICOM file", nothing
+ * about the archive. Two files travel at a time.
+ */
+const UPLOAD_API = () => `/api/upload/${UPLOAD_TOKEN}`;
+
+function formatSize(bytes) {
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes, unit = 0;
+  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1; }
+  return `${value.toFixed(unit ? 1 : 0)} ${units[unit]}`;
+}
+
+function showUploadPasswordForm() {
+  redraw = showUploadPasswordForm;
+  const error = h("div", { class: "form-error", role: "alert", hidden: true });
+  const input = h("input", {
+    id: "upload-password", name: "password", type: "text", autocomplete: "off", autocapitalize: "characters",
+    spellcheck: "false", placeholder: "XXXX-XXXX-XXXX", required: true,
+  });
+  const button = h("button", { class: "btn primary big", type: "submit" }, "Continue");
+  const form = h("form", {
+    class: "share-password",
+    onsubmit: async (event) => {
+      event.preventDefault();
+      button.disabled = true;
+      error.hidden = true;
+      try {
+        await api("POST", `${UPLOAD_API()}/unlock`, { password: input.value });
+        await showUploader();
+      } catch (e) {
+        if (e.status === 410) return message("This link is no longer available", e.message);
+        error.textContent = e.message;
+        error.hidden = false;
+        button.disabled = false;
+        input.select();
+      }
+    },
+  }, error, h("label", { for: "upload-password" }, "Password", input), button);
+  draw(h("section", { class: "share-card" },
+    h("h1", null, "Send us your images"),
+    h("p", { class: "muted" }, "Enter the password you were given. Capital letters, spaces and dashes do not matter."),
+    form));
+  input.focus();
+}
+
+/** Every file of a drop (folders included, as in the staff portal). */
+async function droppedFiles(dataTransfer) {
+  const entries = Array.from(dataTransfer.items || []).map((i) => (i.webkitGetAsEntry ? i.webkitGetAsEntry() : null)).filter(Boolean);
+  if (!entries.length) return Array.from(dataTransfer.files);
+  const files = [];
+  async function walk(entry) {
+    if (entry.isFile) files.push(await new Promise((resolve, reject) => entry.file(resolve, reject)));
+    else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      for (;;) {
+        const batch = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+        if (!batch.length) break;
+        for (const child of batch) await walk(child);
+      }
+    }
+  }
+  for (const entry of entries) await walk(entry);
+  return files;
+}
+
+async function showUploader() {
+  let summary;
+  try {
+    summary = await api("GET", `${UPLOAD_API()}/summary`);
+  } catch (e) {
+    if (e.status === 401) return showUploadPasswordForm();
+    if (e.status === 410) return message("This link is no longer available", e.message);
+    return message("The page cannot be shown right now", e.message);
+  }
+  redraw = showUploader;
+  state.clockOffset = summary.now - Date.now() / 1000;
+  state.expiresAt = summary.expires_at;
+  const counts = { sent: 0, skipped: 0, failed: 0, bytes: 0 };
+  const queue = [];
+  let running = 0, stopped = "";
+
+  const progress = h("div", { class: "upload-summary", "aria-live": "polite" });
+  const used = h("div", { class: "muted" });
+  function paint() {
+    const waiting = queue.length + running;
+    progress.replaceChildren(
+      h("div", null, h("b", null, t("{n} files sent", { n: counts.sent })), waiting ? ` · ${t("{n} to go", { n: waiting })}` : ""),
+      counts.skipped ? h("div", { class: "muted" }, t("{n} files skipped (not images: that is normal for the programs on a CD)", { n: counts.skipped })) : null,
+      counts.failed ? h("div", { class: "form-error" }, t("{n} files could not be sent", { n: counts.failed })) : null,
+      stopped ? h("div", { class: "form-error" }, stopped) : null,
+      !waiting && counts.sent && !stopped ? h("div", { class: "notice" }, "Thank you: the files were received. You can send more, or close this page.") : null);
+    used.textContent = t("Sent with this link so far: {used} of {max}.", { used: formatSize(summary.bytes + counts.bytes), max: formatSize(summary.max_bytes) });
+  }
+
+  async function sendOne(file) {
+    if (file.size > summary.max_file_bytes) { counts.failed += 1; return; }
+    try {
+      const response = await fetch(`${UPLOAD_API()}/file`, {
+        method: "POST", credentials: "same-origin", body: file,
+        headers: { "X-Requested-With": "portal", "Content-Type": "application/octet-stream" },
+      });
+      const data = await response.json().catch(() => ({}));
+      if (response.ok) {
+        if (data.accepted) { counts.sent += 1; counts.bytes += file.size; } else counts.skipped += 1;
+      } else if ([401, 403, 410].includes(response.status)) {
+        stopped = translateMessage(data.error) || t("This link cannot receive more.");
+        queue.length = 0;
+      } else counts.failed += 1;
+    } catch { counts.failed += 1; }
+  }
+  function pump() {
+    while (running < 2 && queue.length) {
+      const file = queue.shift();
+      running += 1;
+      sendOne(file).finally(() => { running -= 1; paint(); pump(); });
+    }
+    paint();
+  }
+  function add(files) {
+    if (stopped) return;
+    // Hidden system files of a folder (Thumbs.db, .DS_Store) are left out.
+    queue.push(...Array.from(files).filter((f) => f.size > 0 && !/^(\.|thumbs\.db$|desktop\.ini$)/i.test(f.name)));
+    pump();
+  }
+
+  const fileInput = h("input", { type: "file", multiple: true, hidden: true, onchange: (e) => { add(e.target.files); e.target.value = ""; } });
+  const folderInput = h("input", { type: "file", multiple: true, webkitdirectory: true, hidden: true, onchange: (e) => { add(e.target.files); e.target.value = ""; } });
+  const zone = h("div", { class: "dropzone" },
+    h("h2", null, "Drop the files or the whole folder here"),
+    h("p", { class: "muted" }, "From a CD or a USB stick: drop the whole disc folder. DICOM files and ZIP archives of them are accepted; other files are skipped."),
+    h("div", { class: "buttons" },
+      h("button", { class: "btn primary", type: "button", onclick: () => fileInput.click() }, "Choose files"),
+      h("button", { class: "btn", type: "button", onclick: () => folderInput.click() }, "Choose a folder")),
+    fileInput, folderInput);
+  zone.addEventListener("dragover", (e) => { e.preventDefault(); zone.classList.add("over"); });
+  zone.addEventListener("dragleave", () => zone.classList.remove("over"));
+  zone.addEventListener("drop", async (e) => { e.preventDefault(); zone.classList.remove("over"); add(await droppedFiles(e.dataTransfer)); });
+
+  const remaining = h("b", { id: "share-remaining" });
+  draw(h("section", { class: "share-card" },
+    h("h1", null, "Send us your images"),
+    h("p", null, "The files go straight to the practice that sent you this link. You will not see anything of their archive."),
+    zone, progress,
+    h("div", { class: "share-meta" }, h("div", null, "This link expires in ", remaining), used),
+    h("p", { class: "muted" }, "Keep this page open until every file is sent."),
+    h("button", { class: "btn small", type: "button", onclick: async () => {
+      try { await api("POST", `${UPLOAD_API()}/lock`); } catch { /* leaving anyway */ }
+      location.reload();
+    } }, "Close this session")));
+  paint();
+  // The countdown of paintCountdown() (it finds #share-remaining).
+  state.downloads = null;
+  paintCountdown();
+  clearInterval(state.timer);
+  state.timer = setInterval(() => paintCountdown(), 1000);
+}
+
 /* ---------------------------------------------------------------- start */
 
 (async function start() {
@@ -435,6 +598,18 @@ function applyTheme(theme) {
     applyTheme(info.theme);
     await loadLanguage(chosenLanguage(info));
   } catch { /* the page still works without branding (in English) */ }
+  if (UPLOAD_TOKEN) {
+    let status;
+    try {
+      status = (await api("GET", `${UPLOAD_API()}/status`)).state;
+    } catch (e) {
+      return message("The page cannot be shown right now", e.message);
+    }
+    if (status === "open") return showUploader();
+    if (status === "locked") return showUploadPasswordForm();
+    if (status === "expired") return message("This link has expired", "The time of this link is over. Ask the person who sent it for a new one.");
+    return message("This link is not available", "The link is not valid or was withdrawn. Ask the person who sent it for a new one.");
+  }
   if (!TOKEN) return message("Open your invitation link", "This address only serves studies that were shared with you. Use the link you were sent.");
   let status;
   try {

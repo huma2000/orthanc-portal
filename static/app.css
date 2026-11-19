@@ -808,3 +808,48 @@ dialog.wide-dialog { width: min(1100px, calc(100vw - 2rem)); }
 .language-select option { color: var(--ink); background: var(--panel); }
 .login-language { margin-top: 0.9rem; display: flex; justify-content: flex-end; }
 .share-head .language-select { margin-left: auto; }
+/* Home page: "Recently viewed" above the recent studies (hidden while the list is empty) */
+.home:has(> .recently-viewed:not([hidden])) { grid-template-rows: auto minmax(180px, 1fr) auto auto; }
+.recently-viewed .recent-body { max-height: 16rem; }
+.recently-viewed .recent-head h2 { font-size: clamp(1.1rem, 2vw, 1.4rem); }
+/* Two-step sign-in: QR code, key, recovery codes */
+.two-factor-step { display: grid; gap: 0.8rem; }
+.totp-setup { display: grid; gap: 0.6rem; justify-items: start; }
+.totp-setup ol { margin: 0; padding-left: 1.2rem; display: grid; gap: 0.4rem; }
+.totp-setup li.plain { list-style: none; margin-left: -1.2rem; }
+img.qr { background: #fff; padding: 6px; border-radius: 6px; border: 1px solid var(--line); }
+.recovery-codes { columns: 2; list-style: none; padding: 0; margin: 0; font-size: 1.05rem; }
+.recovery-codes li { padding: 0.15rem 0; }
+.qr-block { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
+.qr-block > div { flex: 1 1 12rem; display: grid; gap: 0.5rem; justify-items: start; }
+dialog.wide-dialog { width: min(1000px, calc(100vw - 2rem)); }
+.account .panel { padding: 1.1rem 1.2rem; display: grid; gap: 0.7rem; }
+.account .view, .account > .panel + .panel { margin-top: 1rem; }
+/* Settings > Auto-forward */
+.forward-rules { display: grid; gap: 0.8rem; }
+.forward-rule { border: 1px solid var(--line); border-radius: 8px; padding: 0.7rem; display: grid; gap: 0.6rem; background: var(--panel-alt); }
+.forward-rule-head { display: flex; gap: 0.6rem; align-items: center; }
+.forward-rule-head input:not([type]) { flex: 1; }
+.forward-rule-grid { display: grid; gap: 0.6rem; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); }
+/* Configuration > Statistics */
+.stat-tiles { display: grid; gap: 0.8rem; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); }
+.stat-tile { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 0.8rem 1rem; display: grid; gap: 0.2rem; }
+.stat-tile b { font-size: 1.5rem; font-weight: 600; }
+.stat-tile span { color: var(--ink-soft); font-size: 0.9rem; }
+.chart-grid { display: grid; gap: 0.8rem; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); margin-top: 1rem; }
+.chart-card { margin: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 0.8rem 1rem; display: grid; gap: 0.5rem; }
+.month-bars { width: 100%; height: auto; display: block; }
+.month-bars .bar { fill: var(--accent); }
+.month-bars .hit { fill: transparent; }
+.month-bars .hit:hover + .bar, .month-bars .hit:focus + .bar { fill: var(--accent-hover); }
+.month-bars .hit:focus { outline: none; }
+.month-bars .axis { stroke: var(--line-strong); stroke-width: 1; }
+.month-bars .tick { fill: var(--ink-soft); font-size: 10px; }
+.stats-table th[scope="row"] { text-align: left; white-space: nowrap; font-weight: 500; }
+.stat-tops { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); margin-top: 1rem; }
+.stat-tops .panel { padding: 1rem 1.2rem; }
+.top-list { margin: 0.5rem 0 0; padding-left: 1.3rem; display: grid; gap: 0.3rem; }
+.view > .stat-tiles, .view > .panel { margin-top: 1rem; }
+/* Upload link page (internet side) */
+.upload-summary { display: grid; gap: 0.3rem; }
+@media (forced-colors: active) { .month-bars .bar { fill: CanvasText; } }

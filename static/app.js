@@ -508,9 +508,15 @@ function buildLogin() {
       submit.disabled = true;
       error.hidden = true;
       try {
-        state.user = await api("POST", "/api/login", { username: username.value, password: password.value });
-        state.notice = "";
-        renderApp();
+        const result = await api("POST", "/api/login", { username: username.value, password: password.value });
+        // Two-step sign-in: the password was right, the code of the authenticator app comes next.
+        if (result && result.two_factor) {
+          const step = buildTwoFactorStep(result, finishLogin);
+          form.replaceWith(step);
+          step.querySelector("input[name=code]").focus();
+          return;
+        }
+        finishLogin(result);
       } catch (e) {
         error.textContent = e.message;
         error.hidden = false;
@@ -528,6 +534,86 @@ function buildLogin() {
       state.brand.login_notice ? h("p", { class: "login-notice" }, state.brand.login_notice) : null,
       form,
       languageMenu() ? h("div", { class: "login-language" }, languageMenu()) : null));
+}
+
+/** Signed in: draw the portal (and show the recovery codes of a two-step sign-in set up just now). */
+function finishLogin(me, recoveryCodes) {
+  state.user = me;
+  state.notice = "";
+  renderApp();
+  if (recoveryCodes && recoveryCodes.length) showRecoveryCodes(recoveryCodes);
+}
+
+/** An SVG text (a QR code drawn by the server) as a picture. */
+function svgImage(svgText, alt) {
+  const img = h("img", { class: "qr", alt, width: 220, height: 220 });
+  img.src = URL.createObjectURL(new Blob([svgText], { type: "image/svg+xml" }));
+  img.addEventListener("load", () => URL.revokeObjectURL(img.src), { once: true });
+  return img;
+}
+
+/** The QR code and the secret of a two-step sign-in being set up (`material` = { qr, secret }). */
+function twoFactorSetupBlock(material) {
+  return h("div", { class: "totp-setup" },
+    material.qr ? svgImage(material.qr, t("QR code to scan with an authenticator app")) : null,
+    h("ol", null,
+      h("li", null, "Install an authenticator app on your phone if you do not have one (Microsoft Authenticator, Google Authenticator, FreeOTP...)."),
+      h("li", null, "In the app, add an account and scan this QR code. Cannot scan? Type this key instead:"),
+      h("li", { class: "plain" }, h("span", { class: "secret-box" }, h("span", { class: "password mono" }, material.secret), copyButton("Copy key", () => material.secret.replaceAll(" ", "")))),
+      h("li", null, "Type the 6-digit code the app shows to confirm.")));
+}
+
+/**
+ * The second step of the sign-in: the code of the app, or the set-up when the portal requires it and
+ * this account has none yet. `done(me, recoveryCodes)` is called once signed in.
+ */
+function buildTwoFactorStep(result, done) {
+  const setup = result.two_factor === "setup";
+  const error = h("div", { class: "form-error", role: "alert", hidden: true });
+  const code = h("input", { name: "code", autocomplete: "one-time-code", inputmode: "numeric", required: true, maxlength: 20, spellcheck: "false", placeholder: "123456" });
+  const submit = h("button", { class: "btn primary", type: "submit" }, setup ? "Confirm and sign in" : "Sign in");
+  return h("form", {
+    class: "two-factor-step",
+    onsubmit: async (event) => {
+      event.preventDefault();
+      submit.disabled = true;
+      error.hidden = true;
+      try {
+        const me = await api("POST", "/api/login/two-factor", { ticket: result.ticket, code: code.value });
+        const codes = me.recovery_codes;
+        delete me.recovery_codes;
+        done(me, codes);
+      } catch (e) {
+        error.textContent = e.message;
+        error.hidden = false;
+        submit.disabled = false;
+        code.select();
+      }
+    },
+  },
+    h("h2", null, "Two-step sign-in"),
+    setup
+      ? [h("p", null, "This portal asks for a code from your phone at every sign-in, on top of the password. Set it up now (it takes a minute):"), twoFactorSetupBlock(result)]
+      : h("p", { class: "muted" }, "Enter the 6-digit code shown by the authenticator app on your phone. Lost your phone? Type one of your recovery codes instead."),
+    error,
+    h("label", null, "Code", code),
+    submit,
+    h("button", { class: "btn small", type: "button", onclick: () => { state.notice = ""; renderApp(); } }, "Start again"));
+}
+
+/** The recovery codes, shown once (after setting up two-step sign-in, or asking for new ones). */
+function showRecoveryCodes(codes) {
+  const text = codes.join("\n");
+  const dialog = h("dialog", null, h("div", { class: "dialog-form" },
+    h("h2", null, "Your recovery codes"),
+    h("p", null, "If you lose your phone, each of these codes signs you in once instead of the code of the app. Keep them somewhere safe (printed, or in a password manager): they are shown only now."),
+    h("ul", { class: "recovery-codes" }, codes.map((c) => h("li", { class: "mono" }, c))),
+    h("div", { class: "dialog-actions" },
+      copyButton("Copy the codes", () => text),
+      h("button", { class: "btn primary", type: "button", onclick: () => dialog.close() }, "I have saved them"))));
+  dialog.addEventListener("close", () => dialog.remove());
+  document.body.append(dialog);
+  dialog.showModal();
 }
 
 async function signOut() {
@@ -604,6 +690,10 @@ const ICONS = {
   pdf: ["M6 2.5h8l4.5 4.5v14.5H6z", "M14 2.5V7h4.5", "M9 13h6", "M9 16.5h6"],            // a document
   retrieve: ["M12 3v11", "M7.5 9.5 12 14l4.5-4.5", "M3 14.5h4v5h10v-5h4"],               // into this archive
   worklist: ["M8 4.5h11", "M8 10h11", "M8 15.5h11", { c: [4.5, 4.5, 1] }, { c: [4.5, 10, 1] }, { c: [4.5, 15.5, 1] }, "M3 20.5h18"],
+  account: [{ c: [12, 12, 9] }, { c: [12, 10, 3] }, "M6.6 18.3c1.3-2.1 3.1-3.1 5.4-3.1s4.1 1 5.4 3.1"], // my account
+  qr: ["M4 4h6v6H4z", "M14 4h6v6h-6z", "M4 14h6v6H4z", "M14 14h2v2h-2z", "M18 18h2v2h-2z", "M14 18h2", "M18 14h2"],
+  disc: [{ c: [12, 12, 9] }, { c: [12, 12, 2.5] }, "M12 3a9 9 0 0 1 9 9"],                    // patient CD / USB
+  inbox: ["M3.5 13.5 6 5h12l2.5 8.5V19h-17z", "M3.5 13.5h5l1 2.5h5l1-2.5h5", "M12 6.5v5", "M9.8 9.4 12 11.6l2.2-2.2"], // files coming in
 };
 
 /**
@@ -679,6 +769,7 @@ const SIMPLE_PAGES = [
   { id: "transfers", label: "Transfers", icon: "transfers", needs: null, when: () => can("send") || !!opts().retrieve, build: buildTransfersView },
   { id: "retrieve", label: "Retrieve", icon: "retrieve", needs: null, when: () => !!opts().retrieve, build: buildRetrieveView },
   { id: "worklists", label: "Worklists", icon: "worklist", needs: null, when: () => !!opts().worklists, build: buildWorklistsView },
+  { id: "account", label: "My account", icon: "account", needs: null, bottom: true, build: buildAccountView },
   { id: "help", label: "Help", icon: "help", needs: null, bottom: true, build: buildHelpView },
   { id: "settings", label: "Configuration", icon: "settings", needs: "admin", bottom: true, build: buildSettingsView },
 ];
@@ -807,7 +898,9 @@ function autoRefresh(key, node, refresh) {
   const timer = setInterval(() => {
     if (!button.isConnected || !node.isConnected) { clearInterval(timer); return; }
     if (!on) return;
-    const waiting = document.hidden || !!document.querySelector("dialog[open]") || !!node.querySelector("tr.series-row:not([hidden])");
+    // Series unfolded anywhere on the page (the list itself, or "Recently viewed" above it) also wait.
+    const waiting = document.hidden || !!document.querySelector("dialog[open]") || !!node.querySelector("tr.series-row:not([hidden])")
+      || !!document.querySelector("main tr.series-row:not([hidden])");
     if (waiting) { show(true); return; }
     if (left <= 0) left = seconds; // "refreshing" was shown for one second
     left -= 1;
@@ -820,6 +913,25 @@ function autoRefresh(key, node, refresh) {
 function buildHomeView() {
   const options = simpleOptions();
   const parts = [];
+
+  // What this person opened last (their own list; Settings > Appearance sets its length).
+  if (can("read") && state.user.features.recently_viewed > 0) {
+    const body = h("div", { class: "recent-body" });
+    const section = h("section", { class: "recent recently-viewed", "aria-labelledby": "viewed-title", hidden: true },
+      h("div", { class: "recent-head" },
+        h("h2", { id: "viewed-title" }, "Recently viewed"),
+        h("div", { class: "head-actions" },
+          h("button", { class: "btn small", type: "button", onclick: async () => {
+            try { await api("DELETE", "/api/recent"); section.hidden = true; } catch (e) { toastError(e); }
+          } }, "Clear the list"))),
+      body);
+    api("GET", "/api/recent").then((list) => {
+      if (!list.length) return;
+      body.replaceChildren(renderStudiesTable(list));
+      section.hidden = false;
+    }).catch(() => { /* the list is a convenience: nothing to say when it cannot be read */ });
+    parts.push(section);
+  }
 
   if (can("read")) {
     const body = h("div", { class: "recent-body" }, h("div", { class: "loading" }, "Loading..."));
@@ -885,8 +997,22 @@ function studyCard(study) {
     study.modalities.length ? h("div", { class: "card-chips" }, study.modalities.map(chip)) : null);
 }
 
+/**
+ * "I opened this study": goes to the top of my Recently viewed list (home page). Fire and forget;
+ * the same study is noted at most once a minute.
+ */
+const notedViews = new Map();
+function noteViewed(study) {
+  if (!study || !study.id || !study.study_instance_uid || !(state.user && state.user.features.recently_viewed > 0)) return;
+  const now = Date.now();
+  if (now - (notedViews.get(study.id) || 0) < 60000) return;
+  notedViews.set(study.id, now);
+  api("POST", `/api/recent/${study.id}`, { uid: study.study_instance_uid }).catch(() => {});
+}
+
 /** Details of one study (opened from a card): who, when, what, the actions and the series. */
 function openStudyDialog(study) {
+  noteViewed(study);
   const seriesSlot = h("div", null, h("div", { class: "loading" }, "Loading series..."));
   const detail = (label, value) => (value ? [h("dt", null, label), h("dd", null, value)] : null);
   const labelsSlot = h("dd", null, labelChips(study.labels));
@@ -1555,6 +1681,7 @@ function studyRows(study) {
       seriesRow.hidden = !open;
       if (!open || loaded) return;
       loaded = true;
+      noteViewed(study);
       seriesCell.replaceChildren(h("div", { class: "loading" }, "Loading series..."));
       try {
         seriesCell.replaceChildren(renderSeriesBox(await api("GET", `/api/studies/${study.id}/series`), study));
@@ -1706,17 +1833,20 @@ function viewButtons(study) {
   if (hasWeasis()) {
     const weasis = actionButton("button", "weasis", "Weasis", "Open in Weasis (desktop viewer, must be installed on this computer)",
       { class: "btn small", type: "button", title: "Open in Weasis (desktop viewer, must be installed on this computer)" });
-    weasis.addEventListener("click", () => openInWeasis(study.study_instance_uid, weasis));
+    weasis.addEventListener("click", () => { noteViewed(study); openInWeasis(study.study_instance_uid, weasis); });
     buttons.push(weasis);
   }
   if (hasOhif() && (viewersOpt().ohif_modes || ["viewer"]).includes("viewer")) {
     buttons.push(actionButton("a", "ohif", "OHIF", "Open in the browser viewer (OHIF): new tab, nothing to install", {
       class: "btn small", href: ohifUrl(study.study_instance_uid), target: "_blank", rel: "noopener",
-      title: "Open in the browser viewer (OHIF): new tab, nothing to install",
+      title: "Open in the browser viewer (OHIF): new tab, nothing to install", onclick: () => noteViewed(study),
     }));
   }
   const more = moreViewersMenu([study]);
-  if (more) buttons.push(more);
+  if (more) {
+    more.addEventListener("click", (event) => { if (event.target.closest("a")) noteViewed(study); });
+    buttons.push(more);
+  }
   return buttons;
 }
 
@@ -1731,7 +1861,17 @@ function downloadMenu(kind, id) {
     h("div", { class: "menu-list" },
       h("a", { class: "menu-item", href: `/api/${kind}/${id}/download`, onclick: closeMenu }, "ZIP", h("small", null, "DICOM files in folders")),
       h("a", { class: "menu-item", href: `/api/${kind}/${id}/download?dicomdir=true`, onclick: closeMenu }, "ZIP with DICOMDIR", h("small", null, "Adds an index, like a CD/DVD")),
-      kind === "series" && opts().nifti ? h("a", { class: "menu-item", href: `/api/series/${id}/nifti`, onclick: closeMenu }, "NIfTI", h("small", null, "One 3D volume file (.nii.gz)")) : null));
+      kind === "series" && opts().nifti ? h("a", { class: "menu-item", href: `/api/series/${id}/nifti`, onclick: closeMenu }, "NIfTI", h("small", null, "One 3D volume file (.nii.gz)")) : null,
+      kind === "studies" ? cdExportItem([id]) : null));
+}
+
+/** "Patient CD / USB" of the download menus: the images with their index, a page for the patient and a viewer. */
+function cdExportItem(ids) {
+  if (!opts().cd_export) return null;
+  return h("a", {
+    class: "menu-item", href: `/api/export/cd?studies=${ids.join(",")}`,
+    onclick: (event) => { closeMenu(event); toast("Preparing the patient CD / USB: the download starts when it is ready (large studies take a while).", "info", 7000); },
+  }, "Patient CD / USB", h("small", null, "To copy onto a disc or a stick: index, a page for the patient, a viewer"));
 }
 
 /**
@@ -2310,7 +2450,9 @@ function buildUsersView() {
           h("td", null, h("span", { class: "patient" }, u.username), u.id === state.user.id ? h("span", { class: "sub" }, " (you)") : null),
           h("td", null, roleLabel(u.effective_role)),
           h("td", null, u.permissions.length ? u.permissions.map((p) => h("span", { class: "chip perm" }, p)) : h("span", { class: "muted" }, "no access")),
-          h("td", null, h("span", { class: `chip ${u.active ? "status-on" : "status-off"}` }, u.active ? "Active" : "Disabled")),
+          h("td", null, h("span", { class: `chip ${u.active ? "status-on" : "status-off"}` }, u.active ? "Active" : "Disabled"),
+            u.two_factor ? [" ", h("span", { class: "chip", title: "Signs in with a code from a phone app too" }, "two-step")] : null,
+            u.email ? h("div", { class: "sub" }, u.email) : null),
           h("td", null, formatTimestamp(u.last_login)),
           h("td", null, h("div", { class: "actions" },
             h("button", { class: "btn small", type: "button", onclick: () => openUserDialog(u, meta, load) }, "Edit"),
@@ -2364,6 +2506,8 @@ function openUserDialog(user, meta, reload) {
   meta.presets.map((p) => h("option", { value: p.key, selected: p.key === initialRole }, p.label)));
 
   const active = h("input", { type: "checkbox", checked: user ? user.active : true });
+  const email = h("input", { name: "email", type: "email", autocomplete: "off", value: user ? user.email || "" : "", placeholder: "Optional: for notifications of their links" });
+  const resetTwoFactor = h("input", { type: "checkbox" });
 
   const dialog = h("dialog", null, h("form", {
     onsubmit: async (event) => {
@@ -2372,9 +2516,10 @@ function openUserDialog(user, meta, reload) {
       const permissions = Object.keys(checks).filter((key) => checks[key].checked);
       try {
         if (isNew) {
-          await api("POST", "/api/admin/users", { username: username.value.trim(), password: password.value, permissions, role: preset.value });
+          await api("POST", "/api/admin/users", { username: username.value.trim(), password: password.value, permissions, role: preset.value, email: email.value });
         } else {
-          const body = { permissions, active: active.checked, role: preset.value };
+          const body = { permissions, active: active.checked, role: preset.value, email: email.value };
+          if (resetTwoFactor.checked) body.reset_two_factor = true;
           if (password.value) body.password = password.value;
           await api("PUT", `/api/admin/users/${user.id}`, body);
         }
@@ -2396,6 +2541,8 @@ function openUserDialog(user, meta, reload) {
     error,
     h("label", null, "Username", username),
     h("label", null, isNew ? "Password" : "New password (optional)", password),
+    h("label", null, "Email address", email),
+    user && user.two_factor ? h("label", { class: "check" }, resetTwoFactor, "Reset the two-step sign-in (lost phone): the next sign-in needs only the password, or sets it up again if it is required") : null,
     h("label", null, "Role", preset),
     h("p", { class: "hint" }, "Choosing a role ticks its permissions (you can still change them)."),
     h("fieldset", { class: "perm-list" }, h("legend", null, "Permissions"), permissionBoxes),
@@ -2601,6 +2748,26 @@ function openShareDialog(studyOrList) {
     const emailOptions = buildEmailOptions(() => true);
     const note = h("input", { maxlength: 120, placeholder: "For your own records, e.g. Dr. Smith, second opinion", autocomplete: "off" });
     const submit = h("button", { class: "btn primary", type: "submit" }, "Create link and password");
+    // Options: every study of the patient, an anonymized copy, tell me when it is used.
+    const wholePatient = h("input", { type: "checkbox" });
+    const patientCount = h("span", { class: "muted" });
+    const patientOption = !several && feature.patient && study.patient_id
+      ? h("label", { class: "check" }, wholePatient, "Every study of this patient, in one link ", patientCount) : null;
+    if (patientOption) {
+      api("GET", `/api/studies?patient_id=${encodeURIComponent(`"${study.patient_id}"`)}&limit=50`)
+        .then((page) => { patientCount.textContent = t("({n} studies)", { n: page.items.length + (page.has_more ? "+" : "") }); })
+        .catch(() => {});
+    }
+    const anonymize = h("input", { type: "checkbox" });
+    const anonymizeOption = feature.anonymize ? h("div", null,
+      h("label", { class: "check" }, anonymize, "Share an anonymized copy"),
+      h("p", { class: "hint" }, "The person sees the images without the patient's name and ID (ANONYMOUS). The copy is made now and deleted when the link is revoked or long after it expires; the original is not changed.")) : null;
+    const notify = h("input", { type: "checkbox", disabled: !state.user.email });
+    const notifyOption = feature.notify ? h("div", null,
+      h("label", { class: "check" }, notify, "Email me when the link is opened or downloaded"),
+      state.user.email
+        ? h("p", { class: "hint" }, t("To {email}. The email names the link, never the patient.", { email: state.user.email }))
+        : h("p", { class: "hint" }, "Add your email address in My account first.")) : null;
     dialog.replaceChildren(h("form", {
       class: "dialog-form",
       onsubmit: async (event) => {
@@ -2609,8 +2776,12 @@ function openShareDialog(studyOrList) {
         const problem = duration.problem();
         if (problem) { error.textContent = problem; error.hidden = false; return; }
         submit.disabled = true;
+        if (anonymize.checked) submit.textContent = t("Making the anonymized copy...");
         try {
-          const body = { minutes: duration.minutes, downloads: Number(downloads.value), note: note.value, email: emailOptions.value };
+          const body = {
+            minutes: duration.minutes, downloads: Number(downloads.value), note: note.value, email: emailOptions.value,
+            patient: wholePatient.checked, anonymize: anonymize.checked, notify: notify.checked,
+          };
           showResult(several
             ? await api("POST", "/api/shares", { ...body, studies: studies.map((s) => s.id) })
             : await api("POST", `/api/studies/${study.id}/share`, body));
@@ -2618,6 +2789,7 @@ function openShareDialog(studyOrList) {
           error.textContent = e.message;
           error.hidden = false;
           submit.disabled = false;
+          submit.textContent = t("Create link and password");
         }
       },
     },
@@ -2626,6 +2798,7 @@ function openShareDialog(studyOrList) {
       duration.node,
       h("label", null, t("Downloads allowed as ZIP (0 = online viewing only, up to {max})", { max: feature.max_downloads }), downloads),
       h("label", null, "Note (optional)", note),
+      patientOption, anonymizeOption, notifyOption,
       emailOptions.node,
       h("p", { class: "muted" }, "The person gets a link and a password that opens only this study. They can look at it online until the link expires; running out of downloads does not stop that."),
       h("div", { class: "dialog-actions" }, h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Cancel"), submit)));
@@ -2645,12 +2818,34 @@ function openShareDialog(studyOrList) {
       result.password_kept
         ? h("p", { class: "muted" }, "Give the password to the person by a different channel than the link (a phone call, an SMS). You can see it again in the Shares list while the link is active.")
         : h("p", { class: "form-error" }, "The password is shown only now and cannot be recovered. Give it to the person by a different channel than the link (a phone call, an SMS)."),
-      h("p", { class: "muted" }, t("Valid until {expires}. Downloads allowed: {n}.", { expires, n: result.max_downloads })),
+      h("p", { class: "muted" }, t("Valid until {expires}. Downloads allowed: {n}.", { expires, n: result.max_downloads }),
+        result.studies > 1 ? ` ${t("{n} studies in this link.", { n: result.studies })}` : "",
+        result.anonymized ? ` ${t("The person sees an anonymized copy.")}` : ""),
+      qrBlock(`/api/shares/${result.id}/qr`, "link-qr-code.svg"),
       emailOutcome(result.email),
       h("div", { class: "dialog-actions" }, copyButton("Copy invitation text (without the password)", invitation), close)));
   }
 
   showForm();
+  dialog.showModal();
+}
+
+/** The QR code of a link (to print on a handout: the phone's camera opens it) and a download of it. */
+function qrBlock(url, fileName) {
+  return h("div", { class: "qr-block" },
+    h("img", { class: "qr", src: url, alt: t("QR code of the link"), width: 160, height: 160 }),
+    h("div", null,
+      h("p", { class: "muted" }, "The QR code opens the link with a phone's camera: handy on a printed handout. It does not contain the password."),
+      h("a", { class: "btn small", href: url, download: fileName }, "Download the QR code")));
+}
+
+/** A dialog with the QR code of a link (Shares list). */
+function openQrDialog(url, title) {
+  const dialog = h("dialog", null, h("div", { class: "dialog-form" },
+    h("h2", null, title), qrBlock(url, "link-qr-code.svg"),
+    h("div", { class: "dialog-actions" }, h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Close"))));
+  dialog.addEventListener("close", () => dialog.remove());
+  document.body.append(dialog);
   dialog.showModal();
 }
 
@@ -2809,7 +3004,10 @@ function buildSharesView() {
     return h("div", { class: "table-wrap" }, h("table", { class: "data" },
       h("thead", null, h("tr", null, ["Study", "By", "Created", "Time left", "Downloads left", "Opened", "Status", "Actions"].map((t) => h("th", { class: t === "Actions" ? "num" : null }, t)))),
       h("tbody", null, shares.map((s) => h("tr", null,
-        h("td", null, shareLabel(s.label), s.note ? h("div", { class: "sub" }, s.note) : null),
+        h("td", null, shareLabel(s.label), s.note ? h("div", { class: "sub" }, s.note) : null,
+          s.anonymized || s.notify ? h("div", null,
+            s.anonymized ? h("span", { class: "chip" }, "anonymized copy") : null, " ",
+            s.notify ? h("span", { class: "chip" }, "emails me") : null) : null),
         h("td", null, s.created_by),
         h("td", { class: "nowrap" }, formatTimestamp(s.created_at)),
         timeLeftCell(s, now),
@@ -2818,6 +3016,9 @@ function buildSharesView() {
         h("td", null, h("span", { class: `chip ${s.status === "active" ? "status-on" : "status-off"}` }, s.status)),
         h("td", null, h("div", { class: "actions" },
           s.url && s.status === "active" ? copyButton("Copy link", () => s.url, "link") : null,
+          s.url && s.status === "active"
+            ? actionButton("button", "qr", "QR code", "The QR code of the link (to print)", { class: "btn small", type: "button", onclick: () => openQrDialog(`/api/shares/${s.id}/qr`, t("QR code of the link")) })
+            : null,
           // Every active link: its kept password, or (made before passwords were kept) a new one.
           s.status === "active" && (s.password_available || s.password_kept)
             ? actionButton("button", "key", "Password", "Show the password", { class: "btn small", type: "button", onclick: () => (s.password_available ? showSharePassword(s) : offerNewSharePassword(s, load)) })
@@ -2856,11 +3057,189 @@ function buildSharesView() {
       h("div", { class: "sub" }, t("{used} of {max} used", { used: s.downloads_used, max: s.max_downloads })));
   }
 
+  // Two kinds of links when upload links are switched on: to look at studies, and to send them in.
+  const uploads = state.user.features.upload_links && state.user.features.upload_links.enabled;
+  if (!uploads) state.sharesTab = "view";
+  const showUploads = state.sharesTab === "upload";
+  const tabs = uploads ? h("div", { class: "subtabs", role: "tablist", "aria-label": "Shares" },
+    [["view", "Links to look at studies"], ["upload", "Upload links (they send us studies)"]].map(([id, label]) => h("button", {
+      type: "button", role: "tab", "aria-selected": String(state.sharesTab === id || (id === "view" && !showUploads)),
+      onclick: () => { state.sharesTab = id; renderApp(); },
+    }, label))) : null;
+  if (showUploads) {
+    return h("div", { class: "view" }, h("div", { class: "page-head" }, h("h1", null, "Shares")), tabs, buildUploadLinksView());
+  }
+
   load();
   return h("div", { class: "view" },
     h("div", { class: "page-head" }, h("h1", null, "Shares"), actionButton("button", "refresh", "Refresh", "Refresh the list", { class: "btn", type: "button", onclick: load })),
+    tabs,
     h("p", { class: "muted" }, "Invitations for people outside: a link plus a password that opens one study. The password of an active link can be shown again (each time is recorded in the audit log); revoke a link if it was sent to the wrong person."),
     container);
+}
+
+/* ---- Upload links: people outside send studies in ---- */
+
+/** Bytes as "3.2 MB" / "1.4 GB". */
+const megabytes = (bytes) => formatBytes(bytes || 0);
+
+/** Shares > Upload links: the list, and "New upload link". */
+function buildUploadLinksView() {
+  const container = h("section", { class: "panel" });
+  async function load() {
+    container.replaceChildren(h("div", { class: "loading" }, "Loading..."));
+    try {
+      const links = await api("GET", "/api/upload-links");
+      container.replaceChildren(links.length ? renderTable(links) : h("div", { class: "empty" }, "No upload link yet. Create one to ask somebody outside to send you studies (a CD of earlier images, a referral...)."));
+    } catch (e) {
+      container.replaceChildren(h("div", { class: "empty" }, e.message));
+      toastError(e);
+    }
+  }
+  function renderTable(links) {
+    const now = Date.now() / 1000;
+    return h("div", { class: "table-wrap" }, h("table", { class: "data" },
+      h("thead", null, h("tr", null, ["Note", "By", "Created", "Time left", "Received", "Status", "Actions"].map((x) => h("th", { class: x === "Actions" ? "num" : null }, x)))),
+      h("tbody", null, links.map((l) => h("tr", null,
+        h("td", null, l.note || dash(), l.label ? h("div", { class: "sub" }, t("label: {label}", { label: l.label })) : null, l.notify ? h("div", null, h("span", { class: "chip" }, "emails me")) : null),
+        h("td", null, l.created_by),
+        h("td", { class: "nowrap" }, formatTimestamp(l.created_at)),
+        l.status === "active"
+          ? h("td", { class: "nowrap" }, formatDuration(l.expires_at - now), h("div", { class: "sub" }, t("until {date}", { date: formatTimestamp(l.expires_at) })))
+          : h("td", { class: "nowrap muted" }, l.status === "revoked" ? "withdrawn" : "ended"),
+        h("td", { class: "nowrap" },
+          t("{n} files, {studies} studies", { n: l.files_received, studies: l.study_count }),
+          h("div", { class: "sub" }, t("{used} of {max}", { used: megabytes(l.bytes_received), max: megabytes(l.max_bytes) }),
+            l.files_rejected ? ` · ${t("{n} not DICOM", { n: l.files_rejected })}` : "")),
+        h("td", null, h("span", { class: `chip ${l.status === "active" ? "status-on" : "status-off"}` }, l.status)),
+        h("td", null, h("div", { class: "actions" },
+          l.study_count ? actionButton("button", "search", "Studies", "The studies received", { class: "btn small", type: "button", onclick: () => openUploadLinkStudies(l) }) : null,
+          l.url && l.status === "active" ? copyButton("Copy link", () => l.url, "link") : null,
+          l.url && l.status === "active" ? actionButton("button", "qr", "QR code", "The QR code of the link (to print)", { class: "btn small", type: "button", onclick: () => openQrDialog(`/api/upload-links/${l.id}/qr`, t("QR code of the upload link")) }) : null,
+          l.password_available ? actionButton("button", "key", "Password", "Show the password", {
+            class: "btn small", type: "button",
+            onclick: async () => {
+              try { const r = await api("POST", `/api/upload-links/${l.id}/password`); passwordDialog({ label: l.note || t("Upload link"), note: "" }, "Password of the link", r.password, "Give it by a different channel than the link. Showing it was recorded in the audit log."); } catch (e) { toastError(e); }
+            },
+          }) : null,
+          l.status !== "revoked" ? actionButton("button", "edit", "Edit...", "More time or a bigger size limit", { class: "btn small", type: "button", onclick: () => openUploadLinkEditor(l, load) }) : null,
+          l.status === "active" ? actionButton("button", "revoke", "Revoke", "Revoke this link", {
+            class: "btn small danger", type: "button",
+            onclick: async () => {
+              if (!confirm(t("Revoke this link? The person will not be able to send anything more."))) return;
+              try { await api("POST", `/api/upload-links/${l.id}/revoke`); toast("Link revoked."); load(); } catch (e) { toastError(e); }
+            },
+          }) : null)))))));
+  }
+  load();
+  return h("div", { class: "view" },
+    h("div", { class: "page-head" }, h("h2", null, "Upload links"),
+      h("div", { class: "head-actions" },
+        actionButton("button", "refresh", "Refresh", "Refresh the list", { class: "btn", type: "button", onclick: load }),
+        h("button", { class: "btn primary", type: "button", onclick: () => openUploadLinkDialog(load) }, "New upload link"))),
+    h("p", { class: "muted" }, "A link plus a password that lets somebody outside SEND you studies: they drop the files or a whole CD folder on a page, and the studies arrive in the archive. They see nothing else of it."),
+    container);
+}
+
+/** Creating an upload link: how long, how much, a label, a note; then the link, the password and the QR code. */
+function openUploadLinkDialog(reload) {
+  const feature = state.user.features.upload_links;
+  const share = state.user.features.share;
+  const dialog = h("dialog", { class: "share-dialog" });
+  dialog.addEventListener("close", () => { dialog.remove(); reload(); });
+  document.body.append(dialog);
+  if (!share.configured) {
+    dialog.replaceChildren(h("div", { class: "dialog-form" }, h("h2", null, "Sharing is not set up yet"),
+      h("p", null, "An administrator must first enter the public address of the share links in Settings, section Share links."),
+      h("div", { class: "dialog-actions" }, h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Close"))));
+    dialog.showModal();
+    return;
+  }
+  const error = h("div", { class: "form-error", role: "alert", hidden: true });
+  const duration = buildDurationInput(feature.default_hours * 60, feature.max_hours, "The link works for");
+  const size = h("input", { type: "number", min: 1, max: feature.max_mb, value: Math.min(feature.max_mb, 2048), required: true });
+  const label = h("input", { value: feature.label || "", maxlength: 64, placeholder: "received", autocomplete: "off" });
+  const note = h("input", { maxlength: 120, placeholder: "For your own records, e.g. Mrs Doe, previous MRI from St Mary's", autocomplete: "off" });
+  const notify = h("input", { type: "checkbox", disabled: !state.user.email || !share.email });
+  const emailOptions = buildEmailOptions(() => true);
+  const submit = h("button", { class: "btn primary", type: "submit" }, "Create link and password");
+  dialog.replaceChildren(h("form", {
+    class: "dialog-form",
+    onsubmit: async (event) => {
+      event.preventDefault();
+      error.hidden = true;
+      const problem = duration.problem();
+      if (problem) { error.textContent = problem; error.hidden = false; return; }
+      submit.disabled = true;
+      try {
+        const r = await api("POST", "/api/upload-links", {
+          minutes: duration.minutes, max_mb: Number(size.value), label: label.value, note: note.value,
+          notify: notify.checked, email: emailOptions.value,
+        });
+        showResult(r);
+      } catch (e) {
+        error.textContent = e.message;
+        error.hidden = false;
+        submit.disabled = false;
+      }
+    },
+  },
+    h("h2", null, "Ask somebody outside to send studies"),
+    error,
+    duration.node,
+    h("label", null, t("Most they can send, in MB (up to {max})", { max: feature.max_mb }), size),
+    h("label", null, "Label put on the studies received (empty = none)", label),
+    h("label", null, "Note (optional)", note),
+    share.email ? h("div", null, h("label", { class: "check" }, notify, "Email me when files arrive"),
+      state.user.email ? null : h("p", { class: "hint" }, "Add your email address in My account first.")) : null,
+    emailOptions.node,
+    h("div", { class: "dialog-actions" }, h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Cancel"), submit)));
+
+  function showResult(r) {
+    const expires = new Date(r.expires_at * 1000).toLocaleString(i18n.locale);
+    dialog.replaceChildren(h("div", { class: "dialog-form" },
+      h("h2", null, "Upload link created"),
+      h("label", null, "Link", h("div", { class: "secret-box" }, h("input", { readonly: true, value: r.url, onfocus: (e) => e.target.select() }), copyButton("Copy link", () => r.url))),
+      h("div", null, h("div", { class: "muted" }, "Password"),
+        h("div", { class: "secret-box" }, h("span", { class: "password" }, r.password), copyButton("Copy password", () => r.password))),
+      h("p", { class: "muted" }, t("Valid until {expires}, for up to {mb} MB. Give the password by a different channel than the link.", { expires, mb: r.max_mb })),
+      qrBlock(`/api/upload-links/${r.id}/qr`, "upload-link-qr-code.svg"),
+      emailOutcome(r.email),
+      h("div", { class: "dialog-actions" }, h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Close"))));
+  }
+  dialog.showModal();
+}
+
+/** More time (from now) or a bigger limit for an upload link. */
+function openUploadLinkEditor(link, reload) {
+  const feature = state.user.features.upload_links;
+  const now = Date.now() / 1000;
+  const active = link.status === "active";
+  const initialMinutes = active ? Math.max(1, Math.ceil((link.expires_at - now) / 60)) : feature.default_hours * 60;
+  const duration = buildDurationInput(Math.min(initialMinutes, feature.max_hours * 60), feature.max_hours, "The link works for, from now");
+  const size = h("input", { type: "number", min: 1, max: feature.max_mb, value: Math.ceil(link.max_bytes / 1048576), required: true });
+  formDialog("Change the upload link", link.note || null, [duration.node, h("label", null, t("Most they can send, in MB (up to {max})", { max: feature.max_mb }), size)], "Save", async () => {
+    const problem = duration.problem();
+    if (problem) throw new Error(problem);
+    const body = { max_mb: Number(size.value) };
+    if (!active || duration.minutes !== initialMinutes) body.minutes = duration.minutes;
+    await api("PUT", `/api/upload-links/${link.id}`, body);
+    toast("Link updated.");
+    reload();
+  });
+}
+
+/** The studies received through an upload link. */
+async function openUploadLinkStudies(link) {
+  let studies;
+  try { studies = await api("GET", `/api/upload-links/${link.id}/studies`); } catch (e) { toastError(e); return; }
+  const dialog = h("dialog", { class: "wide-dialog" }, h("div", { class: "dialog-form" },
+    h("h2", null, t("Received through the link: {note}", { note: link.note || `#${link.id}` })),
+    studies.length ? renderStudiesTable(studies) : h("p", { class: "muted" }, "These studies are no longer in the archive."),
+    h("div", { class: "dialog-actions" }, h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Close"))));
+  dialog.addEventListener("close", () => dialog.remove());
+  document.body.append(dialog);
+  dialog.showModal();
 }
 
 /* ====================================================================
@@ -2899,6 +3278,7 @@ function helpSections() {
           can("share") ? [helpIcon("share"), " ", h("b", null, "Shares"), ": the links you created to show a study to someone outside."] : null,
           opts().retrieve ? [helpIcon("retrieve"), " ", h("b", null, "Retrieve"), ": find studies on another system and bring them here."] : null,
           opts().worklists ? [helpIcon("worklist"), " ", h("b", null, "Worklists"), ": the examinations the scanners have to do."] : null,
+          [helpIcon("account"), " ", h("b", null, "My account"), ": your password, your email address", f.two_factor && f.two_factor !== "off" ? ", two-step sign-in" : "", "."],
           [helpIcon("help"), " ", h("b", null, "Help"), ": this page."],
         ),
         h("p", { class: "muted" }, "You only see the parts your account gives access to. If you need something that is not here, ask your administrator."),
@@ -3023,6 +3403,7 @@ function helpSections() {
         ul(
           [h("b", null, "ZIP"), ": the image files in folders. Choose this one in most cases."],
           [h("b", null, "ZIP with DICOMDIR"), ": the same with an index, like the CD or DVD of a scanner; some programs need it."],
+          opts().cd_export ? [h("b", null, "Patient CD / USB"), ": a ZIP to unpack onto a disc or a USB stick for the patient: the images with their index, a page that lists the studies and, if your practice set one up, a viewer program. (Also for several ticked studies.)"] : null,
         ),
         h("p", null, "Large studies take a while: your browser shows the download as it goes."),
         h("p", { class: "muted" }, "Downloaded files contain patient data: keep them in a safe place and delete them when you no longer need them."),
@@ -3060,8 +3441,31 @@ function helpSections() {
             [helpButton("key", "Password"), ": shows the password again, if your administrator allows it (only while the link works; it is recorded)."],
             [helpButton("edit", "Edit..."), ": gives the link more time (this also brings back an expired link), more downloads, a new note or a new password", share.email ? ", and can email the update." : "."],
             [helpButton("revoke", "Revoke"), ": stops the link at once, for example if it was sent to the wrong person. This cannot be undone: create a new link if needed."],
+            [helpButton("qr", "QR code"), ": the link as a QR code, to print on a handout (the phone's camera opens it; it does not contain the password)."],
           ),
+          share.patient ? h("p", null, h("b", null, "Every study of this patient"), " in the Share window puts all the patient's studies in one link.") : null,
+          share.anonymize ? h("p", null, h("b", null, "Share an anonymized copy"), " shows the person a copy without the patient's name and ID (for teaching, a second opinion...). The copy is deleted when the link ends.") : null,
+          share.notify ? h("p", null, h("b", null, "Email me when the link is opened or downloaded"), " needs your email address in My account.") : null,
         ]),
+    },
+    {
+      id: "uploadlinks", title: "Asking someone outside to send studies", show: !!(f.upload_links && f.upload_links.enabled),
+      body: () => [
+        h("p", null, "On the Shares page, ", h("b", null, "Upload links"), " > ", h("b", null, "New upload link"), " makes a link plus a password for a person outside (another clinic, a patient with a CD of earlier images). They open the link, type the password and drag the files or the whole CD folder onto the page. The studies arrive in the archive with the label you chose; they see nothing else."),
+        ul("Give the password by a different way than the link, as for share links.",
+          "The list shows how many files and studies arrived; the search button lists the studies received.",
+          "Files that are not images (a viewer program on the CD...) are skipped and counted apart."),
+      ],
+    },
+    {
+      id: "account", title: "My account", show: true,
+      body: () => [
+        h("p", null, helpIcon("account"), " ", h("b", null, "My account"), " lets you change your password and your email address."),
+        f.two_factor && f.two_factor !== "off" ? h("p", null, h("b", null, "Two-step sign-in"), ": after the password, the portal asks for a 6-digit code from an app on your phone. ",
+          f.two_factor === "required" ? "It is required in this portal: you set it up at your first sign-in." : "Switch it on in My account: scan the QR code with the app and type the code it shows.",
+          " Keep the recovery codes somewhere safe: each one signs you in once if you lose your phone. Lost them too? Ask your administrator to reset it.") : null,
+        state.user.features.recently_viewed > 0 ? h("p", null, h("b", null, "Recently viewed"), " on the home page lists the studies you opened last. Only you see it; \"Clear the list\" empties it.") : null,
+      ],
     },
     {
       id: "upload", title: "Uploading images", show: can("upload"),
@@ -3181,8 +3585,15 @@ const SETTINGS_FIELDS = {
     { key: "share_max_downloads", label: "Downloads allowed, maximum", type: "number", min: 0, max: 1000 },
     { key: "share_keep_passwords", label: "Let staff see a link's password again from the Shares list", type: "checkbox", wide: true,
       hint: "Only the person who created the link, or an administrator, and only while the link is active; every time is recorded in the audit log. A copy of the password is kept in the portal's database until the link is revoked, or 30 days after it expires (so it can still be extended with the same password). Untick it to show passwords only once, when the link is created (the copies kept so far are erased)." },
+    { key: "share_anonymize", label: "Offer \"Share an anonymized copy\"", type: "checkbox", wide: true,
+      hint: "Orthanc makes a copy without the patient's name and ID (labelled shared-anonymized) and the link shows that copy. The copy is deleted when the link is revoked, or 30 days after it expires." },
+    { key: "share_notify", label: "Offer \"Email me when the link is opened or downloaded\"", type: "checkbox", wide: true,
+      hint: "Needs the mail server below and an email address on the person's account (My account, or Users). The emails name the link, never the patient." },
   ],
   security: [
+    { key: "two_factor", label: "Two-step sign-in (a code from a phone app after the password)", type: "select", wide: true,
+      options: [["off", "Off: the password is enough"], ["optional", "Optional: each person may switch it on in My account"], ["required", "Required for everybody: set up at the next sign-in"]],
+      hint: "Any authenticator app works (Microsoft or Google Authenticator, FreeOTP...). Each person also gets ten one-time recovery codes for a lost phone; an administrator can reset it in Users. Switching it off stops asking for codes (what was set up is kept)." },
     { key: "session_hours", label: "Session duration (hours)", type: "number", min: 1, max: 720, hint: "Applies to the next sign-ins." },
     { key: "weasis_token_minutes", label: "Weasis link validity (minutes)", type: "number", min: 5, max: 1440 },
     { key: "login_max_failures", label: "Failed sign-ins before lockout", type: "number", min: 3, max: 20 },
@@ -3239,6 +3650,26 @@ const SETTINGS_FIELDS = {
     { key: "jobs_page", label: "Configuration > Jobs: every Orthanc job", type: "checkbox", wide: true },
     { key: "system_page", label: "Configuration > System: Orthanc's version, storage, plugins, log level, metrics", type: "checkbox", wide: true },
     { key: "raw_api", label: "System: read Orthanc's REST API (GET only)", type: "checkbox", wide: true, hint: "For troubleshooting. Never files; each read is in the audit log." },
+    { key: "stats_page", label: "Configuration > Statistics: studies per month and modality, links, transfers, who uploads", type: "checkbox", wide: true },
+    { key: "cd_export", label: "Patient CD / USB in the download menus", type: "checkbox", wide: true,
+      hint: "A ZIP to copy onto a disc or a USB stick: the images with their DICOMDIR index, a page for the patient and, if you give its folder below, a portable viewer. Needs the download permission." },
+    { key: "cd_viewer_dir", label: "Folder of a portable DICOM viewer for the patient CDs (optional)", wide: true, placeholder: "/data/cd-viewer   or   D:\\CD-Viewer",
+      hint: "A full path on the computer (or in the container) running the portal, e.g. an unpacked portable Weasis with its autorun.inf. Its files are copied onto every patient CD. In Docker, mount the folder (see the README)." },
+    { key: "upload_links", label: "Upload links: people outside send studies in", type: "checkbox", wide: true,
+      hint: "Staff with the share AND upload permissions can create a link plus a password; the person drops files or a CD folder on a page of the internet side and the studies arrive here. They see nothing of the archive." },
+    { key: "upload_link_default_hours", label: "Upload link validity, default (hours)", type: "number", min: 1, max: 8760, hint: "Never more than the maximum of share links (Network & sharing)." },
+    { key: "upload_link_max_mb", label: "Most an upload link can receive (MB)", type: "number", min: 1, max: 1048576 },
+    { key: "upload_link_label", label: "Label put on received studies (default)", maxlength: 64, placeholder: "received", hint: "Empty = none. Each link can choose another one." },
+  ],
+  forward: [
+    { key: "forward_enabled", label: "Apply the rules below", type: "checkbox", wide: true,
+      hint: "Every study that arrives and matches a rule is sent on as soon as Orthanc considers it complete (no new image for a while: Orthanc's StableAge). Switching it on starts from now: studies that arrived before are not sent." },
+  ],
+  backups: [
+    { key: "backup_dir", label: "Backup folder", wide: true, placeholder: "/data/backups   or   D:\\Backups\\Portal",
+      hint: "A full path on the computer (or in the container) running the portal. Empty = no automatic backups. Better on another disk, or in a folder that is itself backed up." },
+    { key: "backup_interval_hours", label: "Hours between two backups", type: "number", min: 1, max: 720 },
+    { key: "backup_keep", label: "Backups kept", type: "number", min: 1, max: 365, hint: "The oldest are deleted." },
   ],
   moreviewers: [
     { key: "stone_viewer", label: "Stone Web Viewer", type: "select", options: [["auto", "Automatic (when Orthanc has the plugin)"], ["on", "Always"], ["off", "Never"]] },
@@ -3266,6 +3697,9 @@ const SETTINGS_FIELDS = {
     { key: "simplified_show_labels", label: "Write the name under each icon", type: "checkbox", wide: true, hint: "Otherwise the name pops up when the mouse rests on an icon." },
     { key: "auto_refresh_seconds", label: "Auto-refresh every (seconds)", type: "number", min: 5, max: 3600, hint: "30 seconds by default. Each user can pause it on the page." },
     { key: "recent_auto_refresh", label: "Refresh the recent studies automatically", type: "checkbox", wide: true },
+    { key: "recently_viewed", label: "Show \"Recently viewed\" on the home page", type: "checkbox", wide: true,
+      hint: "Each person's own list of the studies they opened last (in a viewer, the study window, its series). Nobody else sees it." },
+    { key: "recently_viewed_count", label: "Recently viewed studies shown", type: "number", min: 1, max: 30 },
     { key: "transfers_auto_refresh", label: "Refresh the Transfers page automatically", type: "checkbox", wide: true, hint: "While a transfer is running, the page follows it every 3 seconds anyway." },
   ],
 };
@@ -3472,11 +3906,14 @@ const SETTINGS_TABS = [
   { id: "orthanc", label: "Orthanc", sections: ["orthanc"] },
   { id: "network", label: "Network & sharing", sections: ["network", "sharing", "email"] },
   { id: "security", label: "Security & roles", sections: ["security", "roles"] },
+  { id: "forward", label: "Auto-forward", sections: ["forward"] },
+  { id: "backups", label: "Backups", sections: ["backups"] },
   { id: "users", label: "Users", build: buildUsersView },
   { id: "nodes", label: "DICOM nodes", build: buildNodesView },
   { id: "audit", label: "Audit log", build: buildAuditView },
   { id: "jobs", label: "Jobs", build: buildJobsView, when: () => !!opts().jobs_page },
   { id: "system", label: "System", build: buildSystemView, when: () => !!opts().system_page },
+  { id: "stats", label: "Statistics", build: buildStatsView, when: () => !!opts().stats_page },
 ];
 
 /** The "Settings" tab: the complete configuration of the portal, organised in tabs. */
@@ -3641,6 +4078,7 @@ function buildSettingsView() {
     });
 
     const rolesEditor = buildRolesEditor(s.roles, doc.defaults.roles, doc.permissions);
+    const forwardEditor = buildForwardRulesEditor(s.forward_rules || [], doc.destinations || []);
 
     // ---- Email: the mail server password is write-only (like Orthanc's), and a test button.
     const smtpPassword = h("input", { type: "password", autocomplete: "new-password", placeholder: s.smtp_password_set ? "A password is saved. Leave empty to keep it." : "No password saved" });
@@ -3755,6 +4193,7 @@ function buildSettingsView() {
         body.study_search_fields = fieldsEditor.get();
         body.study_detail_fields = detailEditor.get();
         body.ohif_modes = ohifModesEditor.get();
+        body.forward_rules = forwardEditor.get();
         if (smtpPassword.value) body.smtp_password = smtpPassword.value;
         if (clearSmtpPassword.checked) body.clear_smtp_password = true;
         if (withoutAccount()) {
@@ -3818,10 +4257,14 @@ function buildSettingsView() {
       section("email", "Email (sending share invitations)", "The Share windows can send the invitation by email (optional, for each link) when a mail server is set here. The emails are plain text; the password is included only when the staff member ticks it.",
         emailFields, testMailField),
       section("security", "Sessions and sign-in security", null, SETTINGS_FIELDS.security.map(field)),
+      section("forward", "Auto-forward", "Send the studies that arrive on to another system automatically, for example every CT from the scanner to the reporting workstation. A rule matches when every condition filled in holds; empty conditions match everything. The transfers appear on the Transfers page as \"auto: <rule>\".",
+        SETTINGS_FIELDS.forward.map(field), forwardEditor.node, forwardStatus(doc.forward)),
+      section("backups", "Backups of the portal's database", "Users, settings, the audit log and the links (the images are in Orthanc, which has its own backups). A copy is written to the folder every few hours; you can also make one now or download one. To restore: stop the portal, put the copy in place of the database file, start it again.",
+        SETTINGS_FIELDS.backups.map(field), buildBackupsPanel()),
       section("roles", "Roles", "Shortcuts that pre-tick permissions when you create or edit a user (Users tab). Users keep their own permissions: changing a role does not change existing users.", rolesEditor.node),
       h("div", { class: "settings-actions" },
         save,
-        h("span", { class: "muted" }, "Saves the General, Appearance, Search & labels, Features, Orthanc, Network & sharing and Security & roles tabs together.")));
+        h("span", { class: "muted" }, "Saves the General, Appearance, Search & labels, Features, Orthanc, Network & sharing and Security & roles, Auto-forward and Backups tabs together.")));
 
     formHost.replaceChildren(form);
     showNotices(notices);
@@ -4086,7 +4529,8 @@ function buildBulkBar(block) {
         h("summary", { class: "btn small", "data-name": "Download selected" }, "Download (one ZIP)"),
         h("div", { class: "menu-list" },
           h("a", { class: "menu-item", href: `/api/download?studies=${picked.map((s) => s.id).join(",")}`, onclick: closeMenu }, "ZIP", h("small", null, "DICOM files in folders")),
-          h("a", { class: "menu-item", href: `/api/download?studies=${picked.map((s) => s.id).join(",")}&dicomdir=true`, onclick: closeMenu }, "ZIP with DICOMDIR", h("small", null, "Adds an index, like a CD/DVD")))) : null,
+          h("a", { class: "menu-item", href: `/api/download?studies=${picked.map((s) => s.id).join(",")}&dicomdir=true`, onclick: closeMenu }, "ZIP with DICOMDIR", h("small", null, "Adds an index, like a CD/DVD")),
+          cdExportItem(picked.map((s) => s.id)))) : null,
       can("send") ? h("button", { class: "btn small", type: "button", onclick: () => openSendDialog(picked) }, "Send...") : null,
       can("share") && (opts().multi_share || picked.length === 1) ? h("button", { class: "btn small", type: "button", onclick: () => openShareDialog(picked) }, "Share (one link)...") : null,
       canEditLabels() ? h("button", { class: "btn small", type: "button", onclick: () => openBulkLabelDialog(picked) }, "Labels...") : null,
@@ -4706,6 +5150,294 @@ function buildSystemView() {
   return h("div", { class: "view" },
     h("div", { class: "page-head" }, h("h2", null, "System"), actionButton("button", "refresh", "Refresh", "Refresh", { class: "btn", type: "button", onclick: load })),
     container);
+}
+
+/* ====================================================================
+   9e. AUTO-FORWARD, BACKUPS, STATISTICS AND MY ACCOUNT
+   ==================================================================== */
+
+/**
+ * Editor of the auto-forward rules (Settings > Auto-forward): one row per rule with its conditions
+ * and its destination. `destinations` = the places studies can be sent to. `get()` = the rules.
+ */
+function buildForwardRulesEditor(rules, destinations) {
+  const clone = (list) => list.map((r) => ({ ...r, modalities: (r.modalities || []).join(", ") }));
+  let rows = clone(rules);
+  const list = h("div", { class: "forward-rules" });
+  const destinationSelect = (row) => {
+    const known = destinations.some((d) => d.id === row.target);
+    return h("select", { "aria-label": "Destination", onchange: (e) => { row.target = e.target.value; } },
+      h("option", { value: "", selected: !row.target }, "Choose the destination"),
+      !known && row.target ? h("option", { value: row.target, selected: true }, t("{name} (not found in Orthanc)", { name: row.target })) : null,
+      destinations.map((d) => h("option", { value: d.id, selected: d.id === row.target }, d.description ? `${d.description}: ${d.id}` : d.id)));
+  };
+  const text = (row, key, placeholder, label, maxlength = 64) => h("input", {
+    value: row[key] || "", placeholder, maxlength, "aria-label": label, oninput: (e) => { row[key] = e.target.value; },
+  });
+  function draw() {
+    list.replaceChildren(...(rows.length ? rows.map((row, index) => h("div", { class: "forward-rule" },
+      h("div", { class: "forward-rule-head" },
+        h("label", { class: "check" }, h("input", { type: "checkbox", checked: row.enabled !== false, onchange: (e) => { row.enabled = e.target.checked; } }), "On"),
+        text(row, "name", "Name, e.g. CT to reporting", "Rule name", 60),
+        h("button", { class: "btn small danger", type: "button", onclick: () => { rows.splice(index, 1); draw(); } }, "Remove")),
+      h("div", { class: "forward-rule-grid" },
+        h("label", null, "Modalities (any of)", text(row, "modalities", "CT, MR (empty = any)", "Modalities", 200)),
+        h("label", null, "Sent by (calling AE title)", text(row, "calling_aet", "SCANNER1 or SCAN* (empty = any)", "Calling AE title", 16)),
+        h("label", null, "Institution contains", text(row, "institution", "(empty = any)", "Institution")),
+        h("label", null, "Description contains", text(row, "description", "(empty = any)", "Description")),
+        h("label", null, "Send to", destinationSelect(row)))))
+      : [h("p", { class: "muted" }, "No rule yet.")]));
+  }
+  draw();
+  return {
+    node: h("div", { class: "wide" }, list,
+      h("div", { class: "filter-actions" },
+        h("button", { class: "btn small", type: "button", onclick: () => { rows.push({ name: "", enabled: true, modalities: "", calling_aet: "", institution: "", description: "", target: "" }); draw(); } }, "Add rule"))),
+    get: () => rows.map((r) => ({
+      name: (r.name || "").trim(), enabled: r.enabled !== false, target: r.target || "",
+      modalities: String(r.modalities || "").split(/[\s,;]+/).map((c) => c.toUpperCase()).filter(Boolean),
+      calling_aet: (r.calling_aet || "").trim(), institution: (r.institution || "").trim(), description: (r.description || "").trim(),
+    })),
+  };
+}
+
+/** What the rules did lately (Settings > Auto-forward). */
+function forwardStatus(status) {
+  if (!status) return null;
+  const lines = [];
+  if (status.last_check) lines.push(t("Last look at Orthanc's new studies: {date}.", { date: formatTimestamp(status.last_check) }));
+  lines.push(t("Studies sent by the rules since the portal started: {n}.", { n: status.forwarded || 0 }));
+  if (status.last_forward) lines.push(t("Last one: {date}, rule \"{rule}\".", { date: formatTimestamp(status.last_forward.ts), rule: status.last_forward.rule }));
+  return h("div", { class: "setting wide" },
+    h("ul", { class: "listener-status" }, lines.map((l) => h("li", null, l))),
+    status.last_error ? h("p", { class: "form-error" }, translateMessage(status.last_error)) : null);
+}
+
+/** The backups in the folder, "Back up now" and "Download a copy" (Settings > Backups). */
+function buildBackupsPanel() {
+  const listNode = h("div", null, h("div", { class: "loading" }, "Loading..."));
+  async function load() {
+    try {
+      const r = await api("GET", "/api/admin/backups");
+      listNode.replaceChildren(!r.dir
+        ? h("p", { class: "muted" }, "No backup folder is set: there are no automatic backups. You can still download a copy.")
+        : r.backups.length
+          ? h("div", null,
+            h("ul", { class: "listener-status" }, r.backups.map((b) => h("li", null, h("span", { class: "mono" }, b.name), ` · ${formatBytes(b.size)} · ${formatTimestamp(b.at)}`))),
+            r.next ? h("p", { class: "muted" }, t("Next automatic backup: about {date}.", { date: formatTimestamp(r.next) })) : null)
+          : h("p", { class: "muted" }, t("No backup in {dir} yet: the first one is made within ten minutes (or press Back up now).", { dir: r.dir })));
+    } catch (e) { listNode.replaceChildren(h("p", { class: "form-error" }, e.message)); }
+  }
+  const now = h("button", { class: "btn", type: "button" }, "Back up now");
+  now.addEventListener("click", async () => {
+    now.disabled = true;
+    try { const r = await api("POST", "/api/admin/backups"); toast(t("Backup written: {path}", { path: r.written })); load(); } catch (e) { toastError(e); }
+    now.disabled = false;
+  });
+  load();
+  return h("div", { class: "setting wide" },
+    h("span", { class: "field-label" }, "Backups in the folder (uses the saved settings: save first)"), listNode,
+    h("div", { class: "filter-actions" }, now,
+      h("a", { class: "btn", href: "/api/admin/backup/download" }, "Download a copy now")),
+    h("p", { class: "hint" }, "A backup holds the password hashes and the Orthanc and mail server passwords: keep it as safe as the server itself."));
+}
+
+/**
+ * A small bar chart of one series over the months (one colour: it shows how much, not what).
+ * Each bar names its month and value when the mouse rests on it; the table below the charts has
+ * every number.
+ */
+function monthBars(title, months, values) {
+  const max = Math.max(1, ...values);
+  const width = 360, height = 120, gap = 4, base = height - 18;
+  const barWidth = (width - gap * (months.length - 1)) / months.length;
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("class", "month-bars");
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", `${lookup(title)}: ${months.map((m, i) => `${m} ${values[i]}`).join(", ")}`);
+  const line = document.createElementNS(SVG_NS, "line");
+  for (const [k, v] of Object.entries({ x1: 0, x2: width, y1: base + 0.5, y2: base + 0.5, class: "axis" })) line.setAttribute(k, v);
+  svg.append(line);
+  months.forEach((month, i) => {
+    const x = i * (barWidth + gap);
+    const barHeight = values[i] ? Math.max(2, (values[i] / max) * (base - 14)) : 0;
+    const hit = document.createElementNS(SVG_NS, "rect"); // a target taller than the bar
+    for (const [k, v] of Object.entries({ x, y: 0, width: barWidth, height: base, class: "hit has-tip", "data-tip": `${month}: ${values[i]}`, tabindex: "0" })) hit.setAttribute(k, v);
+    svg.append(hit);
+    if (barHeight) {
+      const bar = document.createElementNS(SVG_NS, "rect");
+      for (const [k, v] of Object.entries({ x, y: base - barHeight, width: barWidth, height: barHeight, rx: 2, class: "bar" })) bar.setAttribute(k, v);
+      svg.append(bar);
+    }
+    if (i % 3 === 2 || i === months.length - 1) {
+      const label = document.createElementNS(SVG_NS, "text");
+      for (const [k, v] of Object.entries({ x: x + barWidth / 2, y: height - 4, "text-anchor": "middle", class: "tick" })) label.setAttribute(k, v);
+      label.textContent = month.slice(2);
+      svg.append(label);
+    }
+  });
+  const total = values.reduce((a, b) => a + b, 0);
+  return h("figure", { class: "chart-card" },
+    h("figcaption", null, h("b", null, title), h("span", { class: "muted" }, ` ${t("{n} in 12 months", { n: total.toLocaleString(i18n.locale) })}`)),
+    svg);
+}
+
+/** Configuration > Statistics. */
+function buildStatsView() {
+  const container = h("div", { class: "view" }, h("div", { class: "panel loading" }, "Counting..."));
+  async function load(refresh = false) {
+    try {
+      const d = await api("GET", `/api/admin/stats${refresh ? "?refresh=true" : ""}`);
+      container.replaceChildren(...render(d));
+    } catch (e) {
+      container.replaceChildren(h("div", { class: "panel empty" }, e.message));
+      toastError(e);
+    }
+  }
+  function render(d) {
+    const n = (v) => (typeof v === "number" ? v.toLocaleString(i18n.locale) : "?");
+    const tile = (label, value) => h("div", { class: "stat-tile" }, h("b", null, value), h("span", null, label));
+    const disk = typeof d.storage.disk_mb === "number" ? formatBytes(d.storage.disk_mb * 1048576) : "?";
+    const tiles = h("section", { class: "stat-tiles" },
+      tile("studies", n(d.storage.studies)), tile("patients", n(d.storage.patients)), tile("images", n(d.storage.instances)),
+      tile("on disk", disk), tile("active share links", n(d.links.active_shares)), tile("active upload links", n(d.links.active_upload_links)));
+    const months = d.months;
+    const charts = h("section", { class: "chart-grid" },
+      monthBars("Studies (by study date)", months, d.studies.total),
+      monthBars("Share links created", months, d.links.shares_created),
+      monthBars("Share links opened", months, d.links.shares_opened),
+      monthBars("Studies received through upload links", months, d.links.studies_received),
+      monthBars("Transfers to other systems", months, d.activity.transfers),
+      monthBars("Sign-ins", months, d.activity.sign_ins));
+    // The table: every number, by month (the modalities are the buttons of the search pages).
+    const rows = [
+      ["Studies, all modalities", d.studies.total],
+      ...d.studies.by_modality.map((m) => [t("Studies with {m}", { m: m.label }), m.counts]),
+      ["Share links created", d.links.shares_created], ["Share links opened", d.links.shares_opened],
+      ["Share link downloads", d.links.shares_downloaded], ["Upload links created", d.links.upload_links_created],
+      ["Studies received through upload links", d.links.studies_received], ["Study downloads (staff)", d.activity.downloads],
+      ["Patient CD / USB exports", d.activity.cd_exports], ["Transfers", d.activity.transfers], ["Sign-ins", d.activity.sign_ins],
+    ];
+    const table = h("section", { class: "panel" }, h("h2", null, "Month by month"),
+      h("div", { class: "table-wrap" }, h("table", { class: "data stats-table" },
+        h("thead", null, h("tr", null, h("th", null, ""), months.map((m) => h("th", { class: "num" }, m)))),
+        h("tbody", null, rows.map(([label, values]) => h("tr", null, h("th", { scope: "row" }, label), values.map((v) => h("td", { class: "num" }, n(v)))))))),
+      !d.studies.counted ? h("p", { class: "form-error" }, "Orthanc could not count some months: their numbers show 0.") : null,
+      h("p", { class: "muted" }, d.audit_retention_days
+        ? t("Months are calendar months (UTC). The activity comes from the audit log, which keeps {n} days (Security & roles).", { n: d.audit_retention_days })
+        : t("Months are calendar months (UTC). The activity comes from the audit log.")));
+    const top = (title, list, unit) => h("section", { class: "panel" }, h("h2", null, title),
+      list.length ? h("ol", { class: "top-list" }, list.map((x) => h("li", null, h("b", null, x.user), ` ${t(unit, { n: n(x.count) })}`)))
+        : h("p", { class: "muted" }, "Nobody yet."));
+    const tops = h("div", { class: "stat-tops" },
+      top("Who uploads most (90 days)", d.top.uploaders, "{n} files"),
+      top("Who shares most (90 days)", d.top.sharers, "{n} links"),
+      top("Who downloads most (90 days)", d.top.downloaders, "{n} studies"));
+    return [tiles, charts, table, tops, h("p", { class: "muted" }, t("Counted {date}.", { date: formatTimestamp(d.generated_at) }))];
+  }
+  load();
+  return h("div", { class: "view" },
+    h("div", { class: "page-head" }, h("h2", null, "Statistics"),
+      actionButton("button", "refresh", "Count again", "Count again (otherwise the numbers are kept for 10 minutes)", { class: "btn", type: "button", onclick: () => load(true) })),
+    container);
+}
+
+/** Asks for the password again before a change of the two-step sign-in; resolves to it, or null. */
+function askPassword(title, intro) {
+  return new Promise((resolve) => {
+    let value = null;
+    const input = h("input", { type: "password", autocomplete: "current-password", required: true });
+    const dialog = formDialog(title, intro, [h("label", null, "Your password", input)], "Continue", async () => { value = input.value; });
+    dialog.addEventListener("close", () => resolve(value));
+    input.focus();
+  });
+}
+
+/** My account: email, password and two-step sign-in. */
+function buildAccountView() {
+  const view = h("div", { class: "view account" });
+  async function refreshMe() {
+    try { state.user = await api("GET", "/api/me"); } catch { /* keep what we have */ }
+    view.replaceChildren(...draw());
+  }
+
+  function draw() {
+    const user = state.user;
+    const mode = user.features.two_factor || "off";
+    // ---- email
+    const email = h("input", { type: "email", value: user.email || "", placeholder: "name@example.org", autocomplete: "email" });
+    const emailPanel = h("section", { class: "panel" }, h("h2", null, "Email address"),
+      h("p", { class: "muted" }, "Where the portal writes to you: when a link you created is opened or downloaded, or when files arrive through your upload link (if you ask for it on the link)."),
+      h("form", { class: "inline-field", onsubmit: async (e) => {
+        e.preventDefault();
+        try { await api("PUT", "/api/account/email", { email: email.value }); toast("Saved."); refreshMe(); } catch (err) { toastError(err); }
+      } }, email, h("button", { class: "btn", type: "submit" }, "Save")));
+
+    // ---- password
+    const current = h("input", { type: "password", autocomplete: "current-password", required: true });
+    const fresh = h("input", { type: "password", autocomplete: "new-password", required: true, minlength: 10 });
+    const again = h("input", { type: "password", autocomplete: "new-password", required: true, minlength: 10 });
+    const passwordPanel = h("section", { class: "panel" }, h("h2", null, "Password"),
+      h("form", { class: "settings-grid", onsubmit: async (e) => {
+        e.preventDefault();
+        if (fresh.value !== again.value) { toast("The two new passwords are not the same.", "error"); return; }
+        try {
+          await api("POST", "/api/account/password", { current: current.value, new: fresh.value });
+          toast("Password changed. Your other sessions were signed out.");
+          current.value = fresh.value = again.value = "";
+        } catch (err) { toastError(err); }
+      } },
+      h("label", null, "Current password", current), h("label", null, "New password (at least 10 characters)", fresh),
+      h("label", null, "New password again", again), h("div", null, h("button", { class: "btn", type: "submit" }, "Change password"))));
+
+    // ---- two-step sign-in
+    let twoFactorPanel = null;
+    if (mode !== "off") {
+      const body = h("div");
+      if (user.two_factor) {
+        body.append(
+          h("p", null, h("span", { class: "chip status-on" }, "On"), " ", "Every sign-in asks for a code from your authenticator app."),
+          h("p", { class: "muted" }, t("Recovery codes left: {n}.", { n: user.recovery_codes_left })),
+          h("div", { class: "filter-actions" },
+            h("button", { class: "btn", type: "button", onclick: async () => {
+              const password = await askPassword("New recovery codes", "The codes you have now stop working.");
+              if (!password) return;
+              try { const r = await api("POST", "/api/account/two-factor/recovery", { password }); showRecoveryCodes(r.recovery_codes); refreshMe(); } catch (e) { toastError(e); }
+            } }, "New recovery codes"),
+            mode === "optional" ? h("button", { class: "btn danger", type: "button", onclick: async () => {
+              const password = await askPassword("Switch off two-step sign-in", "From then on the password alone signs you in.");
+              if (!password) return;
+              try { await api("POST", "/api/account/two-factor/disable", { password }); toast("Two-step sign-in is off."); refreshMe(); } catch (e) { toastError(e); }
+            } }, "Switch it off") : h("p", { class: "muted" }, "It is required in this portal: it cannot be switched off.")));
+      } else {
+        const start = h("button", { class: "btn primary", type: "button" }, "Set it up");
+        start.addEventListener("click", async () => {
+          const password = await askPassword("Set up two-step sign-in", "Your password first, to be sure it is you.");
+          if (!password) return;
+          let material;
+          try { material = await api("POST", "/api/account/two-factor/setup", { password }); } catch (e) { toastError(e); return; }
+          const code = h("input", { name: "code", inputmode: "numeric", autocomplete: "one-time-code", required: true, maxlength: 10, placeholder: "123456" });
+          body.replaceChildren(twoFactorSetupBlock(material), h("form", { class: "inline-field", onsubmit: async (e) => {
+            e.preventDefault();
+            try { const r = await api("POST", "/api/account/two-factor/enable", { code: code.value }); showRecoveryCodes(r.recovery_codes); refreshMe(); } catch (err) { toastError(err); code.select(); }
+          } }, code, h("button", { class: "btn primary", type: "submit" }, "Confirm")));
+          code.focus();
+        });
+        body.append(h("p", null, h("span", { class: "chip status-off" }, "Off"), " ", "Protect your account with a code from your phone, asked after the password at every sign-in."), start);
+      }
+      twoFactorPanel = h("section", { class: "panel" }, h("h2", null, "Two-step sign-in"), body);
+    }
+
+    return [
+      h("div", { class: "page-head" }, h("h1", null, "My account")),
+      h("section", { class: "panel" }, h("h2", null, user.username),
+        h("p", null, user.permissions.length ? user.permissions.map((p) => h("span", { class: "chip perm" }, p)) : h("span", { class: "muted" }, "no access")),
+        h("p", { class: "muted" }, t("Last sign-in: {date}.", { date: formatTimestamp(user.last_login) }))),
+      emailPanel, passwordPanel, twoFactorPanel];
+  }
+  view.replaceChildren(...draw());
+  return view;
 }
 
 /* ====================================================================
