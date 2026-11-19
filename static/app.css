@@ -799,3 +799,6 @@ dialog.wide-dialog { width: min(1100px, calc(100vw - 2rem)); }
 .log-line.log-E { color: var(--danger); font-weight: 600; }
 .log-line.log-W { color: var(--warn); }
 .log-line.log-T { color: var(--ink-soft); }
+/* A panel holding text (headings, paragraphs, details) rather than a full-width table */
+.panel.pad { padding: 1.1rem 1.2rem; display: grid; gap: 0.8rem; }
+.panel.pad > h2 { margin: 0; }

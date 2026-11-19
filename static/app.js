@@ -4249,7 +4249,7 @@ function seriesManageMenu(series, study) {
 /* ---- Query / retrieve ---- */
 
 function buildRetrieveView() {
-  const results = h("section", { class: "panel" }, h("p", { class: "muted" }, "Choose a system and search: its studies appear here, and you can bring them into this archive."));
+  const results = h("section", { class: "panel" }, h("div", { class: "empty" }, "Choose a system and search: its studies appear here, and you can bring them into this archive."));
   const source = h("select", { name: "source", "aria-label": "System" }, h("option", { value: "" }, "Loading..."));
   api("GET", "/api/retrieve/sources").then((list) => {
     source.replaceChildren(...(list.length ? list.map((n) => h("option", { value: n.id },
@@ -4369,7 +4369,7 @@ function openWorklistDialog(w, reload) {
  * the number of lines, the levels shown and a search box. Lines are coloured by level (E, W, I, T).
  */
 function buildOrthancLogPanel() {
-  const panel = h("section", { class: "panel", id: "orthanc-log" }, h("h2", null, "Orthanc log"), h("div", { class: "loading" }, "Loading..."));
+  const panel = h("section", { class: "panel pad", id: "orthanc-log" }, h("h2", null, "Orthanc log"), h("div", { class: "loading" }, "Loading..."));
   const fileSelect = h("select", { "aria-label": "Log file" });
   const lineCount = h("select", { "aria-label": "Lines" }, [200, 500, 2000, 5000].map((n) => h("option", { value: n, selected: n === 500 }, `last ${n} lines`)));
   const level = h("select", { "aria-label": "Levels" },
@@ -4493,7 +4493,7 @@ function buildSystemView() {
     });
     const metrics = h("pre", { class: "raw-box", hidden: true });
     const panels = [
-      h("section", { class: "panel" }, h("h2", null, "Orthanc"),
+      h("section", { class: "panel pad" }, h("h2", null, "Orthanc"),
         h("dl", { class: "share-details" },
           row("Name", s.name), row("Version", s.version), row("REST API version", s.api_version), row("Database version", s.database_version),
           row("Database", s.database_backend ? "plugin" : "SQLite (built in)"), row("DICOM AE title and port", s.dicom_aet ? `${s.dicom_aet} : ${s.dicom_port}` : null),
@@ -4501,16 +4501,16 @@ function buildSystemView() {
           row("Maximum storage", s.maximum_storage_size ? `${s.maximum_storage_size} MB` : "no limit"),
           row("Maximum patients", s.maximum_patient_count || "no limit"), row("When full", s.maximum_storage_mode)),
         h("label", null, "Log level (until Orthanc restarts)", level)),
-      h("section", { class: "panel" }, h("h2", null, "Storage and counts"),
+      h("section", { class: "panel pad" }, h("h2", null, "Storage and counts"),
         h("dl", { class: "share-details" },
           row("Patients", st.CountPatients), row("Studies", st.CountStudies), row("Series", st.CountSeries), row("Images", st.CountInstances),
           row("Disk used", st.TotalDiskSizeMB != null ? mb(st.TotalDiskSizeMB) : st.TotalDiskSize != null ? formatBytes(Number(st.TotalDiskSize)) : null),
           row("Uncompressed size", st.TotalUncompressedSizeMB != null ? mb(st.TotalUncompressedSizeMB) : null))),
-      h("section", { class: "panel" }, h("h2", null, `Plugins (${(info.plugins || []).length})`),
+      h("section", { class: "panel pad" }, h("h2", null, `Plugins (${(info.plugins || []).length})`),
         h("div", { class: "table-wrap" }, h("table", { class: "data" },
           h("thead", null, h("tr", null, h("th", null, "Plugin"), h("th", null, "Version"), h("th", null, "Description"))),
           h("tbody", null, (info.plugins || []).map((p) => h("tr", null, h("td", { class: "mono" }, p.name), h("td", null, p.version || dash()), h("td", null, p.description || dash()))))))),
-      h("section", { class: "panel" }, h("h2", null, "Metrics"),
+      h("section", { class: "panel pad" }, h("h2", null, "Metrics"),
         h("p", { class: "muted" }, "Orthanc's counters in the Prometheus format (they need \"MetricsEnabled\" in Orthanc's configuration)."),
         h("button", {
           class: "btn small", type: "button",
@@ -4534,7 +4534,7 @@ function buildSystemView() {
         } catch (e) { out.textContent = e.message; }
       };
       path.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); read(); } });
-      panels.push(h("section", { class: "panel" }, h("h2", null, "Orthanc's REST API (read only)"),
+      panels.push(h("section", { class: "panel pad" }, h("h2", null, "Orthanc's REST API (read only)"),
         h("p", { class: "muted" }, "Read any address of Orthanc's API, for example /patients, /tools/labels or /studies/<id>. Only GET requests, never files; every read is in the audit log."),
         h("div", { class: "actions" }, path, h("button", { class: "btn small", type: "button", onclick: read }, "Read")), out));
     }
