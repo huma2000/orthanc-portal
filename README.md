@@ -31,6 +31,101 @@ A web front-end for an **Orthanc PACS** (recent releases), written in Rust. One 
 One self-contained executable: the web UI is compiled into it, users and settings live in a SQLite file,
 and the only other thing it needs is Orthanc (yours: **three ways to install it**, see section 3).
 
+### Complete feature list
+
+Everything the portal does, by area. Features marked *(switch)* can be turned on or off by an administrator;
+the section in brackets has the details.
+
+**Finding studies** (sections 6, 9b)
+
+* Search **studies** by patient name, patient ID, birth date, sex, other patient IDs, description, accession
+  number, referring / requesting physician, institution, modality, study dates, StudyInstanceUID and labels;
+  "contains" by default, `*` / `?` wildcards, `"exact"` values.
+* Search **series** directly (with body part), each shown with its patient and study.
+* **Modality buttons** (CT, MR, US, RX = CR + DX...): order, visibility and codes chosen by the administrator,
+  plus a box for any other code.
+* Sorting by clicking column titles; **live search** while typing *(switch)*; **endless lists** or pages
+  *(switch)*; columns, search boxes and study-window fields chosen and ordered in Settings.
+* **Labels** on studies (urgent, teaching...), with counts, an allowed list, and any / all / without-labels
+  filters *(switch)*.
+* "All the studies of this patient" from any study; **a link to any search** (bookmark it, send it).
+* **Preview thumbnails** of studies and series *(switch)*, cached in memory.
+* **Recently viewed**: each person's own list of the studies they opened last, on the home page *(switch)*.
+
+**Viewing** (sections 7, 9b)
+
+* **OHIF** in the browser (automatic / always / never) and **Weasis** on the desktop *(switch)*, both
+  through the portal's own read-only DICOMweb proxy: Orthanc is never exposed.
+* **More viewers** *(switch each)*: OHIF modes (MPR, 3D volume, TMTV, segmentation, microscopy), Stone Web
+  Viewer, VolView, the whole-slide viewer for microscopy, a MedDream address of your own; **Open together**
+  for several studies.
+* **Images, DICOM tags and PDF reports** of a series *(switch)*.
+
+**Getting images in and out** (sections 9, 9b, 9c)
+
+* **Upload** files, folders or ZIPs by drag and drop, with progress, speed, time left and an upload history.
+* **Download** a study, a series or several studies as a ZIP, with or without a DICOMDIR; one DICOM file
+  *(switch)*; a series as NIfTI *(switch)*; the ZIP name follows a template.
+* **Patient CD / USB export**: images with their DICOMDIR, a page for the patient and an optional portable
+  viewer *(switch)*.
+* **Send** studies to DICOM nodes, and *(switch)* to Orthanc peers and DICOMweb servers; the **Transfers**
+  page follows each one (progress, images, time left, outcome).
+* **Query / retrieve** from other DICOM nodes or DICOMweb servers *(switch)*.
+* **Auto-forward rules**: studies that arrive and match (modality, sending AE title, institution,
+  description) are sent on automatically *(switch)*.
+* **Modality worklists**: see, create, change and delete *(switch)*.
+
+**Changing the archive** (section 9b, each *(switch)* and its own permission)
+
+* Delete studies, series and images; change patient / study / series details; move a study to another
+  patient or a series to another study; anonymize; add a series of PDF reports or pictures.
+
+**Sharing with people outside** (sections 8, 9c)
+
+* **Invitation links**: a link plus a generated password for one study (or *(switch)* several, or every study
+  of a patient), with a validity and a number of ZIP downloads; the guest views it in OHIF and downloads it,
+  and sees the time and downloads left.
+* Optional per link: an **anonymized copy** instead of the original *(switch)*, an **email to the creator**
+  when it is opened or downloaded *(switch)*, sending the invitation **by email** (password left out unless
+  ticked).
+* The **Shares** page: time and downloads left, openings, **QR code** *(switch)*, show the password again
+  *(switch)*, edit (more time, downloads, a new password), revoke.
+* **Upload links** *(switch)*: somebody outside sends studies in (a CD folder) through a link plus a password;
+  they see nothing of the archive and can never add images to an existing study.
+
+**Accounts and security** (sections 5, 9c, 11)
+
+* Staff accounts with **twelve permissions** and editable **roles**; the last administrator cannot be removed.
+* **Two-step sign-in** with any authenticator app: off, optional or required, with recovery codes and an
+  administrator reset.
+* **My account**: one's own password and email address *(switch)*, and two-step sign-in.
+* Argon2 passwords, lockout after failed sign-ins (per account and per address), sessions that end when an
+  account is disabled or its password changes.
+* Two separate listeners: the staff portal on the intranet, only invitation and upload links on the internet
+  (Cloudflare traffic is refused on the staff port); guests are confined to their study by the server.
+* An **audit log** of every sensitive action, with a retention period.
+
+**Administration** (sections 4, 9c)
+
+* **Everything configured from the browser**, applied at once: Orthanc connection (with or without an
+  account, **Test connection**), ports, share links, email, sessions, roles, DICOM nodes (with **Test**).
+* **Jobs** page (pause, resume, cancel, retry) and **System** page (version, storage, plugins, log level,
+  metrics, Orthanc's log, read-only REST API browser) *(switch each)*.
+* **Statistics**: studies per month and modality, links, transfers, sign-ins, who uploads / shares / downloads
+  most *(switch)*.
+* **Backups** of the portal's database: automatic, on demand, or downloaded *(switch)*.
+
+**Look and language** (section 4)
+
+* **Branding**: window title, website icon, logo, portal name, login notice; **colours** and light / dark;
+  the home page as a table or as cards; auto-refresh of the lists.
+* **English and Spanish**, chosen per portal and per browser; date and name formats; custom CSS.
+
+**Running it** (sections 3, 10, 15)
+
+* One executable (web UI built in, SQLite), or Docker Compose with or without a bundled Orthanc, and a
+  Cloudflare Tunnel for the internet side.
+
 ---
 
 ## 1. How the pieces fit
