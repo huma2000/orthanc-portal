@@ -128,6 +128,7 @@ async fn main() -> anyhow::Result<()> {
         sessions: TokenStore::default(),
         weasis_tokens: TokenStore::default(),
         share_sessions: TokenStore::default(),
+        guest_members: Default::default(),
         throttle: LoginThrottle::default(),
         listeners: listeners.clone(),
         thumbs: ThumbnailCache::new(),

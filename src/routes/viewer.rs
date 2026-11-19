@@ -165,12 +165,15 @@ async fn forward(
     // Who is asking? Staff: the session cookie or a Weasis token, with the `visualize`
     // permission. Guest: the cookie set by an invitation's password; the viewer then only
     // gets what belongs to that invitation's study (checked below).
-    let guest_study_uids: Option<Vec<String>> = match audience {
+    let guest: Option<(i64, Vec<String>)> = match audience {
         Audience::Staff => {
             authenticate_viewer(state, headers)?;
             None
         }
-        Audience::Guest => Some(authenticate_share(state, headers)?.study_uids()),
+        Audience::Guest => {
+            let share = authenticate_share(state, headers)?;
+            Some((share.id, share.study_uids()))
+        }
     };
 
     // Where the request goes inside Orthanc.
@@ -196,7 +199,8 @@ async fn forward(
     };
     // A guest may only read THEIR study, and never whole DICOM files: the only way to get the
     // files is the counted ZIP download (see sharing.rs for the rules and the reasons).
-    if let Some(study_uids) = &guest_study_uids {
+    if let Some((share_id, study_uids)) = &guest {
+        let denied = || AppError::Denied("This link only gives access to the shared study.".into());
         let allowed = match area {
             Area::DicomWeb => sharing::guest_may_read_dicomweb(path, query.as_deref(), study_uids),
             Area::Wado => sharing::guest_may_read_wado(query.as_deref(), study_uids),
@@ -204,7 +208,18 @@ async fn forward(
             Area::App(_) => false, // guests only get OHIF
         };
         if !allowed {
-            return Err(AppError::Denied("This link only gives access to the shared study.".into()));
+            return Err(denied());
+        }
+        // The series and image named must really be part of the shared study.
+        let member = match area {
+            Area::DicomWeb => sharing::dicomweb_member(path).map_err(|_| denied())?,
+            Area::Wado => Some(sharing::wado_member(query.as_deref()).ok_or_else(denied)?),
+            _ => None,
+        };
+        if let Some(member) = member {
+            if !belongs_to_study(state, *share_id, &member).await? {
+                return Err(denied());
+            }
         }
     }
 
@@ -233,6 +248,31 @@ async fn forward(
     builder
         .body(Body::from_stream(answer.bytes_stream()))
         .map_err(|e| AppError::Internal(format!("cannot build proxy response: {e}")))
+}
+
+/// Does the series (and image) a guest names belong to the study written before it? Asked to
+/// Orthanc with `/tools/find` on the UIDs (all checked to be plain UIDs, so no wildcard), and
+/// remembered for a few minutes per invitation.
+async fn belongs_to_study(state: &AppState, share_id: i64, member: &sharing::Member) -> AppResult<bool> {
+    let now = crate::util::now_unix();
+    if state.guest_members.knows(share_id, member, now) {
+        return Ok(true);
+    }
+    let mut tags = serde_json::Map::new();
+    tags.insert("StudyInstanceUID".into(), json!(member.study));
+    if let Some(series) = &member.series {
+        tags.insert("SeriesInstanceUID".into(), json!(series));
+    }
+    if let Some(instance) = &member.instance {
+        tags.insert("SOPInstanceUID".into(), json!(instance));
+    }
+    let level = if member.instance.is_some() { "Instance" } else { "Series" };
+    let found = state.orthanc.find(&json!({ "Level": level, "Query": tags, "Limit": 1 })).await?;
+    if found.is_empty() {
+        return Ok(false);
+    }
+    state.guest_members.remember(share_id, member, now);
+    Ok(true)
 }
 
 /// `GET /dicom-web/{*path}`

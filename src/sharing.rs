@@ -15,9 +15,11 @@
 //! StudyInstanceUID), and **never whole DICOM files**: the only way to get the files is the
 //! ZIP download, which is counted. A viewer needs only searches, metadata and pixel frames.
 
-use crate::util::random_token;
+use crate::util::{is_valid_dicom_uid, random_token};
 use percent_encoding::percent_decode_str;
 use rand::Rng;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 /// Characters of generated passwords: no `0 O 1 I L`, which are mistaken for each other when a
 /// password is read aloud or typed from paper. 31 symbols x 12 positions = about 59 bits.
@@ -91,6 +93,17 @@ pub fn is_whole_dicom_retrieval(path: &str) -> bool {
     )
 }
 
+/// The names of the parameters a viewer sends are plain words (`StudyInstanceUID`, `includefield`,
+/// `limit`...). A name written with %-escapes, `+` or other signs could mean one thing to these
+/// checks and another to Orthanc (`StudyInstance%55ID` is `StudyInstanceUID` once decoded, and
+/// would slip a second study past [`names_only_study`]), so a guest's query must not have any.
+fn plain_parameter_names(query: Option<&str>) -> bool {
+    query.unwrap_or_default().split('&').filter(|pair| !pair.is_empty()).all(|pair| {
+        let name = pair.split_once('=').map_or(pair, |(name, _)| name);
+        !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    })
+}
+
 /// The decoded values of the query parameters called `keys` (compared ignoring case).
 fn query_values(query: Option<&str>, keys: &[&str]) -> Vec<String> {
     query
@@ -115,7 +128,7 @@ fn names_only_study(query: Option<&str>, keys: &[&str], study_uids: &[String]) -
 /// * anything below `studies/<uid>/...` when `<uid>` is the shared study, except whole files;
 /// * nothing else.
 pub fn guest_may_read_dicomweb(path: &str, query: Option<&str>, study_uids: &[String]) -> bool {
-    if is_whole_dicom_retrieval(path) {
+    if is_whole_dicom_retrieval(path) || !plain_parameter_names(query) {
         return false;
     }
     let parts: Vec<&str> = path.split('/').collect();
@@ -131,7 +144,99 @@ pub fn guest_may_read_dicomweb(path: &str, query: Option<&str>, study_uids: &[St
 /// WADO-URI (`/wado?requestType=WADO&studyUID=...&contentType=image/jpeg`): only for the shared
 /// study and only as a picture. Without a picture type Orthanc returns a whole DICOM file.
 pub fn guest_may_read_wado(query: Option<&str>, study_uids: &[String]) -> bool {
-    names_only_study(query, &["studyUID"], study_uids) && is_picture_request(query)
+    plain_parameter_names(query) && names_only_study(query, &["studyUID"], study_uids) && is_picture_request(query)
+}
+
+/// The series and image a guest's request names inside a shared study. The rules above only
+/// look at the study's UID; Orthanc may serve a series or an image by its own UID whatever the
+/// study written before it, so the portal also asks Orthanc whether they really belong to the
+/// shared study before relaying anything (`routes/viewer.rs`, remembered in [`MemberCache`]).
+#[derive(Debug, PartialEq, Eq)]
+pub struct Member {
+    pub study: String,
+    pub series: Option<String>,
+    pub instance: Option<String>,
+}
+
+impl Member {
+    /// The key under which a successful check is remembered for one invitation.
+    fn key(&self, share_id: i64) -> String {
+        format!(
+            "{share_id}|{}|{}|{}",
+            self.study,
+            self.series.as_deref().unwrap_or(""),
+            self.instance.as_deref().unwrap_or("")
+        )
+    }
+}
+
+/// What a DICOMweb path below `studies/<uid>/` names: `Ok(None)` when it names no series
+/// (study-level searches and metadata), `Err(())` when a UID is not a plain DICOM UID (only
+/// digits and dots: a `*` would match anything when Orthanc is asked).
+pub fn dicomweb_member(path: &str) -> Result<Option<Member>, ()> {
+    let parts: Vec<&str> = path.split('/').collect();
+    let (study, series, instance) = match parts.as_slice() {
+        ["studies", study, "series", series, "instances", instance, ..] => (*study, *series, Some(*instance)),
+        ["studies", study, "series", series, ..] => (*study, *series, None),
+        _ => return Ok(None),
+    };
+    if !is_valid_dicom_uid(series) || !instance.is_none_or(is_valid_dicom_uid) {
+        return Err(());
+    }
+    Ok(Some(Member {
+        study: study.to_string(),
+        series: Some(series.to_string()),
+        instance: instance.map(String::from),
+    }))
+}
+
+/// What a WADO-URI request names: exactly one image (`objectUID`), at most one series, one study.
+/// `None` = the request is refused.
+pub fn wado_member(query: Option<&str>) -> Option<Member> {
+    let one = |key: &str| -> Option<Option<String>> {
+        let mut values = query_values(query, &[key]);
+        values.dedup();
+        match values.len() {
+            0 => Some(None),
+            1 if is_valid_dicom_uid(&values[0]) => Some(values.pop()),
+            _ => None,
+        }
+    };
+    Some(Member { study: one("studyUID")??, series: one("seriesUID")?, instance: Some(one("objectUID")??) })
+}
+
+/// Checks already made with Orthanc ("this image belongs to the study of that invitation"), so a
+/// viewer reading hundreds of frames costs one question per image, not one per frame.
+#[derive(Clone, Default)]
+pub struct MemberCache {
+    inner: Arc<Mutex<HashMap<String, i64>>>,
+}
+
+/// A check is trusted this long (images do not move between studies, but an invitation can be
+/// changed: this keeps the memory small and fresh).
+const MEMBER_TTL_SECS: i64 = 600;
+/// At most this many checks are remembered; the oldest are forgotten first.
+const MEMBER_CACHE_MAX: usize = 50_000;
+
+impl MemberCache {
+    fn map(&self) -> std::sync::MutexGuard<'_, HashMap<String, i64>> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn knows(&self, share_id: i64, member: &Member, now: i64) -> bool {
+        self.map().get(&member.key(share_id)).is_some_and(|expires| *expires > now)
+    }
+
+    pub fn remember(&self, share_id: i64, member: &Member, now: i64) {
+        let mut map = self.map();
+        if map.len() >= MEMBER_CACHE_MAX {
+            map.retain(|_, expires| *expires > now);
+            if map.len() >= MEMBER_CACHE_MAX {
+                map.clear();
+            }
+        }
+        map.insert(member.key(share_id), now + MEMBER_TTL_SECS);
+    }
 }
 
 /// True when every `contentType` asked for is a picture type (and there is at least one).
@@ -264,6 +369,51 @@ mod tests {
         assert!(!guest_may_read_wado(Some("requestType=WADO&studyUID=9.9&contentType=image/jpeg"), &one()));
         assert!(!guest_may_read_wado(Some("contentType=image/jpeg"), &one()));
         assert!(!guest_may_read_wado(None, &one()));
+    }
+
+    #[test]
+    fn parameter_names_in_disguise_are_refused() {
+        let q = format!("StudyInstanceUID={UID}&StudyInstance%55ID=9.9.9");
+        assert!(!guest_may_read_dicomweb("studies", Some(&q), &one()));
+        assert!(!guest_may_read_dicomweb("studies", Some(&format!("StudyInstanceUID={UID}&a+b=1")), &one()));
+        assert!(!guest_may_read_dicomweb("studies", Some(&format!("StudyInstanceUID={UID}&0020,000D=9.9")), &one()));
+        assert!(!guest_may_read_wado(Some(&format!("studyUID={UID}&study%55ID=9.9&contentType=image/jpeg")), &one()));
+        assert!(guest_may_read_dicomweb(
+            &format!("studies/{UID}/series"),
+            Some("includefield=0008103E&limit=10"),
+            &one()
+        ));
+    }
+
+    #[test]
+    fn the_series_and_images_named_are_checked() {
+        assert_eq!(dicomweb_member(&format!("studies/{UID}/metadata")), Ok(None));
+        assert_eq!(dicomweb_member(&format!("studies/{UID}/series")), Ok(None));
+        let series = dicomweb_member(&format!("studies/{UID}/series/1.2/metadata")).unwrap().unwrap();
+        assert_eq!((series.series.as_deref(), series.instance), (Some("1.2"), None));
+        let image = dicomweb_member(&format!("studies/{UID}/series/1.2/instances/3.4/frames/1")).unwrap().unwrap();
+        assert_eq!((image.study.as_str(), image.instance.as_deref()), (UID, Some("3.4")));
+        assert!(dicomweb_member(&format!("studies/{UID}/series/abc/metadata")).is_err(), "not a UID");
+
+        let wado = |q: &str| wado_member(Some(q));
+        let image = wado(&format!("studyUID={UID}&seriesUID=1.2&objectUID=3.4&contentType=image/jpeg")).unwrap();
+        assert_eq!((image.series.as_deref(), image.instance.as_deref()), (Some("1.2"), Some("3.4")));
+        assert!(wado(&format!("studyUID={UID}&objectUID=3.4")).is_some_and(|m| m.series.is_none()));
+        assert!(wado(&format!("studyUID={UID}&contentType=image/jpeg")).is_none(), "which image?");
+        assert!(wado(&format!("studyUID={UID}&objectUID=*")).is_none(), "a wildcard");
+        assert!(wado(&format!("studyUID={UID}&objectUID=3.4&objectUID=5.6")).is_none(), "two images");
+        assert!(wado(&format!("studyUID={UID}&seriesUID=1&seriesUID=2&objectUID=3.4")).is_none());
+    }
+
+    #[test]
+    fn checks_are_remembered_per_invitation() {
+        let cache = MemberCache::default();
+        let m = Member { study: UID.into(), series: Some("1.2".into()), instance: None };
+        assert!(!cache.knows(1, &m, 100));
+        cache.remember(1, &m, 100);
+        assert!(cache.knows(1, &m, 100));
+        assert!(!cache.knows(2, &m, 100), "another invitation asks again");
+        assert!(!cache.knows(1, &m, 100 + MEMBER_TTL_SECS), "and after a while");
     }
 
     #[test]

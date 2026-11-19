@@ -9,6 +9,7 @@ use crate::db::Db;
 use crate::orthanc::OrthancClient;
 use crate::server::ListenerManager;
 use crate::settings::SettingsStore;
+use crate::sharing::MemberCache;
 use crate::thumbnails::ThumbnailCache;
 use std::sync::Arc;
 
@@ -28,6 +29,8 @@ pub struct AppState {
     /// Sessions of outside GUESTS who entered the password of a share link:
     /// cookie token -> share id (see `routes/guest.rs`).
     pub share_sessions: TokenStore,
+    /// Series and images Orthanc confirmed to belong to a guest's shared study (`sharing::Member`).
+    pub guest_members: MemberCache,
     /// Brute-force protection for the login form.
     pub throttle: LoginThrottle,
     /// Starts, stops and moves the HTTP listeners (used by the Settings screen).

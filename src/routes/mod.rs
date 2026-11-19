@@ -234,6 +234,7 @@ fn staff_router(state: AppState) -> Router {
         .nest("/api", api)
         .layer(Extension(Audience::Staff))
         .layer(middleware::from_fn(reject_internet_traffic))
+        .layer(middleware::from_fn(same_origin_only))
         .layer(middleware::from_fn(security_headers))
         .with_state(state)
 }
@@ -255,6 +256,7 @@ fn guest_router(state: AppState) -> Router {
         .route("/static/share.js", get(|headers: HeaderMap| serve_static(&SHARE_JS, headers)))
         .nest("/api", api)
         .layer(Extension(Audience::Guest))
+        .layer(middleware::from_fn(same_origin_only))
         .layer(middleware::from_fn(security_headers))
         .with_state(state)
 }
@@ -376,6 +378,34 @@ async fn csrf_guard(request: Request, next: Next) -> Response {
     next.run(request).await
 }
 
+/// Paths that answer with patient data or act on it (as opposed to pages and their files).
+fn is_data_path(path: &str) -> bool {
+    path.starts_with("/api/") || path.starts_with("/dicom-web/") || path == "/wado"
+}
+
+/// **Only this portal's own pages may use its data addresses.** Browsers say who made a request
+/// (`Sec-Fetch-Site`): another web site that links to, embeds or submits to `/api/...` is refused
+/// even for a GET, which [`csrf_guard`] lets through. For example, a page elsewhere cannot make a
+/// guest's browser use up a download of their invitation, or load staff images with the session
+/// cookie. Programs that are not browsers (Weasis, scripts) send no such header and are unaffected;
+/// opening an address typed or bookmarked by hand (`none`) is fine too.
+async fn same_origin_only(request: Request, next: Next) -> Response {
+    let from_elsewhere = request
+        .headers()
+        .get("sec-fetch-site")
+        .and_then(|v| v.to_str().ok())
+        .map(|site| site.eq_ignore_ascii_case("cross-site") || site.eq_ignore_ascii_case("same-site"))
+        .unwrap_or(false);
+    if from_elsewhere && is_data_path(request.uri().path()) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "This address can only be used from the portal's own pages" })),
+        )
+            .into_response();
+    }
+    next.run(request).await
+}
+
 /// Adds browser security headers to every response:
 ///  * `Content-Security-Policy`: only scripts/styles served by this portal may run;
 ///  * `X-Frame-Options` / `frame-ancestors`: the portal cannot be embedded in another site;
@@ -391,6 +421,7 @@ async fn security_headers(request: Request, next: Next) -> Response {
         .any(|root| path == *root || path.starts_with(&format!("{root}/")));
     let is_branding_image = path.starts_with("/branding/");
     let is_api = path.starts_with("/api/");
+    let is_data = is_data_path(path);
     let over_https = is_https(request.headers());
 
     let policy = if is_branding_image {
@@ -420,6 +451,14 @@ async fn security_headers(request: Request, next: Next) -> Response {
         header::HeaderName::from_static("permissions-policy"),
         HeaderValue::from_static("camera=(), microphone=(), geolocation=(), payment=(), usb=()"),
     );
+    // Patient data can never be loaded into another site's page (an <img> or <script> there),
+    // also by browsers too old to send `Sec-Fetch-Site` (see `same_origin_only`).
+    if is_data {
+        headers.insert(
+            header::HeaderName::from_static("cross-origin-resource-policy"),
+            HeaderValue::from_static("same-origin"),
+        );
+    }
     // Reached over HTTPS (Cloudflare): tell browsers to keep using HTTPS for six months.
     if over_https {
         headers.insert(header::STRICT_TRANSPORT_SECURITY, HeaderValue::from_static("max-age=15552000"));

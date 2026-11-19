@@ -1182,9 +1182,16 @@ impl Settings {
             return bad("The custom CSS can have at most 50,000 characters".into());
         }
         // The rules stay inside a <link>ed style sheet; still, nothing that could close a tag or load from elsewhere.
+        // A backslash is refused too: CSS escapes could spell those words differently (`u\72l(` is `url(`).
         let css = self.custom_css.to_lowercase();
-        if css.contains("</") || css.contains("@import") || css.contains("url(") || css.contains("expression(") {
-            return bad("The custom CSS cannot contain @import, url(...), expression(...) or HTML tags".into());
+        if ["</", "\\", "@import", "url(", "image-set(", "image(", "src(", "expression("]
+            .iter()
+            .any(|bad| css.contains(bad))
+        {
+            return bad(
+                "The custom CSS cannot contain @import, url(...), image-set(...), expression(...), backslashes or HTML tags"
+                    .into(),
+            );
         }
         if self.simplified_recent_title.chars().count() > 60 || has_control(&self.simplified_recent_title) {
             return bad("The title of the recent studies can have at most 60 characters".into());
@@ -1487,6 +1494,8 @@ mod tests {
         assert!(ok(json!({ "date_format": "dmy", "name_format": "first_last", "custom_css": ".x { color: red }" })));
         assert!(!ok(json!({ "custom_css": "@import 'http://evil';" })));
         assert!(!ok(json!({ "custom_css": "body { background: url(http://x) }" })));
+        assert!(!ok(json!({ "custom_css": "body { background: u\\72l(http://x) }" })), "a CSS escape");
+        assert!(!ok(json!({ "custom_css": "body { background: image-set('http://x' 1x) }" })));
         assert!(!ok(json!({ "date_format": "yyyy" })));
         assert!(ok(json!({ "language": "es" })) && ok(json!({ "language": "en" })));
         assert!(!ok(json!({ "language": "fr" })), "only the languages the portal has");

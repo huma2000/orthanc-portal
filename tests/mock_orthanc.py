@@ -146,6 +146,9 @@ def demo_find(q):
     level = q["Level"]
     items = list(DEMO_STUDIES.values()) if level == "Study" else list(DEMO_SERIES.values())
     for key, wanted in q.get("Query", {}).items():
+        if key == "SOPInstanceUID":   # the demo images of a series are <series UID>.1, .2...
+            items = [r for r in items if wanted.startswith(r["MainDicomTags"]["SeriesInstanceUID"] + ".")]
+            continue
         items = [r for r in items if demo_matches(demo_tag(r, key), key, wanted)]
     if level == "Study" and "Labels" in q:
         wanted, mode = set(q["Labels"]), q.get("LabelsConstraint", "All")
@@ -506,6 +509,13 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/tools/find":
             q = json.loads(body); log("find", q)
             if DEMO: return self._json(demo_find(q))
+            query = q.get("Query", {})
+            if q["Level"] != "Study" and ("SeriesInstanceUID" in query or "SOPInstanceUID" in query):
+                # "Does this series / image belong to that study?" (the portal asks it for guests).
+                # Series and images whose UID starts with 8.8. belong to some OTHER study.
+                ours = query.get("StudyInstanceUID") in (STUDY["MainDicomTags"]["StudyInstanceUID"], STUDY2["MainDicomTags"]["StudyInstanceUID"])
+                foreign = any(str(query.get(k, "")).startswith("8.8.") for k in ("SeriesInstanceUID", "SOPInstanceUID"))
+                return self._json([SERIES] if ours and not foreign else [])
             if q["Level"] != "Study": return self._json([SERIES])
             found = [with_labels(STUDY)] * MODE["copies"]
             return self._json(found[q.get("Since", 0):q.get("Since", 0) + q.get("Limit", 100)])

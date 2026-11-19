@@ -728,7 +728,9 @@ Built in:
   copy is kept to show it again to its creator or an administrator while the link is active, audited, erased
   when the link ends, and can be switched off so it is shown only once), throttled
   per link and per address, confined to one study, no whole DICOM files through the viewer address, atomic
-  download counter, expiry and revocation checked on every request, own cookie separate from staff sessions.
+  download counter. The confinement does not trust the UIDs written in a request: every series and image a
+  guest's viewer names is **checked with Orthanc to belong to the shared study** (remembered for 10 minutes),
+  and parameter names written in disguise (`StudyInstance%55ID`) are refused, expiry and revocation checked on every request, own cookie separate from staff sessions.
 * **Email invitations** (optional): plain text only; recipient addresses are parsed strictly (no header injection);
   at most 10 recipients per invitation and **30 per staff member per hour** (a stolen account cannot use the
   practice's mail server for spam); the mail server password is write-only and is **never sent without
@@ -750,9 +752,13 @@ Built in:
   other's settings, or both remove the last administrators.
 * Session cookie `HttpOnly`, `SameSite=Lax`, `Secure` automatically over HTTPS.
 * **CSRF** protection: every POST/PUT/DELETE must carry `X-Requested-With: portal`, which cross-site pages
-  cannot add.
+  cannot add. On top of that, the data addresses (`/api/...`, `/dicom-web/...`, `/wado`) refuse any request a
+  browser marks as coming from another site (`Sec-Fetch-Site`), even a GET: another page cannot make a guest
+  use up a download or load images with someone's session. They also carry
+  `Cross-Origin-Resource-Policy: same-origin`. Weasis and scripts send no such header and are unaffected.
 * Strict `Content-Security-Policy` (no inline scripts, no external resources) except on the OHIF pages,
-  `X-Frame-Options: DENY`.
+  `X-Frame-Options: DENY`. The custom CSS (Settings > Appearance) cannot load anything either: `@import`,
+  `url(...)`, `image-set(...)` and backslashes (CSS escapes that could spell them) are refused.
 * DICOM text is only ever inserted into the page as text, never as HTML.
 * Orthanc ids, DICOM UIDs, modality codes, DICOM destinations and proxy paths are validated; a destination
   is only ever *picked* from Orthanc's own list, never built from user text.
@@ -772,6 +778,10 @@ Operational advice:
 * Change every default password; use long passwords for `admin`.
 * **Back up** the `portal-data` volume (users, audit, transfers) and the Orthanc volume (images).
 * Do not publish Orthanc's port 8042; keep the DICOM port 4242 on the intranet.
+* Let only cloudflared reach the internet port (8081): the Docker setup does not publish it; without Docker,
+  listen on `127.0.0.1:8081` when cloudflared runs on the same machine. On that port the visitor's address
+  comes from Cloudflare's `CF-Connecting-IP` header, which someone connecting directly could make up (the
+  per-link lock still holds, but the per-address lock and the addresses in the audit log would not).
 * `portal.db` holds the Orthanc password: restrict access to it and to its backups.
 * Sessions and tokens live in memory: restarting the portal signs everybody out.
 * The audit log grows over time: set *Keep the audit log for (days)* in Settings if your policy allows deleting
@@ -899,12 +909,13 @@ The code compiles without warnings on Rust 1.91, passes `cargo clippy --all-targ
 formatted with `rustfmt` (see `rustfmt.toml`), and its dependencies were checked against the RustSec advisory
 database (no known vulnerable version in `Cargo.lock`). The automated tests live in the **`tests/`** folder:
 
-* `tests/server_tests.sh`: **602 checks** of the server against a fake Orthanc (`tests/mock_orthanc.py`) and a
+* `tests/server_tests.sh`: **620 checks** of the server against a fake Orthanc (`tests/mock_orthanc.py`) and a
   fake mail server (`tests/mock_smtp.py`):
   the two doors (staff portal vs invitation links only, Cloudflare headers refused on the intranet port), creating
   links with the default and the limited validity/downloads, the password gate and its throttling, what a guest
   sees, **the confinement to the shared study** (other studies, unfiltered searches, whole DICOM files, WADO
-  without a picture type), the **counted downloads** (including 8 simultaneous clicks on a 3-download link),
+  without a picture type, series and images of other studies written under the shared one, disguised
+  parameter names, requests from other sites), the **counted downloads** (including 8 simultaneous clicks on a 3-download link),
   running out of downloads while viewing continues, expiry, revocation, search and modality filters,
   thumbnails, sending and job tracking, upload/download, branding including malicious files, live settings,
   login hardening, caps, ETag/headers, concurrent administrators, and **talking to Orthanc with an account, without
@@ -916,7 +927,7 @@ database (no known vulnerable version in `Cargo.lock`). The automated tests live
   links, no OHIF), what each kind of staff account sees, search, the with/without-account choice in Settings,
   and the translations (every `t()` text translated, the language menu, the portal's language, the server's
   messages and the invitation page in Spanish);
-* `cargo test`: **43 unit tests** (image validation; password and link generation; the rules that confine a guest
+* `cargo test`: **46 unit tests** (image validation; password and link generation; the rules that confine a guest
   to one study; account / no account and the wording of Orthanc refusals; the thumbnail cache; tokens and sessions;
   the role of a user, settings saved by earlier versions, the appearance settings; email addresses, invitation texts (English and Spanish), the hourly email limit and
   the rule that the mail server password never travels unencrypted).
