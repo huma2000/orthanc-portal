@@ -258,6 +258,33 @@ async fn belongs_to_study(state: &AppState, share_id: i64, member: &sharing::Mem
     if state.guest_members.knows(share_id, member, now) {
         return Ok(true);
     }
+    // An image of a series: a viewer reads EVERY image of the series it shows (hundreds for a CT),
+    // so ask once for all the images of that series in the study and remember each of them.
+    if let (Some(series), Some(_)) = (&member.series, &member.instance) {
+        let listed = sharing::Member {
+            study: member.study.clone(),
+            series: Some(series.clone()),
+            instance: Some(sharing::WHOLE_SERIES.into()),
+        };
+        if !state.guest_members.knows(share_id, &listed, now) {
+            let query = json!({ "StudyInstanceUID": member.study, "SeriesInstanceUID": series });
+            let found = state.orthanc.find(&json!({ "Level": "Instance", "Query": query, "Expand": true })).await?;
+            if found.is_empty() {
+                return Ok(false); // the series is not part of the study
+            }
+            let images =
+                found.iter().filter_map(|i| i["MainDicomTags"]["SOPInstanceUID"].as_str()).map(|uid| sharing::Member {
+                    study: member.study.clone(),
+                    series: Some(series.clone()),
+                    instance: Some(uid.into()),
+                });
+            state.guest_members.remember_all(share_id, images.chain([listed]), now);
+            if state.guest_members.knows(share_id, member, now) {
+                return Ok(true);
+            }
+        }
+        // Not in the list (an image added since): asked on its own below.
+    }
     let mut tags = serde_json::Map::new();
     tags.insert("StudyInstanceUID".into(), json!(member.study));
     if let Some(series) = &member.series {

@@ -68,7 +68,7 @@ pub mod worklists;
 use crate::auth;
 use crate::state::AppState;
 use crate::util::is_https;
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::DefaultBodyLimit;
 use axum::extract::{Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
@@ -278,37 +278,19 @@ async fn reject_internet_traffic(request: Request, next: Next) -> Response {
 /// A file compiled into the program, served with an `ETag` computed from its content.
 /// Browsers then ask "has it changed?" and get a tiny `304 Not Modified` instead of the
 /// whole file again on every page load (the ETag changes by itself with each new version).
+/// Browsers that accept it get a **gzip** copy (app.js: 280 KB -> about 80 KB), made once.
 struct StaticFile {
     content_type: &'static str,
     body: &'static str,
     etag: OnceLock<String>,
+    gzip: OnceLock<Option<(Bytes, String)>>,
 }
 
-static APP_JS: StaticFile = StaticFile {
-    content_type: "text/javascript; charset=utf-8",
-    body: include_str!("../../static/app.js"),
-    etag: OnceLock::new(),
-};
-static SHARE_JS: StaticFile = StaticFile {
-    content_type: "text/javascript; charset=utf-8",
-    body: include_str!("../../static/share.js"),
-    etag: OnceLock::new(),
-};
-static APP_CSS: StaticFile = StaticFile {
-    content_type: "text/css; charset=utf-8",
-    body: include_str!("../../static/app.css"),
-    etag: OnceLock::new(),
-};
-/// Spanish (Spain): English text -> translation (the keys are the English texts of app.js, share.js and the server's messages).
-static I18N_ES: StaticFile = StaticFile {
-    content_type: "application/json; charset=utf-8",
-    body: include_str!("../../static/i18n/es.json"),
-    etag: OnceLock::new(),
-};
-static DEFAULT_MARK: StaticFile =
-    StaticFile { content_type: "image/svg+xml", body: include_str!("../../static/favicon.svg"), etag: OnceLock::new() };
-
 impl StaticFile {
+    const fn new(content_type: &'static str, body: &'static str) -> Self {
+        Self { content_type, body, etag: OnceLock::new(), gzip: OnceLock::new() }
+    }
+
     /// `"<64-bit FNV-1a hash of the content>"`, computed once.
     fn etag(&self) -> &str {
         self.etag.get_or_init(|| {
@@ -319,22 +301,69 @@ impl StaticFile {
             format!("\"{hash:016x}\"")
         })
     }
+
+    /// The gzip copy and its own ETag (`"<hash>-gz"`: the two copies are different bytes), made
+    /// the first time it is asked for. `None` for small files, which would hardly shrink.
+    fn gzipped(&self) -> Option<&(Bytes, String)> {
+        self.gzip
+            .get_or_init(|| {
+                if self.body.len() < 2048 {
+                    return None;
+                }
+                use std::io::Write;
+                let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+                encoder.write_all(self.body.as_bytes()).ok()?;
+                let packed = encoder.finish().ok()?;
+                let etag = self.etag();
+                Some((Bytes::from(packed), format!("{}-gz\"", &etag[..etag.len() - 1])))
+            })
+            .as_ref()
+    }
+}
+
+static APP_JS: StaticFile = StaticFile::new("text/javascript; charset=utf-8", include_str!("../../static/app.js"));
+static SHARE_JS: StaticFile = StaticFile::new("text/javascript; charset=utf-8", include_str!("../../static/share.js"));
+static APP_CSS: StaticFile = StaticFile::new("text/css; charset=utf-8", include_str!("../../static/app.css"));
+/// Spanish (Spain): English text -> translation (the keys are the English texts of app.js, share.js and the server's messages).
+static I18N_ES: StaticFile =
+    StaticFile::new("application/json; charset=utf-8", include_str!("../../static/i18n/es.json"));
+static DEFAULT_MARK: StaticFile = StaticFile::new("image/svg+xml", include_str!("../../static/favicon.svg"));
+
+/// Does the browser accept gzip (`Accept-Encoding: gzip, deflate, br`; not `gzip;q=0`)?
+fn accepts_gzip(headers: &HeaderMap) -> bool {
+    headers.get(header::ACCEPT_ENCODING).and_then(|v| v.to_str().ok()).is_some_and(|v| {
+        v.split(',').any(|item| {
+            let mut parts = item.split(';').map(str::trim);
+            parts.next().is_some_and(|name| name.eq_ignore_ascii_case("gzip"))
+                && !parts.any(|p| p.strip_prefix("q=").and_then(|q| q.trim().parse::<f32>().ok()) == Some(0.0))
+        })
+    })
 }
 
 /// Serves an embedded file: `304` when the browser already has this exact version.
 async fn serve_static(file: &'static StaticFile, headers: HeaderMap) -> Response {
-    let etag = file.etag();
+    let packed = if accepts_gzip(&headers) { file.gzipped() } else { None };
+    let etag = packed.map_or(file.etag(), |(_, etag)| etag.as_str());
     let browser_has_it = headers
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
         .map(|v| v.split(',').any(|candidate| candidate.trim().trim_start_matches("W/") == etag))
         .unwrap_or(false);
     // `no-cache` = "keep a copy, but ask before using it" (cheap thanks to the 304).
+    // `Vary`: caches on the way must keep the gzip and the plain copy apart.
+    let common = [(header::CACHE_CONTROL, "no-cache"), (header::VARY, "Accept-Encoding")];
     if browser_has_it {
-        return (StatusCode::NOT_MODIFIED, [(header::ETAG, etag), (header::CACHE_CONTROL, "no-cache")]).into_response();
+        return (StatusCode::NOT_MODIFIED, common, [(header::ETAG, etag)]).into_response();
     }
-    ([(header::CONTENT_TYPE, file.content_type), (header::CACHE_CONTROL, "no-cache"), (header::ETAG, etag)], file.body)
-        .into_response()
+    match packed {
+        Some((bytes, _)) => (
+            common,
+            [(header::CONTENT_TYPE, file.content_type), (header::CONTENT_ENCODING, "gzip"), (header::ETAG, etag)],
+            bytes.clone(),
+        )
+            .into_response(),
+        None => (common, [(header::CONTENT_TYPE, file.content_type), (header::ETAG, etag)], file.body).into_response(),
+    }
 }
 
 /// Enforces the maximum upload size, which is a setting an administrator can

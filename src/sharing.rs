@@ -206,7 +206,7 @@ pub fn wado_member(query: Option<&str>) -> Option<Member> {
 }
 
 /// Checks already made with Orthanc ("this image belongs to the study of that invitation"), so a
-/// viewer reading hundreds of frames costs one question per image, not one per frame.
+/// viewer reading hundreds of frames costs one question per series, not one per image or frame.
 #[derive(Clone, Default)]
 pub struct MemberCache {
     inner: Arc<Mutex<HashMap<String, i64>>>,
@@ -228,16 +228,32 @@ impl MemberCache {
     }
 
     pub fn remember(&self, share_id: i64, member: &Member, now: i64) {
+        self.remember_all(share_id, [member], now);
+    }
+
+    /// Remembers several checks at once (all the images of a series), under one lock.
+    pub fn remember_all<M: std::borrow::Borrow<Member>>(
+        &self,
+        share_id: i64,
+        members: impl IntoIterator<Item = M>,
+        now: i64,
+    ) {
         let mut map = self.map();
-        if map.len() >= MEMBER_CACHE_MAX {
-            map.retain(|_, expires| *expires > now);
+        for member in members {
             if map.len() >= MEMBER_CACHE_MAX {
-                map.clear();
+                map.retain(|_, expires| *expires > now);
+                if map.len() >= MEMBER_CACHE_MAX {
+                    map.clear();
+                }
             }
+            map.insert(member.borrow().key(share_id), now + MEMBER_TTL_SECS);
         }
-        map.insert(member.key(share_id), now + MEMBER_TTL_SECS);
     }
 }
+
+/// Stands for "every image of this series was listed" in a [`MemberCache`] (never a real UID:
+/// those are only digits and dots).
+pub const WHOLE_SERIES: &str = "*";
 
 /// True when every `contentType` asked for is a picture type (and there is at least one).
 fn is_picture_request(query: Option<&str>) -> bool {

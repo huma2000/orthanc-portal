@@ -179,6 +179,15 @@ ok "...not even a site next door on another port (same-site)" "$(code $F $V GET 
 ok "...the portal's own page can" "$(code $F $V GET /api/me -H 'Sec-Fetch-Site: same-origin')" "200"
 ok "...and so can an address typed by hand" "$(code $F $V GET /api/me -H 'Sec-Fetch-Site: none')" "200"
 ok "...and a link from elsewhere still opens the portal's page" "$(code $F $V GET / -H 'Sec-Fetch-Site: cross-site')" "200"
+curl -s -D gz.h -o gz.body -H 'Accept-Encoding: gzip, deflate, br' $F/static/app.js
+has "app.js is sent compressed to browsers that accept gzip" "$(cat gz.h)" "content-encoding: gzip"
+ok "...at less than a third of its size" "$(( $(wc -c < gz.body) * 3 < $(wc -c < "$ROOT/static/app.js") ))" "1"
+ok "...and it unpacks to exactly the file" "$(gzip -dc gz.body | cmp -s - "$ROOT/static/app.js" && echo same)" "same"
+GZ_ETAG=$(grep -i '^etag' gz.h | cut -d' ' -f2 | tr -d '\r')
+ok "...with its own ETag, which gives a 304 next time" "$(curl -s -o /dev/null -w '%{http_code}' -H 'Accept-Encoding: gzip' -H "If-None-Match: $GZ_ETAG" $F/static/app.js)" "304"
+hasnt "a client that does not accept gzip gets the plain file" "$(curl -s -D - -o /dev/null $F/static/app.js)" "content-encoding"
+hasnt "...nor one that refuses it (gzip;q=0)" "$(curl -s -D - -o /dev/null -H 'Accept-Encoding: gzip;q=0' $F/static/app.js)" "content-encoding"
+has "the Spanish dictionary is compressed too, on the internet listener as well" "$(curl -s -D - -o /dev/null -H 'Accept-Encoding: gzip' $G/static/i18n/es.json)" "content-encoding: gzip"
 has "the data addresses cannot be embedded by other sites (Cross-Origin-Resource-Policy)" "$(curl -s -D - -o /dev/null -H "Cookie: portal_session=$V" $F/api/me)" "cross-origin-resource-policy: same-origin"
 ok "intranet: the browser viewer page is served to staff" "$(code $F $V GET '/ohif/viewer?StudyInstanceUIDs=1.2.3')" "200"
 
@@ -424,6 +433,11 @@ ok "guest: WADO-URI with a wildcard for the image -> 403" "$(gcode $GC GET "/wad
 ok "guest: WADO-URI naming two images -> 403" "$(gcode $GC GET "/wado?requestType=WADO&studyUID=$UID_&objectUID=3&objectUID=8.8.7&contentType=image/jpeg")" "403"
 ok "guest: ...an image of the shared study is still fine" "$(gcode $GC GET "/wado?requestType=WADO&studyUID=$UID_&objectUID=3&contentType=image/jpeg")" "200"
 has "...what was asked: is this image in the shared study" "$(tail -3 find.log)" "8.8.7"
+before=$(wc -l < find.log)
+for i in 6.7 6.8 3; do for f in 1 2; do gcode $GC GET "$D/studies/$UID_/series/7.7/instances/$i/frames/$f" > /dev/null; done; done
+ok "guest: the images of a series are checked with ONE question to Orthanc (not one per image or frame)" "$(( $(wc -l < find.log) - before ))" "1"
+ok "...and they are all served" "$(gcode $GC GET "$D/studies/$UID_/series/7.7/instances/6.8/frames/3")" "200"
+ok "...an image not in that list is still asked about on its own" "$(gcode $GC GET "$D/studies/$UID_/series/7.7/instances/6.9/frames/1")$(( $(wc -l < find.log) - before ))" "2002"
 echo "== only the portal's own pages may use its data addresses (Sec-Fetch-Site)"
 ok "guest: another web site cannot use up a download" "$(gcode $GC GET /api/share/$L1_TOKEN/download -H 'Sec-Fetch-Site: cross-site')" "403"
 ok "guest: ...nor load the images" "$(gcode $GC GET "$D/studies/$UID_/series" -H 'Sec-Fetch-Site: cross-site')" "403"

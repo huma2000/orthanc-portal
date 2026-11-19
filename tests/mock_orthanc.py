@@ -515,7 +515,10 @@ class H(BaseHTTPRequestHandler):
                 # Series and images whose UID starts with 8.8. belong to some OTHER study.
                 ours = query.get("StudyInstanceUID") in (STUDY["MainDicomTags"]["StudyInstanceUID"], STUDY2["MainDicomTags"]["StudyInstanceUID"])
                 foreign = any(str(query.get(k, "")).startswith("8.8.") for k in ("SeriesInstanceUID", "SOPInstanceUID"))
-                return self._json([SERIES] if ours and not foreign else [])
+                if not ours or foreign: return self._json([])
+                if q["Level"] == "Instance" and "SOPInstanceUID" not in query:   # all the images of a series
+                    return self._json([{"ID": f"i-{u}", "Type": "Instance", "MainDicomTags": {"SOPInstanceUID": u}} for u in ("6.7", "6.8", "3")])
+                return self._json([SERIES])
             if q["Level"] != "Study": return self._json([SERIES])
             found = [with_labels(STUDY)] * MODE["copies"]
             return self._json(found[q.get("Since", 0):q.get("Since", 0) + q.get("Limit", 100)])

@@ -729,7 +729,7 @@ Built in:
   when the link ends, and can be switched off so it is shown only once), throttled
   per link and per address, confined to one study, no whole DICOM files through the viewer address, atomic
   download counter. The confinement does not trust the UIDs written in a request: every series and image a
-  guest's viewer names is **checked with Orthanc to belong to the shared study** (remembered for 10 minutes),
+  guest's viewer names is **checked with Orthanc to belong to the shared study** (one question per series, remembered for 10 minutes),
   and parameter names written in disguise (`StudyInstance%55ID`) are refused, expiry and revocation checked on every request, own cookie separate from staff sessions.
 * **Email invitations** (optional): plain text only; recipient addresses are parsed strictly (no header injection);
   at most 10 recipients per invitation and **30 per staff member per hour** (a stolen account cannot use the
@@ -880,7 +880,7 @@ Cargo.toml            dependencies
 Dockerfile            container image
 deploy/               option B: docker-compose.yml (preconfigured Orthanc + portal + tunnel), .env.example, orthanc.json; cloudflared-config.yml (tunnel run on the host, option C)
 deploy/existing-orthanc/  option A: docker-compose.yml + .env.example (portal + tunnel, for an Orthanc you already have)
-static/               staff UI: index.html + app.js; guest page: share.html + share.js; app.css (both), favicon.svg (the default mark); i18n/es.json (the Spanish translation); all embedded in the binary. The two HTML files are templates: title, icon and language are filled in per request
+static/               staff UI: index.html + app.js; guest page: share.html + share.js; app.css (both), favicon.svg (the default mark); i18n/es.json (the Spanish translation); all embedded in the binary and sent gzip-compressed to browsers that accept it (app.js: 280 KB -> 80 KB), with an ETag so an unchanged file costs a 304. The two HTML files are templates: title, icon and language are filled in per request
 src/main.rs           start-up, background cleanup, graceful shutdown
 src/config.rs         the few bootstrap values from the environment
 src/settings.rs       every web-editable setting: defaults, validation, saved copy, roles
@@ -909,7 +909,7 @@ The code compiles without warnings on Rust 1.91, passes `cargo clippy --all-targ
 formatted with `rustfmt` (see `rustfmt.toml`), and its dependencies were checked against the RustSec advisory
 database (no known vulnerable version in `Cargo.lock`). The automated tests live in the **`tests/`** folder:
 
-* `tests/server_tests.sh`: **620 checks** of the server against a fake Orthanc (`tests/mock_orthanc.py`) and a
+* `tests/server_tests.sh`: **630 checks** of the server against a fake Orthanc (`tests/mock_orthanc.py`) and a
   fake mail server (`tests/mock_smtp.py`):
   the two doors (staff portal vs invitation links only, Cloudflare headers refused on the intranet port), creating
   links with the default and the limited validity/downloads, the password gate and its throttling, what a guest
@@ -918,7 +918,7 @@ database (no known vulnerable version in `Cargo.lock`). The automated tests live
   parameter names, requests from other sites), the **counted downloads** (including 8 simultaneous clicks on a 3-download link),
   running out of downloads while viewing continues, expiry, revocation, search and modality filters,
   thumbnails, sending and job tracking, upload/download, branding including malicious files, live settings,
-  login hardening, caps, ETag/headers, concurrent administrators, and **talking to Orthanc with an account, without
+  login hardening, caps, ETag/headers, compression of the built-in files, concurrent administrators, and **talking to Orthanc with an account, without
   one, and when it refuses the portal** (what is sent, what is not, the message for each case), an
   administrator changing their own password (every other session of that account is signed out), and the
   portal in Spanish (the setting, the dictionary on both listeners, the pages and the invitation emails);

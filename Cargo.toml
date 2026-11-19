@@ -43,6 +43,8 @@ anyhow = "1"             # error handling in main()/config only
 tracing = "0.1"          # logging
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dotenvy = "0.15"         # loads a local .env file (optional)
+# gzip of the files built into the program (app.js, the translations...), done once at start-up.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [profile.release]
 # Smaller, faster binary for production.
