@@ -214,6 +214,43 @@ pub enum RecentOrder {
     Received,
 }
 
+/// Two-step sign-in (a 6-digit code from an authenticator app after the password).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TwoFactorMode {
+    /// Not used: nobody is asked for a code (codes set up earlier are kept, but not asked).
+    #[default]
+    Off,
+    /// Each person may switch it on for their own account (My account).
+    Optional,
+    /// Everybody must use it: an account without it sets it up at its next sign-in.
+    Required,
+}
+
+/// One automatic forwarding rule (Settings > Auto-forward): every study that arrives and matches
+/// is sent to `target`. Empty conditions match everything.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForwardRule {
+    /// Shown in the Transfers list ("auto: <name>") and in the audit log.
+    pub name: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Any of these modality codes is in the study (empty = any). RX = CR + DX.
+    #[serde(default)]
+    pub modalities: Vec<String>,
+    /// The AE title of the system that sent the study to Orthanc (empty = any; `*` wildcards).
+    #[serde(default)]
+    pub calling_aet: String,
+    /// The institution name contains this text (empty = any; case does not matter).
+    #[serde(default)]
+    pub institution: String,
+    /// The study description contains this text (empty = any; case does not matter).
+    #[serde(default)]
+    pub description: String,
+    /// The destination: a DICOM node alias, `peer:<name>` or `dicomweb:<name>` (see routes/send.rs).
+    pub target: String,
+}
+
 /// A named bundle of permissions, offered as a shortcut when editing a user.
 /// The list of roles is itself a setting: administrators can add, change and remove them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -386,6 +423,67 @@ pub struct Settings {
     /// the Shares list while the link is active. Off = shown only once, stored only as a hash.
     #[serde(default = "default_true")]
     pub share_keep_passwords: bool,
+    /// The Share window offers "share an anonymized copy" (made in Orthanc, deleted when the link ends).
+    #[serde(default = "default_true")]
+    pub share_anonymize: bool,
+    /// The Share window offers "email me when the link is opened or downloaded" (needs a mail server
+    /// and an email address on the account).
+    #[serde(default = "default_true")]
+    pub share_notify: bool,
+
+    // ---- Upload links: people outside SEND studies in (Settings > Features) -----------
+    /// Staff with the `share` and `upload` permissions may create upload links.
+    #[serde(default)]
+    pub upload_links: bool,
+    /// Suggested validity of a new upload link (hours; at most `share_max_hours`).
+    #[serde(default = "default_upload_link_hours")]
+    pub upload_link_default_hours: u64,
+    /// The most an upload link may receive in total (MB).
+    #[serde(default = "default_upload_link_max_mb")]
+    pub upload_link_max_mb: u64,
+    /// Label put on the studies received through upload links (empty = none).
+    #[serde(default = "default_upload_link_label")]
+    pub upload_link_label: String,
+
+    // ---- Two-step sign-in (Settings > Security & roles) -------------------------------
+    #[serde(default)]
+    pub two_factor: TwoFactorMode,
+
+    // ---- Auto-forward (Settings > Auto-forward) ---------------------------------------
+    /// The rules are applied (they are kept when this is off).
+    #[serde(default)]
+    pub forward_enabled: bool,
+    #[serde(default)]
+    pub forward_rules: Vec<ForwardRule>,
+
+    // ---- Patient CD / USB export (Settings > Features) --------------------------------
+    /// "Patient CD / USB" in the download menus: DICOMDIR + a page for the patient + a viewer.
+    #[serde(default = "default_true")]
+    pub cd_export: bool,
+    /// Folder (on the portal's computer) with a portable DICOM viewer, copied onto every patient
+    /// CD / USB export. Empty = no viewer, only the images and the page for the patient.
+    #[serde(default)]
+    pub cd_viewer_dir: String,
+
+    // ---- Backups of the portal's own database (Settings > Backups) ---------------------
+    /// Folder where copies of the database are written. Empty = no automatic backups.
+    #[serde(default)]
+    pub backup_dir: String,
+    /// Hours between two automatic backups.
+    #[serde(default = "default_backup_hours")]
+    pub backup_interval_hours: u64,
+    /// How many automatic backups are kept (the oldest are deleted).
+    #[serde(default = "default_backup_keep")]
+    pub backup_keep: u64,
+
+    // ---- Home page: what each person looked at last -------------------------------------
+    #[serde(default = "default_true")]
+    pub recently_viewed: bool,
+    #[serde(default = "default_recently_viewed_count")]
+    pub recently_viewed_count: u64,
+    /// Configuration > Statistics (administrators).
+    #[serde(default = "default_true")]
+    pub stats_page: bool,
 
     // ---- Email (share invitations sent by the portal) -----------------------------
     /// Mail server. Empty = email is switched off.
@@ -654,6 +752,24 @@ fn default_search_min_chars() -> u64 {
 fn default_smtp_port() -> u64 {
     587
 }
+fn default_upload_link_hours() -> u64 {
+    168
+}
+fn default_upload_link_max_mb() -> u64 {
+    4096
+}
+fn default_upload_link_label() -> String {
+    "received".into()
+}
+fn default_backup_hours() -> u64 {
+    24
+}
+fn default_backup_keep() -> u64 {
+    7
+}
+fn default_recently_viewed_count() -> u64 {
+    8
+}
 fn default_recent_count() -> u64 {
     12
 }
@@ -706,6 +822,23 @@ impl Settings {
             share_default_downloads: 1,
             share_max_downloads: 20,
             share_keep_passwords: true,
+            share_anonymize: true,
+            share_notify: true,
+            upload_links: false,
+            upload_link_default_hours: default_upload_link_hours(),
+            upload_link_max_mb: default_upload_link_max_mb(),
+            upload_link_label: default_upload_link_label(),
+            two_factor: TwoFactorMode::Off,
+            forward_enabled: false,
+            forward_rules: Vec::new(),
+            cd_export: true,
+            cd_viewer_dir: String::new(),
+            backup_dir: String::new(),
+            backup_interval_hours: default_backup_hours(),
+            backup_keep: default_backup_keep(),
+            recently_viewed: true,
+            recently_viewed_count: default_recently_viewed_count(),
+            stats_page: true,
             smtp_host: String::new(),
             smtp_port: default_smtp_port(),
             smtp_security: SmtpSecurity::Starttls,
@@ -812,6 +945,13 @@ impl Settings {
         }
         if let Some(v) = env_opt("PUBLIC_BASE_URL") {
             s.public_base_url = v;
+        }
+        // Docker: a folder of the host mounted for the backups / the portable viewer of patient CDs.
+        if let Some(v) = env_opt("BACKUP_DIR") {
+            s.backup_dir = v;
+        }
+        if let Some(v) = env_opt("CD_VIEWER_DIR") {
+            s.cd_viewer_dir = v;
         }
         s.session_hours = env_parse("SESSION_HOURS", s.session_hours)?;
         s.weasis_token_minutes = env_parse("WEASIS_TOKEN_MINUTES", s.weasis_token_minutes)?;
@@ -935,6 +1075,23 @@ impl Settings {
         self.simplified_upload_text = self.simplified_upload_text.trim().to_string();
         self.meddream_url = self.meddream_url.trim().to_string();
         self.download_name_template = self.download_name_template.trim().to_string();
+        self.upload_link_label = self.upload_link_label.trim().to_string();
+        self.cd_viewer_dir = self.cd_viewer_dir.trim().to_string();
+        self.backup_dir = self.backup_dir.trim().to_string();
+        for rule in &mut self.forward_rules {
+            rule.name = rule.name.trim().to_string();
+            rule.calling_aet = rule.calling_aet.trim().to_string();
+            rule.institution = rule.institution.trim().to_string();
+            rule.description = rule.description.trim().to_string();
+            rule.target = rule.target.trim().to_string();
+            let mut codes: Vec<String> = Vec::new();
+            for code in rule.modalities.iter().map(|c| c.trim().to_uppercase()).filter(|c| !c.is_empty()) {
+                if !codes.contains(&code) {
+                    codes.push(code);
+                }
+            }
+            rule.modalities = codes;
+        }
         for role in &mut self.roles {
             role.key = role.key.trim().to_string();
             role.label = role.label.trim().to_string();
@@ -1226,6 +1383,65 @@ impl Settings {
                 "'{bad_label}' is not a valid label: 1 to 64 letters, digits, '-' or '_' (no spaces or accents)"
             ));
         }
+
+        // --- upload links
+        // (Never longer than the maximum of share links: that cap is applied when a link is made, so
+        // lowering the maximum never makes the whole form fail.)
+        range("Upload link validity, default (hours)", self.upload_link_default_hours, 1, 8760)?;
+        range("Upload link size limit (MB)", self.upload_link_max_mb, 1, 1_048_576)?;
+        if !self.upload_link_label.is_empty() && !crate::routes::labels::valid_label(&self.upload_link_label) {
+            return bad(format!(
+                "'{}' is not a valid label for received studies: 1 to 64 letters, digits, '-' or '_'",
+                self.upload_link_label
+            ));
+        }
+
+        // --- folders on the portal's computer (backups, the viewer of patient CDs)
+        for (what, dir) in [("backup folder", &self.backup_dir), ("folder of the CD viewer", &self.cd_viewer_dir)] {
+            if dir.is_empty() {
+                continue;
+            }
+            if dir.chars().count() > 300 || has_control(dir) || !std::path::Path::new(dir).is_absolute() {
+                return bad(format!(
+                    "The {what} must be a full path (e.g. /data/backups or D:\\Backups), at most 300 characters"
+                ));
+            }
+        }
+        range("Hours between two backups", self.backup_interval_hours, 1, 24 * 30)?;
+        range("Backups to keep", self.backup_keep, 1, 365)?;
+        range("Recently viewed studies on the home page", self.recently_viewed_count, 1, 30)?;
+
+        // --- auto-forward rules
+        if self.forward_rules.len() > 50 {
+            return bad("At most 50 forwarding rules".into());
+        }
+        for rule in &self.forward_rules {
+            if !(1..=60).contains(&rule.name.chars().count()) || has_control(&rule.name) {
+                return bad("Each forwarding rule needs a name of 1 to 60 characters".into());
+            }
+            if rule.target.is_empty()
+                || rule.target.len() > 80
+                || !rule.target.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
+            {
+                return bad(format!("The forwarding rule '{}' needs a destination", rule.name));
+            }
+            if rule.modalities.len() > 20
+                || rule.modalities.iter().any(|c| c.len() > 16 || !c.chars().all(|ch| ch.is_ascii_alphanumeric()))
+            {
+                return bad(format!(
+                    "The modalities of the forwarding rule '{}' are DICOM codes made of letters and digits, e.g. CT, MR",
+                    rule.name
+                ));
+            }
+            let aet_ok = rule.calling_aet.len() <= 16
+                && rule.calling_aet.chars().all(|c| c.is_ascii_graphic() && c != '\\' || c == ' ');
+            if !aet_ok {
+                return bad(format!("The calling AE title of the rule '{}' has at most 16 characters", rule.name));
+            }
+            if [&rule.institution, &rule.description].iter().any(|t| t.chars().count() > 64 || has_control(t)) {
+                return bad(format!("The texts of the rule '{}' have at most 64 characters", rule.name));
+            }
+        }
         Ok(())
     }
 
@@ -1289,6 +1505,11 @@ impl Settings {
     /// Can the portal send emails? (A mail server and a sender are set.)
     pub fn email_configured(&self) -> bool {
         !self.smtp_host.is_empty() && !self.smtp_from.is_empty()
+    }
+
+    /// Is two-step sign-in in use at all (optional or required)?
+    pub fn two_factor_on(&self) -> bool {
+        self.two_factor != TwoFactorMode::Off
     }
 
     /// Names of the settings that differ between `self` and `other` (for the audit

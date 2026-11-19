@@ -44,6 +44,8 @@
 //! | `sharing.rs`         | invitation links: password/token generation, guest rules |
 //! | `thumbnails.rs`      | picks the preview image of a study/series + memory cache |
 //! | `mailer.rs`          | share invitations sent by email (SMTP, Settings > Email) |
+//! | `totp.rs`            | two-step sign-in: TOTP codes, recovery codes, QR codes |
+//! | `forward.rs`         | auto-forward rules: follows Orthanc's changes, sends on |
 //! | `models.rs`          | study / series / DICOM-node DTOs sent to the browser   |
 //! | `util.rs`            | validation and helper functions                        |
 //! | `state.rs`           | shared application state                               |
@@ -54,6 +56,7 @@ mod branding;
 mod config;
 mod db;
 mod error;
+mod forward;
 mod mailer;
 mod models;
 mod orthanc;
@@ -64,6 +67,7 @@ mod settings;
 mod sharing;
 mod state;
 mod thumbnails;
+mod totp;
 mod util;
 
 use crate::auth::{LoginThrottle, TokenStore};
@@ -129,6 +133,8 @@ async fn main() -> anyhow::Result<()> {
         weasis_tokens: TokenStore::default(),
         share_sessions: TokenStore::default(),
         guest_members: Default::default(),
+        login_tickets: TokenStore::default(),
+        upload_sessions: TokenStore::default(),
         throttle: LoginThrottle::default(),
         listeners: listeners.clone(),
         thumbs: ThumbnailCache::new(),
@@ -147,8 +153,14 @@ async fn main() -> anyhow::Result<()> {
     //    keep the portal down, because an administrator fixes it in the Settings screen.
     tokio::spawn(check_orthanc(orthanc));
 
+    // 5b. Auto-forward rules (Settings > Auto-forward): follows Orthanc's changes in the background.
+    tokio::spawn(forward::run(state.clone()));
+    // Patient CD exports interrupted by the last stop leave files behind: remove them.
+    routes::export::clean_export_dir(&routes::export::export_dir(&state));
+
     // 6. Housekeeping task: every 10 minutes forget expired sessions/tokens, and delete
     //    audit/transfer records older than the retention period (Settings; 0 = keep all).
+    //    Also: the anonymized copies of share links that ended, and the automatic backups.
     {
         let state = state.clone();
         tokio::spawn(async move {
@@ -158,7 +170,11 @@ async fn main() -> anyhow::Result<()> {
                 state.sessions.purge_expired();
                 state.weasis_tokens.purge_expired();
                 state.share_sessions.purge_expired();
+                state.upload_sessions.purge_expired();
+                state.login_tickets.purge_expired();
                 state.throttle.purge_old();
+                routes::shares::delete_ended_copies(&state).await;
+                routes::backup::backup_if_due(&state).await;
                 // The kept passwords of links that have expired are not needed any more.
                 if let Err(e) = state.db.forget_share_passwords(now_unix(), false) {
                     tracing::warn!("could not erase the passwords of expired share links: {e}");

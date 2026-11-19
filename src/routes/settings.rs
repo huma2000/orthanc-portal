@@ -77,6 +77,9 @@ async fn settings_document(state: &AppState) -> Value {
             "study_detail_fields": Settings::defaults().study_detail_fields,
         },
         "branding": state.branding.describe(),
+        // Settings > Auto-forward: what the rules did lately, and where they can send to.
+        "forward": crate::forward::status(),
+        "destinations": crate::routes::send::destinations(state).await.unwrap_or_default(),
         // Every permission, for the roles editor.
         "permissions": Permission::ALL
             .iter()

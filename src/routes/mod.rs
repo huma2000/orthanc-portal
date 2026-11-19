@@ -35,29 +35,42 @@
 //! /api/*/download          ZIP download                   (permission: download)
 //! /api/modalities|send|transfers   send to DICOM nodes    (permission: send)
 //! /api/studies/{id}/share  create an invitation link      (permission: share)
-//! /api/shares              list / revoke invitations      (permission: share)
-//! /api/admin/*             users, audit, settings, branding, DICOM nodes (permission: admin)
+//! /api/shares              list / revoke invitations, QR  (permission: share)
+//! /api/upload-links        links for people outside to SEND studies (share + upload, Settings > Features)
+//! /api/login/two-factor    second step of a two-step sign-in
+//! /api/account/*           my email, my password, my two-step sign-in (any signed-in person)
+//! /api/recent              my recently viewed studies     (permission: read)
+//! /api/export/cd           patient CD / USB export        (permission: download)
+//! /api/admin/*             users, audit, settings, branding, DICOM nodes, statistics, backups (admin)
 //!
 //! -- internet listener (guests with an invitation) --
 //! /s/<token>               the invitation page (asks for the password)
-//! /static/share.js|app.css assets of that page (and /static/i18n/es.json)
+//! /u/<token>               the page of an upload link (password, then drop files)
+//! /static/share.js|app.css assets of these pages (and /static/i18n/es.json)
 //! /api/share/<token>/*     status, unlock (password), study details, ZIP download
+//! /api/upload/<token>/*    status, unlock (password), one file, summary, lock
 //! /dicom-web/*, /wado, /ohif/*   the viewer, confined to the shared study (routes/viewer.rs)
 //! /branding/*, /api/public, /healthz   public
 //! ```
 
+pub mod account;
 pub mod admin;
+pub mod backup;
 pub mod branding;
 pub mod download;
+pub mod export;
 pub mod files;
 pub mod guest;
+pub mod inbound;
 pub mod labels;
 pub mod manage;
+pub mod recent;
 pub mod retrieve;
 pub mod send;
 pub mod session;
 pub mod settings;
 pub mod shares;
+pub mod stats;
 pub mod studies;
 pub mod system;
 pub mod thumbnails;
@@ -137,10 +150,23 @@ fn staff_router(state: AppState) -> Router {
     let add_series_guard = middleware::from_fn_with_state(state.clone(), upload_limit);
 
     let api = Router::new()
-        // --- session ---
+        // --- session (and the second step of a two-step sign-in) ---
         .route("/login", post(session::login))
+        .route("/login/two-factor", post(session::login_two_factor))
         .route("/logout", post(session::logout))
         .route("/me", get(session::me))
+        // --- my account: email, password, two-step sign-in ---
+        .route("/account/email", put(account::set_email))
+        .route("/account/password", post(account::change_password))
+        .route("/account/two-factor/setup", post(account::setup_two_factor))
+        .route("/account/two-factor/enable", post(account::enable_two_factor))
+        .route("/account/two-factor/disable", post(account::disable_two_factor))
+        .route("/account/two-factor/recovery", post(account::new_recovery_codes))
+        // --- recently viewed studies (each person's own) ---
+        .route("/recent", get(recent::list).delete(recent::clear))
+        .route("/recent/{id}", post(recent::note))
+        // --- patient CD / USB export ---
+        .route("/export/cd", get(export::cd_export))
         // --- portal name / login notice, readable before signing in ---
         .route("/public", get(settings::public_info))
         // --- consult ---
@@ -200,7 +226,15 @@ fn staff_router(state: AppState) -> Router {
         .route("/shares", get(shares::list_shares).post(shares::create_multi_share))
         .route("/shares/{id}/revoke", post(shares::revoke_share))
         .route("/shares/{id}/password", post(shares::show_password))
+        .route("/shares/{id}/qr", get(shares::share_qr))
         .route("/shares/{id}", put(shares::update_share))
+        // --- upload links: people outside send studies in ---
+        .route("/upload-links", get(inbound::list).post(inbound::create))
+        .route("/upload-links/{id}", put(inbound::update))
+        .route("/upload-links/{id}/revoke", post(inbound::revoke))
+        .route("/upload-links/{id}/password", post(inbound::show_password))
+        .route("/upload-links/{id}/qr", get(inbound::qr))
+        .route("/upload-links/{id}/studies", get(inbound::studies))
         // --- administration ---
         .route("/admin/users", get(admin::list_users).post(admin::create_user))
         .route("/admin/users/{id}", put(admin::update_user).delete(admin::delete_user))
@@ -223,6 +257,10 @@ fn staff_router(state: AppState) -> Router {
         .route("/admin/orthanc", get(system::raw))
         .route("/admin/jobs", get(system::list_jobs))
         .route("/admin/jobs/{id}/{action}", post(system::job_action))
+        // --- Configuration > Statistics and Backups ---
+        .route("/admin/stats", get(stats::overview))
+        .route("/admin/backups", get(backup::list_backups).post(backup::backup_now))
+        .route("/admin/backup/download", get(backup::download))
         // All JSON/API endpoints share the CSRF guard.
         .layer(middleware::from_fn(csrf_guard));
 
@@ -241,6 +279,8 @@ fn staff_router(state: AppState) -> Router {
 
 /// The internet-facing side: invitation links only.
 fn guest_router(state: AppState) -> Router {
+    // Files sent through an upload link obey the same per-file limit as staff uploads.
+    let upload_guard = middleware::from_fn_with_state(state.clone(), upload_limit);
     let api = Router::new()
         .route("/public", get(settings::public_info))
         .route("/share/{token}/status", get(guest::status))
@@ -248,11 +288,18 @@ fn guest_router(state: AppState) -> Router {
         .route("/share/{token}/study", get(guest::study))
         .route("/share/{token}/download", get(guest::download))
         .route("/share/{token}/lock", post(guest::lock))
+        // --- upload links: somebody outside sends studies in (routes/inbound.rs) ---
+        .route("/upload/{token}/status", get(inbound::status))
+        .route("/upload/{token}/unlock", post(inbound::unlock))
+        .route("/upload/{token}/summary", get(inbound::summary))
+        .route("/upload/{token}/file", post(inbound::file).layer(upload_guard))
+        .route("/upload/{token}/lock", post(inbound::lock))
         .layer(middleware::from_fn(csrf_guard));
 
     common_routes()
         .route("/", get(guest::page))
         .route("/s/{token}", get(guest::page))
+        .route("/u/{token}", get(inbound::page))
         .route("/static/share.js", get(|headers: HeaderMap| serve_static(&SHARE_JS, headers)))
         .nest("/api", api)
         .layer(Extension(Audience::Guest))

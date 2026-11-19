@@ -421,6 +421,18 @@ pub fn clear_share_cookie(secure: bool) -> String {
     share_cookie("", 0, secure)
 }
 
+/// Name of the cookie of somebody outside who entered the password of an UPLOAD link (a separate
+/// cookie and a separate store: an upload session never opens anything of a shared study).
+pub const UPLOAD_COOKIE: &str = "upload_session";
+
+/// `Set-Cookie` value of an upload session (`max_age_secs` 0 = end it).
+pub fn upload_cookie(token: &str, max_age_secs: u64, secure: bool) -> String {
+    format!(
+        "{UPLOAD_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age_secs}{}",
+        if secure { "; Secure" } else { "" }
+    )
+}
+
 /// Authentication of an outside GUEST: the cookie set when the password was entered correctly.
 /// Returns the invitation if it is still usable (not revoked, not expired). Every request is
 /// checked against the database, so revoking a link or its expiry takes effect at once.
@@ -428,7 +440,7 @@ pub fn authenticate_share(state: &AppState, headers: &HeaderMap) -> AppResult<Sh
     let cookie = read_cookie(headers, SHARE_COOKIE).ok_or(AppError::Unauthorized)?;
     let share_id = state.share_sessions.lookup(&cookie).ok_or(AppError::Unauthorized)?;
     let share = state.db.get_share(share_id)?.ok_or(AppError::Unauthorized)?;
-    if share.revoked_at.is_some() {
+    if share.revoked_at.is_some() || share.copies_deleted {
         return Err(AppError::Gone("This link is no longer available.".into()));
     }
     if !share.is_active(now_unix()) {

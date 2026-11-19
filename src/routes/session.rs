@@ -11,8 +11,10 @@ use crate::auth::{self, AuthUser, SESSION_COOKIE};
 use crate::db::User;
 use crate::error::{AppError, AppResult};
 use crate::permissions::Permission;
-use crate::settings::{CardSize, ModalityButton, RecentLayout, RecentOrder};
+use crate::settings::{CardSize, ModalityButton, RecentLayout, RecentOrder, TwoFactorMode};
 use crate::state::AppState;
+use crate::totp;
+use crate::util::now_unix;
 use axum::{
     extract::{ConnectInfo, State},
     http::{header, HeaderMap, HeaderValue},
@@ -20,6 +22,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::net::SocketAddr;
 
 /// What the "Share..." dialog needs to know about sharing.
@@ -34,6 +37,23 @@ pub struct ShareFeature {
     max_downloads: u64,
     /// A mail server is set up: the Share windows offer to send the invitation by email.
     email: bool,
+    /// "Share an anonymized copy" is offered.
+    anonymize: bool,
+    /// "Email me when the link is opened or downloaded" is offered (mail server + an address on the account).
+    notify: bool,
+    /// "Every study of this patient" is offered (links for several studies are switched on).
+    patient: bool,
+}
+
+/// Upload links (people outside send studies in), as the Shares page needs them.
+#[derive(Serialize)]
+pub struct UploadLinkFeature {
+    /// Switched on AND this user may create them (share + upload).
+    enabled: bool,
+    default_hours: u64,
+    max_hours: u64,
+    max_mb: u64,
+    label: String,
 }
 
 /// Options of the simplified view (Settings > Appearance).
@@ -90,6 +110,12 @@ pub struct Features {
     viewers: serde_json::Value,
     /// How dates and names are written (Settings > Appearance).
     format: serde_json::Value,
+    /// Upload links for people outside.
+    upload_links: UploadLinkFeature,
+    /// Two-step sign-in: off, optional (each person chooses, My account) or required.
+    two_factor: TwoFactorMode,
+    /// The "Recently viewed" list of the home page: how many (0 = not shown).
+    recently_viewed: u64,
 }
 
 /// Answer of `/api/login` and `/api/me`: the user fields (id, username,
@@ -112,6 +138,7 @@ async fn me_response(state: &AppState, user: User) -> Me {
     );
     let may = |p: Permission| user.may(p);
     let is_admin = user.permissions.contains(Permission::Admin);
+    let user_may_read = user.permissions.contains(Permission::Read);
     let options = serde_json::json!({
         "labels": settings.labels_enabled,
         "detail_fields": settings.study_detail_fields,
@@ -129,6 +156,8 @@ async fn me_response(state: &AppState, user: User) -> Me {
         "jobs_page": settings.jobs_page && is_admin,
         "system_page": settings.system_page && is_admin,
         "raw_api": settings.raw_api && is_admin,
+        "stats_page": settings.stats_page && is_admin,
+        "cd_export": settings.cd_export && may(Permission::Download),
     });
     let viewers = serde_json::json!({
         "stone": stone,
@@ -145,6 +174,18 @@ async fn me_response(state: &AppState, user: User) -> Me {
         default_downloads: settings.share_default_downloads,
         max_downloads: settings.share_max_downloads,
         email: settings.email_configured(),
+        anonymize: settings.share_anonymize,
+        notify: settings.share_notify && settings.email_configured(),
+        patient: settings.multi_study_shares,
+    };
+    let upload_links = UploadLinkFeature {
+        enabled: settings.upload_links
+            && user.permissions.contains(Permission::Share)
+            && user.permissions.contains(Permission::Upload),
+        default_hours: settings.upload_link_default_hours.min(settings.share_max_hours),
+        max_hours: settings.share_max_hours,
+        max_mb: settings.upload_link_max_mb,
+        label: settings.upload_link_label.clone(),
     };
     let search = SearchFeature {
         columns: settings.study_columns.clone(),
@@ -183,6 +224,9 @@ async fn me_response(state: &AppState, user: User) -> Me {
             options,
             viewers,
             format,
+            upload_links,
+            two_factor: settings.two_factor,
+            recently_viewed: if settings.recently_viewed && user_may_read { settings.recently_viewed_count } else { 0 },
         },
     }
 }
@@ -234,22 +278,144 @@ pub async fn login(
             return Err(AppError::BadRequest("Wrong username or password".into()));
         }
     };
-
-    // 3. Success: create the session and send the cookie.
     state.throttle.record_success(&username);
+
+    // 3. Two-step sign-in (Settings > Security & roles): the password is not enough. The answer
+    //    carries a short-lived ticket; POST /api/login/two-factor with the code finishes the sign-in.
+    if settings.two_factor_on() {
+        if user.two_factor {
+            let ticket = state.login_tickets.issue(user.id, LOGIN_TICKET_SECS, 3);
+            return Ok(Json(json!({ "two_factor": "code", "ticket": ticket })).into_response());
+        }
+        if settings.two_factor == TwoFactorMode::Required {
+            // Not set up yet and required: set it up now, before any session exists.
+            let secret = totp::new_secret();
+            state.db.set_totp_pending(user.id, Some(&secret))?;
+            let ticket = state.login_tickets.issue(user.id, LOGIN_TICKET_SECS, 3);
+            let mut answer = setup_material(&settings.portal_name, &user.username, &secret);
+            answer["two_factor"] = json!("setup");
+            answer["ticket"] = json!(ticket);
+            return Ok(Json(answer).into_response());
+        }
+    }
+
+    // 4. Success: create the session and send the cookie.
+    start_session(&state, user, &headers, &ip, None).await
+}
+
+/// How long the code may take to arrive after the password (seconds).
+const LOGIN_TICKET_SECS: i64 = 300;
+
+/// What the app needs to set up two-step sign-in: the secret (to type by hand), the `otpauth://`
+/// address and its QR code (SVG).
+pub fn setup_material(portal: &str, username: &str, secret: &str) -> Value {
+    let uri = totp::otpauth_uri(portal, username, secret);
+    // In groups of four, easier to type: "ABCD EFGH ...".
+    let grouped: Vec<String> = secret.as_bytes().chunks(4).map(|c| String::from_utf8_lossy(c).into_owned()).collect();
+    json!({ "secret": grouped.join(" "), "uri": uri, "qr": totp::qr_svg(&uri) })
+}
+
+/// Signs `user` in: the session cookie and the answer of /api/me (plus `extra` fields).
+async fn start_session(
+    state: &AppState,
+    user: User,
+    headers: &HeaderMap,
+    ip: &str,
+    extra: Option<(&str, Value)>,
+) -> AppResult<Response> {
+    let settings = state.settings.get();
     state.db.touch_login(user.id)?;
-    state.db.audit(&user.username, "login", &format!("ip={ip}"));
+    state.db.audit(&user.username, "login", &format!("ip={ip}{}", if user.two_factor { " (two-step)" } else { "" }));
 
     let ttl = settings.session_ttl_secs();
     let token = state.sessions.issue(user.id, ttl as i64, auth::MAX_SESSIONS_PER_USER);
-    let secure = auth::cookie_secure(&settings, &headers);
+    let secure = auth::cookie_secure(&settings, headers);
     let cookie = auth::session_cookie(&token, ttl, secure);
 
-    let mut response = Json(me_response(&state, user).await).into_response();
+    let mut body =
+        serde_json::to_value(me_response(state, user).await).map_err(|e| AppError::Internal(e.to_string()))?;
+    if let Some((key, value)) = extra {
+        body[key] = value;
+    }
+    let mut response = Json(body).into_response();
     response
         .headers_mut()
         .insert(header::SET_COOKIE, HeaderValue::from_str(&cookie).map_err(|e| AppError::Internal(e.to_string()))?);
     Ok(response)
+}
+
+#[derive(Deserialize)]
+pub struct TwoFactorLogin {
+    ticket: String,
+    /// The 6 digits of the app, or one of the recovery codes.
+    code: String,
+}
+
+/// Second step of the sign-in: the code of the authenticator app (or a recovery code). For an
+/// account setting it up at this sign-in (required by the settings), the first code confirms the
+/// set-up and the answer carries the recovery codes, shown once.
+pub async fn login_two_factor(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(req): Json<TwoFactorLogin>,
+) -> AppResult<Response> {
+    let settings = state.settings.get();
+    let ip = auth::client_ip(&headers, peer);
+    let expired = || AppError::BadRequest("The sign-in took too long. Enter your user name and password again.".into());
+    if req.ticket.len() != 64 || req.code.chars().count() > 40 {
+        return Err(expired());
+    }
+    let user_id = state.login_tickets.lookup(&req.ticket).ok_or_else(expired)?;
+    let user = state.db.get_user(user_id)?.filter(|u| u.active).ok_or_else(expired)?;
+    let key = format!("2fa:{}", user.id);
+    if let Err(locked) = state.throttle.check(&key) {
+        state.login_tickets.revoke(&req.ticket);
+        return Err(locked);
+    }
+
+    let now = now_unix();
+    let mut recovery_codes = None;
+    let accepted = if user.two_factor {
+        let secret = user.totp_secret.clone().unwrap_or_default();
+        if totp::looks_like_recovery_code(&req.code) {
+            let used = state.db.use_recovery_code(user.id, &totp::recovery_hash(&req.code))?;
+            if used {
+                state.db.audit(&user.username, "recovery_code_used", &format!("ip={ip}"));
+            }
+            used
+        } else {
+            match totp::verify(&secret, &req.code, now) {
+                Some(step) => state.db.use_totp_step(user.id, step)?,
+                None => false,
+            }
+        }
+    } else if let Some(pending) = user.totp_pending.clone() {
+        // Setting it up at this sign-in.
+        match totp::verify(&pending, &req.code, now) {
+            Some(step) => {
+                let codes = totp::new_recovery_codes();
+                let hashes: Vec<String> = codes.iter().map(|c| totp::recovery_hash(c)).collect();
+                state.db.enable_totp(user.id, &pending, step, &hashes)?;
+                state.db.audit(&user.username, "two_factor_enabled", "at sign-in");
+                recovery_codes = Some(codes);
+                true
+            }
+            None => false,
+        }
+    } else {
+        return Err(expired());
+    };
+
+    if !accepted {
+        state.throttle.record_failure(&key, settings.login_max_failures, settings.lockout_secs());
+        state.db.audit(&user.username, "login_code_failed", &format!("ip={ip}"));
+        return Err(AppError::BadRequest("The code is not correct (or was already used). Try the next one.".into()));
+    }
+    state.throttle.record_success(&key);
+    state.login_tickets.revoke(&req.ticket);
+    let user = state.db.get_user(user.id)?.ok_or(AppError::Unauthorized)?;
+    start_session(&state, user, &headers, &ip, recovery_codes.map(|codes| ("recovery_codes", json!(codes)))).await
 }
 
 /// Ends the session: forgets the token server-side and clears the cookie.

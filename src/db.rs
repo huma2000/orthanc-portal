@@ -6,7 +6,11 @@
 //!   * **transfers**: studies sent to remote DICOM nodes, with the Orthanc job id;
 //!   * **settings**: the configuration saved from the web interface (one JSON document);
 //!   * **branding**: the logo and website icon uploaded from the Settings screen;
-//!   * **shares**: invitation links that give one outside person access to one study.
+//!   * **shares**: invitation links that give one outside person access to one study;
+//!   * **upload_links**: links that let one outside person SEND studies in;
+//!   * **recent_views**: each person's recently viewed studies.
+//!
+//! Users also carry their email address and their two-step sign-in (secret, recovery code hashes).
 //!
 //! The connection is wrapped in a `std::sync::Mutex`. Queries here are tiny
 //! (a handful of users), so they finish in microseconds and it is fine to run
@@ -37,6 +41,18 @@ pub struct User {
     pub active: bool,
     pub created_at: i64,
     pub last_login: Option<i64>,
+    /// Where the portal writes to this person (share link notifications). Empty = nowhere.
+    pub email: String,
+    /// Two-step sign-in is set up for this account (an authenticator app).
+    pub two_factor: bool,
+    /// One-time recovery codes not used yet (for a lost phone).
+    pub recovery_codes_left: usize,
+    /// The secret of the authenticator app (base32). Never sent to the browser.
+    #[serde(skip)]
+    pub totp_secret: Option<String>,
+    /// A secret being set up (shown once as a QR code, confirmed with a first code).
+    #[serde(skip)]
+    pub totp_pending: Option<String>,
 }
 
 impl User {
@@ -97,6 +113,13 @@ pub struct Share {
     pub has_password: bool,
     /// The other studies of a link that shares several (the first one is `study_id` / `study_uid`).
     pub extra_studies: Vec<SharedStudy>,
+    /// Address told when the guest opens the link or downloads (the creator's, if they asked).
+    #[serde(skip)]
+    pub notify_email: Option<String>,
+    /// The link shares anonymized copies made for it (Orthanc ids), deleted when the link ends.
+    pub owned_copies: Vec<String>,
+    /// Those copies were deleted: the link cannot be used or extended any more.
+    pub copies_deleted: bool,
 }
 
 /// One more study of an invitation link.
@@ -144,6 +167,10 @@ pub struct NewShare<'a> {
     pub extra_studies: &'a [SharedStudy],
     /// The password itself, kept so it can be shown again (`None` = Settings > Share links says not to).
     pub password_copy: Option<&'a str>,
+    /// Tell this address when the guest opens the link or downloads.
+    pub notify_email: Option<&'a str>,
+    /// Anonymized copies made for this link (deleted when it ends).
+    pub owned_copies: &'a [String],
 }
 
 /// How long the kept password of an expired link is kept: it can be extended meanwhile and keep it.
@@ -152,7 +179,105 @@ pub const EXPIRED_PASSWORD_GRACE: i64 = 30 * 86_400;
 const SHARE_COLUMNS: &str =
     "id, token, password_hash, created_at, expires_at, created_by, study_id, study_uid, label, \
                              note, max_downloads, downloads_used, revoked_at, access_count, last_access_at, \
-                             password_copy IS NOT NULL, extra_studies";
+                             password_copy IS NOT NULL, extra_studies, notify_email, owned_copies, copies_deleted";
+
+/// A JSON list stored in a text column (`NULL` = empty).
+fn json_list<T: serde::de::DeserializeOwned>(text: Option<String>) -> Vec<T> {
+    text.and_then(|json| serde_json::from_str(&json).ok()).unwrap_or_default()
+}
+
+/// The opposite of [`json_list`]: `None` for an empty list.
+fn list_json<T: Serialize>(list: &[T]) -> Option<String> {
+    if list.is_empty() {
+        None
+    } else {
+        serde_json::to_string(list).ok()
+    }
+}
+
+/// A link that lets ONE outside person SEND studies in (a CD of earlier imaging, a referral...),
+/// with a generated password, until it expires or its size limit is reached. The person sees
+/// nothing of the archive. See `routes/inbound.rs`.
+#[derive(Debug, Clone, Serialize)]
+pub struct UploadLink {
+    pub id: i64,
+    pub token: String,
+    #[serde(skip)]
+    pub password_hash: String,
+    #[serde(skip)]
+    pub has_password: bool,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub created_by: String,
+    /// For the staff ("Mrs Doe's previous MRI").
+    pub note: String,
+    /// Orthanc label put on every study received (empty = none).
+    pub label: String,
+    pub max_bytes: i64,
+    pub bytes_received: i64,
+    pub files_received: i64,
+    /// Files Orthanc did not accept (not DICOM: a viewer program on a CD, a text file...).
+    pub files_rejected: i64,
+    /// Orthanc ids of the studies received.
+    pub studies: Vec<String>,
+    pub revoked_at: Option<i64>,
+    pub access_count: i64,
+    pub last_upload_at: Option<i64>,
+    #[serde(skip)]
+    pub notify_email: Option<String>,
+}
+
+impl UploadLink {
+    pub fn is_active(&self, now: i64) -> bool {
+        self.revoked_at.is_none() && now < self.expires_at
+    }
+}
+
+/// What is needed to create an [`UploadLink`].
+pub struct NewUploadLink<'a> {
+    pub token: &'a str,
+    pub password_hash: &'a str,
+    pub password_copy: Option<&'a str>,
+    pub expires_at: i64,
+    pub created_by: &'a str,
+    pub note: &'a str,
+    pub label: &'a str,
+    pub max_bytes: i64,
+    pub notify_email: Option<&'a str>,
+}
+
+const UPLOAD_LINK_COLUMNS: &str = "id, token, password_hash, password_copy IS NOT NULL, created_at, expires_at, \
+     created_by, note, label, max_bytes, bytes_received, files_received, files_rejected, studies, revoked_at, \
+     access_count, last_upload_at, notify_email";
+
+fn row_to_upload_link(row: &Row) -> rusqlite::Result<UploadLink> {
+    Ok(UploadLink {
+        id: row.get(0)?,
+        token: row.get(1)?,
+        password_hash: row.get(2)?,
+        has_password: row.get(3)?,
+        created_at: row.get(4)?,
+        expires_at: row.get(5)?,
+        created_by: row.get(6)?,
+        note: row.get(7)?,
+        label: row.get(8)?,
+        max_bytes: row.get(9)?,
+        bytes_received: row.get(10)?,
+        files_received: row.get(11)?,
+        files_rejected: row.get(12)?,
+        studies: json_list(row.get(13)?),
+        revoked_at: row.get(14)?,
+        access_count: row.get(15)?,
+        last_upload_at: row.get(16)?,
+        notify_email: row.get(17)?,
+    })
+}
+
+/// At most this many studies are remembered per upload link (more still arrive, only the list stops).
+pub const MAX_UPLOAD_LINK_STUDIES: usize = 500;
+
+/// How many studies each person's "recently viewed" list remembers.
+pub const RECENT_VIEWS_KEPT: i64 = 30;
 
 fn row_to_share(row: &Row) -> rusqlite::Result<Share> {
     Ok(Share {
@@ -172,10 +297,10 @@ fn row_to_share(row: &Row) -> rusqlite::Result<Share> {
         access_count: row.get(13)?,
         has_password: row.get(15)?,
         last_access_at: row.get(14)?,
-        extra_studies: row
-            .get::<_, Option<String>>(16)?
-            .and_then(|json| serde_json::from_str(&json).ok())
-            .unwrap_or_default(),
+        extra_studies: json_list(row.get(16)?),
+        notify_email: row.get(17)?,
+        owned_copies: json_list(row.get(18)?),
+        copies_deleted: row.get::<_, i64>(19)? != 0,
     })
 }
 
@@ -231,10 +356,13 @@ fn clean_for_audit(text: &str, max_chars: usize) -> String {
 #[derive(Clone)]
 pub struct Db {
     conn: Arc<Mutex<Connection>>,
+    /// The file, for backups (made through a second connection, see [`Db::backup_into`]).
+    path: Arc<String>,
 }
 
 /// Columns read for a user, always in this order (see [`row_to_user`]).
-const USER_COLUMNS: &str = "id, username, password_hash, permissions, active, created_at, last_login, role";
+const USER_COLUMNS: &str = "id, username, password_hash, permissions, active, created_at, last_login, role, \
+                            email, totp_enabled, totp_secret, totp_pending, recovery_codes";
 
 /// Converts one SQL row into a [`User`].
 fn row_to_user(row: &Row) -> rusqlite::Result<User> {
@@ -247,7 +375,25 @@ fn row_to_user(row: &Row) -> rusqlite::Result<User> {
         created_at: row.get(5)?,
         last_login: row.get(6)?,
         role: row.get(7)?,
+        email: row.get(8)?,
+        two_factor: row.get::<_, i64>(9)? != 0,
+        totp_secret: row.get(10)?,
+        totp_pending: row.get(11)?,
+        recovery_codes_left: json_list::<String>(row.get(12)?).len(),
     })
+}
+
+/// Adds the columns a table lacks (databases created by older versions). `columns` = (name, type).
+fn add_missing_columns(conn: &Connection, table: &str, columns: &[(&str, &str)]) -> rusqlite::Result<()> {
+    for (name, kind) in columns {
+        let exists = conn
+            .prepare(&format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1"))?
+            .exists(params![name])?;
+        if !exists {
+            conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {name} {kind}"), [])?;
+        }
+    }
+    Ok(())
 }
 
 /// Makes a file readable and writable by its owner only (Unix; no-op elsewhere).
@@ -344,7 +490,61 @@ impl Db {
              CREATE TABLE IF NOT EXISTS settings (
                  key   TEXT PRIMARY KEY,
                  value TEXT NOT NULL
+             );
+
+             -- Upload links: people outside SEND studies in (see routes/inbound.rs).
+             CREATE TABLE IF NOT EXISTS upload_links (
+                 id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                 token            TEXT    NOT NULL UNIQUE,
+                 password_hash    TEXT    NOT NULL,
+                 password_copy    TEXT,
+                 created_at       INTEGER NOT NULL,
+                 expires_at       INTEGER NOT NULL,
+                 created_by       TEXT    NOT NULL,
+                 note             TEXT    NOT NULL DEFAULT '',
+                 label            TEXT    NOT NULL DEFAULT '',
+                 max_bytes        INTEGER NOT NULL,
+                 bytes_received   INTEGER NOT NULL DEFAULT 0,
+                 files_received   INTEGER NOT NULL DEFAULT 0,
+                 files_rejected   INTEGER NOT NULL DEFAULT 0,
+                 studies          TEXT,                                  -- JSON list of Orthanc study ids
+                 revoked_at       INTEGER,
+                 access_count     INTEGER NOT NULL DEFAULT 0,
+                 last_upload_at   INTEGER,
+                 notify_email     TEXT,
+                 last_notified_at INTEGER
+             );
+
+             -- The studies each person opened last (home page > Recently viewed). Personal.
+             CREATE TABLE IF NOT EXISTS recent_views (
+                 user_id   INTEGER NOT NULL,
+                 study_id  TEXT    NOT NULL,
+                 study_uid TEXT    NOT NULL,
+                 ts        INTEGER NOT NULL,
+                 PRIMARY KEY (user_id, study_id)
              );",
+        )?;
+        add_missing_columns(
+            &conn,
+            "users",
+            &[
+                ("email", "TEXT NOT NULL DEFAULT ''"),
+                ("totp_enabled", "INTEGER NOT NULL DEFAULT 0"),
+                ("totp_secret", "TEXT"),
+                ("totp_pending", "TEXT"),
+                ("totp_last_step", "INTEGER"),
+                ("recovery_codes", "TEXT"),
+            ],
+        )?;
+        add_missing_columns(
+            &conn,
+            "shares",
+            &[
+                ("notify_email", "TEXT"),
+                ("notified_open", "INTEGER NOT NULL DEFAULT 0"),
+                ("owned_copies", "TEXT"),
+                ("copies_deleted", "INTEGER NOT NULL DEFAULT 0"),
+            ],
         )?;
 
         // Databases created by older versions have no `final_state` / `final_error` / `final_info` columns.
@@ -382,7 +582,48 @@ impl Db {
         // The file holds password hashes and the Orthanc password: only its owner may read it.
         // (The -wal / -shm files SQLite creates next to it copy these permissions.)
         restrict_file_permissions(path);
-        Ok(Self { conn: Arc::new(Mutex::new(conn)) })
+        Ok(Self { conn: Arc::new(Mutex::new(conn)), path: Arc::new(path.to_string()) })
+    }
+
+    /// The folder of the database file: where the portal may write (backups made for a download,
+    /// patient CD exports being assembled). In Docker this is the `/data` volume.
+    pub fn data_dir(&self) -> std::path::PathBuf {
+        let path = std::path::Path::new(self.path.as_str());
+        match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+            _ => std::path::PathBuf::from("."),
+        }
+    }
+
+    /// Writes a consistent copy of the whole database to `dest` (`VACUUM INTO`), through a second
+    /// connection so the portal keeps answering meanwhile. `dest` must not exist yet.
+    pub fn backup_into(&self, dest: &std::path::Path) -> Result<(), AppError> {
+        let conn = Connection::open(self.path.as_str())?;
+        conn.busy_timeout(std::time::Duration::from_secs(30))?;
+        conn.execute("VACUUM INTO ?1", params![dest.to_string_lossy()])?;
+        restrict_file_permissions(&dest.to_string_lossy());
+        Ok(())
+    }
+
+    // ------------------------------------------------------- small stored values
+
+    /// A value kept between restarts (the last change of Orthanc already looked at...).
+    pub fn get_value(&self, key: &str) -> Result<Option<String>, AppError> {
+        let conn = self.lock();
+        let value = conn
+            .prepare_cached("SELECT value FROM settings WHERE key = ?1")?
+            .query_row(params![format!("value:{key}")], |r| r.get(0))
+            .optional()?;
+        Ok(value)
+    }
+
+    pub fn set_value(&self, key: &str, value: &str) -> Result<(), AppError> {
+        let conn = self.lock();
+        conn.prepare_cached(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )?
+        .execute(params![format!("value:{key}"), value])?;
+        Ok(())
     }
 
     /// Locks the connection. A poisoned mutex (a panic while locked) is recovered
@@ -484,7 +725,86 @@ impl Db {
     pub fn delete_user(&self, id: i64) -> Result<(), AppError> {
         let conn = self.lock();
         conn.prepare_cached("DELETE FROM users WHERE id = ?1")?.execute(params![id])?;
+        conn.prepare_cached("DELETE FROM recent_views WHERE user_id = ?1")?.execute(params![id])?;
         Ok(())
+    }
+
+    /// The address the portal writes to this person ("" = none).
+    pub fn set_user_email(&self, id: i64, email: &str) -> Result<(), AppError> {
+        let conn = self.lock();
+        conn.prepare_cached("UPDATE users SET email = ?2 WHERE id = ?1")?.execute(params![id, email])?;
+        Ok(())
+    }
+
+    // ------------------------------------------------------- two-step sign-in
+
+    /// Remembers the secret being set up (`None` forgets it).
+    pub fn set_totp_pending(&self, id: i64, secret: Option<&str>) -> Result<(), AppError> {
+        let conn = self.lock();
+        conn.prepare_cached("UPDATE users SET totp_pending = ?2 WHERE id = ?1")?.execute(params![id, secret])?;
+        Ok(())
+    }
+
+    /// Switches two-step sign-in on with `secret`, whose code at time step `step` was just typed
+    /// (so that code cannot be used again), and these hashed recovery codes.
+    pub fn enable_totp(&self, id: i64, secret: &str, step: i64, recovery_hashes: &[String]) -> Result<(), AppError> {
+        let conn = self.lock();
+        conn.prepare_cached(
+            "UPDATE users SET totp_enabled = 1, totp_secret = ?2, totp_pending = NULL, totp_last_step = ?3,
+                              recovery_codes = ?4 WHERE id = ?1",
+        )?
+        .execute(params![id, secret, step, list_json(recovery_hashes)])?;
+        Ok(())
+    }
+
+    /// Switches two-step sign-in off and forgets its secret and recovery codes.
+    pub fn disable_totp(&self, id: i64) -> Result<(), AppError> {
+        let conn = self.lock();
+        conn.prepare_cached(
+            "UPDATE users SET totp_enabled = 0, totp_secret = NULL, totp_pending = NULL, totp_last_step = NULL,
+                              recovery_codes = NULL WHERE id = ?1",
+        )?
+        .execute(params![id])?;
+        Ok(())
+    }
+
+    /// Accepts the code of time step `step` once: false if that step (or a later one) was used.
+    /// One statement, so two sign-ins with the same code at the same moment cannot both pass.
+    pub fn use_totp_step(&self, id: i64, step: i64) -> Result<bool, AppError> {
+        let conn = self.lock();
+        let changed = conn
+            .prepare_cached(
+                "UPDATE users SET totp_last_step = ?2 WHERE id = ?1 AND (totp_last_step IS NULL OR totp_last_step < ?2)",
+            )?
+            .execute(params![id, step])?;
+        Ok(changed == 1)
+    }
+
+    /// Replaces the recovery codes (their hashes).
+    pub fn set_recovery_codes(&self, id: i64, hashes: &[String]) -> Result<(), AppError> {
+        let conn = self.lock();
+        conn.prepare_cached("UPDATE users SET recovery_codes = ?2 WHERE id = ?1")?
+            .execute(params![id, list_json(hashes)])?;
+        Ok(())
+    }
+
+    /// Uses up the recovery code with this hash: true if it was one of the account's (it is gone now).
+    pub fn use_recovery_code(&self, id: i64, hash: &str) -> Result<bool, AppError> {
+        let conn = self.lock();
+        let tx = conn.unchecked_transaction()?;
+        let stored: Option<String> = tx
+            .query_row("SELECT recovery_codes FROM users WHERE id = ?1", params![id], |r| r.get(0))
+            .optional()?
+            .flatten();
+        let mut codes: Vec<String> = json_list(stored);
+        let before = codes.len();
+        codes.retain(|c| c != hash);
+        if codes.len() == before {
+            return Ok(false);
+        }
+        tx.execute("UPDATE users SET recovery_codes = ?2 WHERE id = ?1", params![id, list_json(&codes)])?;
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Remembers the time of the last successful login.
@@ -676,9 +996,117 @@ impl Db {
         let conn = self.lock();
         let audit = conn.prepare_cached("DELETE FROM audit_log WHERE ts < ?1")?.execute(params![cutoff])?;
         let transfers = conn.prepare_cached("DELETE FROM transfers WHERE ts < ?1")?.execute(params![cutoff])?;
-        // Links that expired before the cut-off are no use any more either.
-        let shares = conn.prepare_cached("DELETE FROM shares WHERE expires_at < ?1")?.execute(params![cutoff])?;
-        Ok(audit + transfers + shares)
+        // Links that expired before the cut-off are no use any more either (once the anonymized
+        // copies they own are deleted: the row is what remembers them).
+        let shares = conn
+            .prepare_cached(
+                "DELETE FROM shares WHERE expires_at < ?1 AND (owned_copies IS NULL OR copies_deleted = 1)",
+            )?
+            .execute(params![cutoff])?;
+        let uploads =
+            conn.prepare_cached("DELETE FROM upload_links WHERE expires_at < ?1")?.execute(params![cutoff])?;
+        Ok(audit + transfers + shares + uploads)
+    }
+
+    // ------------------------------------------------------------ statistics
+
+    /// How many audit entries of each of `actions` there were per month (`YYYY-MM`, UTC) since `since`.
+    pub fn audit_per_month(&self, actions: &[&str], since: i64) -> Result<Vec<(String, String, i64)>, AppError> {
+        let conn = self.lock();
+        let mut out = Vec::new();
+        let mut stmt = conn.prepare_cached(
+            "SELECT strftime('%Y-%m', ts, 'unixepoch'), COUNT(*) FROM audit_log
+             WHERE action = ?1 AND ts >= ?2 GROUP BY 1",
+        )?;
+        for action in actions {
+            let rows = stmt.query_map(params![action, since], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+            for row in rows {
+                let (month, count) = row?;
+                out.push((action.to_string(), month, count));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Who did `action` most often since `since`: (user name, count), most first.
+    pub fn top_users(&self, action: &str, since: i64, limit: i64) -> Result<Vec<(String, i64)>, AppError> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT username, COUNT(*) FROM audit_log WHERE action = ?1 AND ts >= ?2
+             GROUP BY username COLLATE NOCASE ORDER BY 2 DESC LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![action, since, limit], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Rows of `table` per month of `column` since `since` (only the tables and columns below).
+    pub fn rows_per_month(&self, table: &str, since: i64) -> Result<Vec<(String, i64)>, AppError> {
+        let (table, column) = match table {
+            "shares" => ("shares", "created_at"),
+            "upload_links" => ("upload_links", "created_at"),
+            "transfers" => ("transfers", "ts"),
+            _ => return Err(AppError::Internal(format!("no statistics for {table}"))),
+        };
+        let conn = self.lock();
+        let sql = format!(
+            "SELECT strftime('%Y-%m', {column}, 'unixepoch'), COUNT(*) FROM {table} WHERE {column} >= ?1 GROUP BY 1"
+        );
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(params![since], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Invitation links and upload links that work at `now`.
+    pub fn active_link_counts(&self, now: i64) -> Result<(i64, i64), AppError> {
+        let conn = self.lock();
+        let shares = conn
+            .prepare_cached("SELECT COUNT(*) FROM shares WHERE revoked_at IS NULL AND expires_at > ?1")?
+            .query_row(params![now], |r| r.get(0))?;
+        let uploads = conn
+            .prepare_cached("SELECT COUNT(*) FROM upload_links WHERE revoked_at IS NULL AND expires_at > ?1")?
+            .query_row(params![now], |r| r.get(0))?;
+        Ok((shares, uploads))
+    }
+
+    // --------------------------------------------------------- recently viewed
+
+    /// `user` looked at a study: it goes to the top of their list (which keeps [`RECENT_VIEWS_KEPT`]).
+    pub fn note_view(&self, user: i64, study_id: &str, study_uid: &str, now: i64) -> Result<(), AppError> {
+        let conn = self.lock();
+        conn.prepare_cached(
+            "INSERT INTO recent_views (user_id, study_id, study_uid, ts) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(user_id, study_id) DO UPDATE SET ts = excluded.ts, study_uid = excluded.study_uid",
+        )?
+        .execute(params![user, study_id, study_uid, now])?;
+        conn.prepare_cached(
+            "DELETE FROM recent_views WHERE user_id = ?1 AND study_id NOT IN
+               (SELECT study_id FROM recent_views WHERE user_id = ?1 ORDER BY ts DESC LIMIT ?2)",
+        )?
+        .execute(params![user, RECENT_VIEWS_KEPT])?;
+        Ok(())
+    }
+
+    /// The studies `user` looked at last, newest first: (Orthanc id, StudyInstanceUID).
+    pub fn recent_views(&self, user: i64, limit: i64) -> Result<Vec<(String, String)>, AppError> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT study_id, study_uid FROM recent_views WHERE user_id = ?1 ORDER BY ts DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![user, limit], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Forgets studies of the list (gone from the archive), or the whole list when `study_ids` is empty.
+    pub fn forget_views(&self, user: i64, study_ids: &[String]) -> Result<(), AppError> {
+        let conn = self.lock();
+        if study_ids.is_empty() {
+            conn.prepare_cached("DELETE FROM recent_views WHERE user_id = ?1")?.execute(params![user])?;
+        }
+        for id in study_ids {
+            conn.prepare_cached("DELETE FROM recent_views WHERE user_id = ?1 AND study_id = ?2")?
+                .execute(params![user, id])?;
+        }
+        Ok(())
     }
 
     // ---------------------------------------------------------------- shares
@@ -689,8 +1117,9 @@ impl Db {
             let conn = self.lock();
             conn.prepare_cached(
                 "INSERT INTO shares (token, password_hash, created_at, expires_at, created_by, study_id, study_uid,
-                                     label, note, max_downloads, password_copy, extra_studies)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                                     label, note, max_downloads, password_copy, extra_studies, notify_email,
+                                     owned_copies)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             )?
             .execute(params![
                 new.token,
@@ -704,11 +1133,9 @@ impl Db {
                 new.note,
                 new.max_downloads,
                 new.password_copy,
-                if new.extra_studies.is_empty() {
-                    None
-                } else {
-                    Some(serde_json::to_string(new.extra_studies).unwrap_or_default())
-                }
+                list_json(new.extra_studies),
+                new.notify_email,
+                list_json(new.owned_copies),
             ])?;
             conn.last_insert_rowid()
         };
@@ -740,7 +1167,14 @@ impl Db {
                  WHERE password_copy IS NOT NULL AND (?1 OR revoked_at IS NOT NULL OR expires_at <= ?2)",
             )?
             .execute(params![all, now - EXPIRED_PASSWORD_GRACE])?;
-        Ok(erased)
+        // The same for upload links.
+        let erased_uploads = conn
+            .prepare_cached(
+                "UPDATE upload_links SET password_copy = NULL
+                 WHERE password_copy IS NOT NULL AND (?1 OR revoked_at IS NOT NULL OR expires_at <= ?2)",
+            )?
+            .execute(params![all, now - EXPIRED_PASSWORD_GRACE])?;
+        Ok(erased + erased_uploads)
     }
 
     /// Changes an invitation that was not revoked (Shares > Edit). `None` keeps a value:
@@ -843,5 +1277,199 @@ impl Db {
         conn.prepare_cached("UPDATE shares SET access_count = access_count + 1, last_access_at = ?2 WHERE id = ?1")?
             .execute(params![id, now])?;
         Ok(())
+    }
+
+    /// True the FIRST time it is called for a link: "your link was opened" is said once.
+    pub fn first_open_notice(&self, id: i64) -> Result<bool, AppError> {
+        let conn = self.lock();
+        let changed = conn
+            .prepare_cached("UPDATE shares SET notified_open = 1 WHERE id = ?1 AND notified_open = 0")?
+            .execute(params![id])?;
+        Ok(changed == 1)
+    }
+
+    /// Links whose anonymized copies must go: revoked links, and links that ended more than
+    /// [`EXPIRED_PASSWORD_GRACE`] ago (until then they can be extended). `(id, copies)`.
+    pub fn copies_to_delete(&self, now: i64) -> Result<Vec<(i64, Vec<String>)>, AppError> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, owned_copies FROM shares WHERE owned_copies IS NOT NULL AND copies_deleted = 0
+               AND (revoked_at IS NOT NULL OR expires_at <= ?1)",
+        )?;
+        let rows = stmt.query_map(params![now - EXPIRED_PASSWORD_GRACE], |r| Ok((r.get(0)?, json_list(r.get(1)?))))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The anonymized copies of a link were deleted: it cannot be used or extended any more.
+    pub fn mark_copies_deleted(&self, id: i64) -> Result<(), AppError> {
+        let conn = self.lock();
+        conn.prepare_cached("UPDATE shares SET copies_deleted = 1, password_copy = NULL WHERE id = ?1")?
+            .execute(params![id])?;
+        Ok(())
+    }
+
+    // ---------------------------------------------------------- upload links
+
+    pub fn create_upload_link(&self, new: &NewUploadLink) -> Result<UploadLink, AppError> {
+        let id = {
+            let conn = self.lock();
+            conn.prepare_cached(
+                "INSERT INTO upload_links (token, password_hash, password_copy, created_at, expires_at, created_by,
+                                           note, label, max_bytes, notify_email)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            )?
+            .execute(params![
+                new.token,
+                new.password_hash,
+                new.password_copy,
+                now_unix(),
+                new.expires_at,
+                new.created_by,
+                new.note,
+                new.label,
+                new.max_bytes,
+                new.notify_email
+            ])?;
+            conn.last_insert_rowid()
+        };
+        self.get_upload_link(id)?.ok_or(AppError::NotFound)
+    }
+
+    pub fn get_upload_link(&self, id: i64) -> Result<Option<UploadLink>, AppError> {
+        let conn = self.lock();
+        let sql = format!("SELECT {UPLOAD_LINK_COLUMNS} FROM upload_links WHERE id = ?1");
+        let value = conn.prepare_cached(&sql)?.query_row(params![id], row_to_upload_link).optional()?;
+        Ok(value)
+    }
+
+    pub fn get_upload_link_by_token(&self, token: &str) -> Result<Option<UploadLink>, AppError> {
+        let conn = self.lock();
+        let sql = format!("SELECT {UPLOAD_LINK_COLUMNS} FROM upload_links WHERE token = ?1");
+        let value = conn.prepare_cached(&sql)?.query_row(params![token], row_to_upload_link).optional()?;
+        Ok(value)
+    }
+
+    /// Newest first; `only_user` = the links that person created.
+    pub fn list_upload_links(&self, only_user: Option<&str>, limit: i64) -> Result<Vec<UploadLink>, AppError> {
+        let conn = self.lock();
+        let sql = format!(
+            "SELECT {UPLOAD_LINK_COLUMNS} FROM upload_links WHERE (?1 IS NULL OR created_by = ?1 COLLATE NOCASE)
+             ORDER BY id DESC LIMIT ?2"
+        );
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(params![only_user, limit], row_to_upload_link)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    pub fn revoke_upload_link(&self, id: i64, now: i64) -> Result<bool, AppError> {
+        let conn = self.lock();
+        let changed = conn
+            .prepare_cached(
+                "UPDATE upload_links SET revoked_at = ?2, password_copy = NULL WHERE id = ?1 AND revoked_at IS NULL",
+            )?
+            .execute(params![id, now])?;
+        Ok(changed == 1)
+    }
+
+    /// Changes an upload link that was not revoked: more time (unix seconds) and a bigger size limit.
+    pub fn update_upload_link(
+        &self,
+        id: i64,
+        expires_at: Option<i64>,
+        max_bytes: Option<i64>,
+    ) -> Result<bool, AppError> {
+        let conn = self.lock();
+        let changed = conn
+            .prepare_cached(
+                "UPDATE upload_links SET expires_at = COALESCE(?2, expires_at), max_bytes = COALESCE(?3, max_bytes)
+                 WHERE id = ?1 AND revoked_at IS NULL",
+            )?
+            .execute(params![id, expires_at, max_bytes])?;
+        Ok(changed == 1)
+    }
+
+    /// The kept password of an upload link that still works.
+    pub fn upload_link_password(&self, id: i64, now: i64) -> Result<Option<String>, AppError> {
+        let conn = self.lock();
+        let value = conn
+            .prepare_cached(
+                "SELECT password_copy FROM upload_links
+                 WHERE id = ?1 AND revoked_at IS NULL AND expires_at > ?2 AND password_copy IS NOT NULL",
+            )?
+            .query_row(params![id, now], |r| r.get(0))
+            .optional()?;
+        Ok(value)
+    }
+
+    /// Takes `bytes` of the link's size limit for a file about to be sent, atomically. False when
+    /// it would go over the limit (or the link ended).
+    pub fn reserve_upload_bytes(&self, id: i64, bytes: i64, now: i64) -> Result<bool, AppError> {
+        let conn = self.lock();
+        let changed = conn
+            .prepare_cached(
+                "UPDATE upload_links SET bytes_received = bytes_received + ?2
+                 WHERE id = ?1 AND revoked_at IS NULL AND expires_at > ?3 AND bytes_received + ?2 <= max_bytes",
+            )?
+            .execute(params![id, bytes, now])?;
+        Ok(changed == 1)
+    }
+
+    /// Gives reserved bytes back (Orthanc did not take the file).
+    pub fn refund_upload_bytes(&self, id: i64, bytes: i64) -> Result<(), AppError> {
+        let conn = self.lock();
+        conn.prepare_cached("UPDATE upload_links SET bytes_received = MAX(bytes_received - ?2, 0) WHERE id = ?1")?
+            .execute(params![id, bytes])?;
+        Ok(())
+    }
+
+    /// Records a received file: accepted (and the study it went to) or rejected.
+    pub fn record_upload_file(&self, id: i64, study: Option<&str>, now: i64) -> Result<(), AppError> {
+        let conn = self.lock();
+        let tx = conn.unchecked_transaction()?;
+        match study {
+            Some(study) => {
+                let stored: Option<String> = tx
+                    .query_row("SELECT studies FROM upload_links WHERE id = ?1", params![id], |r| r.get(0))
+                    .optional()?
+                    .flatten();
+                let mut studies: Vec<String> = json_list(stored);
+                if !studies.iter().any(|s| s == study) && studies.len() < MAX_UPLOAD_LINK_STUDIES {
+                    studies.push(study.to_string());
+                }
+                tx.execute(
+                    "UPDATE upload_links SET files_received = files_received + 1, last_upload_at = ?2, studies = ?3
+                     WHERE id = ?1",
+                    params![id, now, list_json(&studies)],
+                )?;
+            }
+            None => {
+                tx.execute(
+                    "UPDATE upload_links SET files_rejected = files_rejected + 1, last_upload_at = ?2 WHERE id = ?1",
+                    params![id, now],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn record_upload_link_access(&self, id: i64) -> Result<(), AppError> {
+        let conn = self.lock();
+        conn.prepare_cached("UPDATE upload_links SET access_count = access_count + 1 WHERE id = ?1")?
+            .execute(params![id])?;
+        Ok(())
+    }
+
+    /// True when the creator should hear about new files now: never told, or told more than
+    /// `quiet_secs` ago (one email per batch, not one per file). The time is noted at once.
+    pub fn upload_notice_due(&self, id: i64, now: i64, quiet_secs: i64) -> Result<bool, AppError> {
+        let conn = self.lock();
+        let changed = conn
+            .prepare_cached(
+                "UPDATE upload_links SET last_notified_at = ?2
+                 WHERE id = ?1 AND notify_email IS NOT NULL AND (last_notified_at IS NULL OR last_notified_at < ?3)",
+            )?
+            .execute(params![id, now, now - quiet_secs])?;
+        Ok(changed == 1)
     }
 }

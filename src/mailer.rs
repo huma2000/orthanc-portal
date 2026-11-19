@@ -72,6 +72,18 @@ pub fn parse_recipients(raw: &str) -> Result<Vec<Mailbox>, String> {
         .collect()
 }
 
+/// One email address of an account ("" = none): the plain address, checked.
+pub fn single_address(raw: &str) -> Result<String, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(String::new());
+    }
+    match parse_recipients(raw)?.as_slice() {
+        [one] => Ok(one.email.to_string()),
+        _ => Err("Enter one email address".into()),
+    }
+}
+
 /// The mailboxes as text, for answers and the audit log: "a@b.org, c@d.org".
 pub fn addresses(to: &[Mailbox]) -> String {
     to.iter().map(|m| m.email.to_string()).collect::<Vec<_>>().join(", ")
@@ -267,6 +279,147 @@ impl Invitation<'_> {
         }
         text
     }
+}
+
+/// What happened to a link, for the email to its creator ([`link_notice`]).
+#[derive(Clone, Copy)]
+pub enum LinkEvent {
+    /// The guest entered the password for the first time.
+    Opened,
+    /// The guest downloaded a study; `left` downloads remain.
+    Downloaded { left: i64 },
+    /// Files arrived through an upload link (`files` so far, `megabytes` so far).
+    Received { files: i64, megabytes: i64 },
+}
+
+/// The email telling staff what happened to one of their links: (subject, body). On purpose it
+/// names the link by its number and the creator's own note, never the patient: emails travel
+/// through mail servers the practice does not control.
+pub fn link_notice(portal: &str, link: &str, note: &str, event: LinkEvent, lang: Language) -> (String, String) {
+    let note_line = |label: &str| if note.is_empty() { String::new() } else { format!("{label}: {note}\n") };
+    match lang {
+        Language::En => {
+            let (subject, what) = match event {
+                LinkEvent::Opened => (
+                    format!("{portal}: your shared link {link} was opened"),
+                    "The person you invited entered the password and opened the study.".to_string(),
+                ),
+                LinkEvent::Downloaded { left } => (
+                    format!("{portal}: your shared link {link} was downloaded"),
+                    format!("The person you invited downloaded the study. Downloads left: {left}."),
+                ),
+                LinkEvent::Received { files, megabytes } => (
+                    format!("{portal}: files received through your upload link {link}"),
+                    format!("Files are arriving through your upload link: {files} so far ({megabytes} MB). They are in the archive (Shares > Upload links shows the studies)."),
+                ),
+            };
+            (
+                subject,
+                format!(
+                    "{what}\n\nLink: {link}\n{}\nYou asked {portal} to tell you (Shares page). This email names no patient on purpose.\n",
+                    note_line("Your note")
+                ),
+            )
+        }
+        Language::Es => {
+            let (subject, what) = match event {
+                LinkEvent::Opened => (
+                    format!("{portal}: se ha abierto su enlace compartido {link}"),
+                    "La persona invitada ha introducido la contraseña y ha abierto el estudio.".to_string(),
+                ),
+                LinkEvent::Downloaded { left } => (
+                    format!("{portal}: se ha descargado su enlace compartido {link}"),
+                    format!("La persona invitada ha descargado el estudio. Descargas restantes: {left}."),
+                ),
+                LinkEvent::Received { files, megabytes } => (
+                    format!("{portal}: archivos recibidos por su enlace de envío {link}"),
+                    format!("Están llegando archivos por su enlace de envío: {files} hasta ahora ({megabytes} MB). Ya están en el archivo (Compartidos > Enlaces de envío muestra los estudios)."),
+                ),
+            };
+            (
+                subject,
+                format!(
+                    "{what}\n\nEnlace: {link}\n{}\nPidió a {portal} que le avisara (página Compartidos). Este correo no nombra a ningún paciente a propósito.\n",
+                    note_line("Su nota")
+                ),
+            )
+        }
+    }
+}
+
+/// An email asking somebody outside to SEND studies through an upload link: (subject, body).
+pub struct UploadInvitation<'a> {
+    pub portal_name: &'a str,
+    pub sender: &'a str,
+    pub url: &'a str,
+    pub minutes_left: u64,
+    pub max_mb: i64,
+    pub password: Option<&'a str>,
+    pub message: &'a str,
+    pub footer: &'a str,
+    pub language: Language,
+}
+
+impl UploadInvitation<'_> {
+    pub fn subject(&self) -> String {
+        match self.language {
+            Language::En => format!("{}: please send us your images", self.portal_name),
+            Language::Es => format!("{}: envíenos sus imágenes, por favor", self.portal_name),
+        }
+    }
+
+    pub fn body(&self) -> String {
+        let (p, s) = (self.portal_name, self.sender);
+        let duration = duration_words_in(self.minutes_left, self.language);
+        let message = if self.message.is_empty() {
+            String::new()
+        } else {
+            let lines: String = self.message.lines().map(|l| format!("  {l}\n")).collect();
+            match self.language {
+                Language::En => format!("\nMessage from {s}:\n{lines}"),
+                Language::Es => format!("\nMensaje de {s}:\n{lines}"),
+            }
+        };
+        let mut text = match self.language {
+            Language::En => format!(
+                "Hello,\n\n{s} at {p} asks you to send imaging studies (for example the files of a CD or USB stick with earlier images).\n{message}\nOpen this page and drag the files or the whole folder onto it:\n{}\n\nThe link works for {duration} from the time of this email, for up to {} MB. You will not see anything else of the archive.\n\n",
+                self.url, self.max_mb
+            ),
+            Language::Es => format!(
+                "Hola:\n\n{s}, de {p}, le pide que envíe estudios de imagen (por ejemplo, los archivos de un CD o de una memoria USB con imágenes anteriores).\n{message}\nAbra esta página y arrastre a ella los archivos o la carpeta entera:\n{}\n\nEl enlace funciona durante {duration} a partir del envío de este correo, hasta {} MB. No verá nada más del archivo.\n\n",
+                self.url, self.max_mb
+            ),
+        };
+        text += &match (self.password, self.language) {
+            (Some(pw), Language::En) => format!("Password: {pw}\n(capital letters, spaces and dashes do not matter)"),
+            (Some(pw), Language::Es) => {
+                format!("Contraseña: {pw}\n(no importan las mayúsculas, los espacios ni los guiones)")
+            }
+            (None, Language::En) => "You need a password to open it. It will be given to you separately (for example by phone or text message).".into(),
+            (None, Language::Es) => "Necesita una contraseña para abrirlo. Se le facilitará por separado (por ejemplo, por teléfono o por SMS).".into(),
+        };
+        text += &match self.language {
+            Language::En => {
+                format!("\n\nThis email was sent by {p}. If you were not expecting it, you can ignore it.\n")
+            }
+            Language::Es => format!("\n\nEste correo lo ha enviado {p}. Si no lo esperaba, puede ignorarlo.\n"),
+        };
+        if !self.footer.is_empty() {
+            text += &format!("\n--\n{}\n", self.footer);
+        }
+        text
+    }
+}
+
+/// Sends a notice in the background: the person who triggered it (a guest) never waits for the
+/// mail server, and a failure only goes to the log.
+pub fn send_in_background(settings: std::sync::Arc<Settings>, to: String, subject: String, body: String) {
+    tokio::spawn(async move {
+        let Ok(mailbox) = to.parse::<Mailbox>() else { return };
+        if let Err(e) = send(&settings, vec![mailbox], &subject, &body).await {
+            tracing::warn!("a link notification could not be emailed: {e}");
+        }
+    });
 }
 
 /// The test email of Settings > Email: (subject, body).

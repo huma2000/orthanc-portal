@@ -15,6 +15,7 @@
 use crate::auth::{self, AuthUser};
 use crate::db::User;
 use crate::error::{AppError, AppResult};
+use crate::mailer;
 use crate::permissions::{Permission, PermissionSet};
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
@@ -80,6 +81,9 @@ pub struct CreateUser {
     /// Key of the role picked in the form (empty or absent = custom).
     #[serde(default)]
     role: String,
+    /// Where the portal writes to this person (optional).
+    #[serde(default)]
+    email: String,
 }
 
 pub async fn create_user(
@@ -94,9 +98,14 @@ pub async fn create_user(
     auth::validate_password(&req.password)?;
     let permissions = PermissionSet::parse_list(&req.permissions)?;
     let role = validate_role(&state, &req.role)?;
+    let email = mailer::single_address(&req.email).map_err(AppError::BadRequest)?;
 
     let hash = auth::hash_password(req.password).await?;
-    let user = state.db.create_user(&username, &hash, &permissions, &role)?;
+    let mut user = state.db.create_user(&username, &hash, &permissions, &role)?;
+    if !email.is_empty() {
+        state.db.set_user_email(user.id, &email)?;
+        user.email = email;
+    }
     state.db.audit(
         &admin.username,
         "user_created",
@@ -119,6 +128,12 @@ pub struct UpdateUser {
     password: Option<String>,
     /// Role key ("" = custom). Leave out to keep the current one.
     role: Option<String>,
+    /// Email address ("" = none). Leave out to keep it.
+    email: Option<String>,
+    /// Forget the account's two-step sign-in (a lost phone): it signs in with the password alone,
+    /// or sets it up again at the next sign-in when it is required.
+    #[serde(default)]
+    reset_two_factor: bool,
 }
 
 pub async fn update_user(
@@ -156,11 +171,20 @@ pub async fn update_user(
         }
     }
 
+    let email = req.email.as_deref().map(mailer::single_address).transpose().map_err(AppError::BadRequest)?;
+
     let hash = match password {
         Some(p) => Some(auth::hash_password(p).await?),
         None => None,
     };
     state.db.update_user(id, new_permissions.as_ref(), req.active, hash.as_deref(), role.as_deref())?;
+    if let Some(email) = &email {
+        state.db.set_user_email(id, email)?;
+    }
+    if req.reset_two_factor && (target.two_factor || target.totp_pending.is_some()) {
+        state.db.disable_totp(id)?;
+        state.db.audit(&admin.username, "two_factor_reset", &target.username);
+    }
 
     // A new password (or a disabled account) ends every session and Weasis link of that user.
     // An administrator changing their OWN password keeps only the session they are using now:

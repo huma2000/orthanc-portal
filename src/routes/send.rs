@@ -18,7 +18,6 @@
 //! the number of images, the time it has been running and the images that failed.
 
 use crate::auth::AuthUser;
-use crate::db::User;
 use crate::error::{AppError, AppResult};
 use crate::models::{ModalityNode, StudySummary};
 use crate::permissions::Permission;
@@ -88,7 +87,12 @@ pub struct SendRequest {
 }
 
 /// Starts the job that sends one study to `node`; records it in the Transfers list.
-async fn start_send(state: &AppState, user: &User, node: &ModalityNode, id: &str) -> AppResult<(i64, String)> {
+pub(crate) async fn start_send(
+    state: &AppState,
+    username: &str,
+    node: &ModalityNode,
+    id: &str,
+) -> AppResult<(i64, String)> {
     if !is_valid_orthanc_id(id) {
         return Err(AppError::BadRequest("Invalid study id".into()));
     }
@@ -109,13 +113,13 @@ async fn start_send(state: &AppState, user: &User, node: &ModalityNode, id: &str
             state.orthanc.start_job(&path, &json!({ "Resources": [id], "Synchronous": false })).await?
         }
     };
-    let transfer_id = state.db.add_transfer(&user.username, id, &label, &node.id, &job_id, "send")?;
-    state.db.audit(&user.username, "send_study", &format!("{label} -> {} (job {job_id})", node.id));
+    let transfer_id = state.db.add_transfer(username, id, &label, &node.id, &job_id, "send")?;
+    state.db.audit(username, "send_study", &format!("{label} -> {} (job {job_id})", node.id));
     Ok((transfer_id, job_id))
 }
 
 /// The destination called `target`, if the user may send there.
-async fn find_destination(state: &AppState, target: &str) -> AppResult<ModalityNode> {
+pub(crate) async fn find_destination(state: &AppState, target: &str) -> AppResult<ModalityNode> {
     destinations(state)
         .await?
         .into_iter()
@@ -134,7 +138,7 @@ pub async fn send_study(
         return Err(AppError::BadRequest("Invalid study id".into()));
     }
     let node = find_destination(&state, &req.target).await?;
-    let (transfer_id, job_id) = start_send(&state, &user, &node, &id).await?;
+    let (transfer_id, job_id) = start_send(&state, &user.username, &node, &id).await?;
     Ok(Json(json!({ "transfer_id": transfer_id, "job_id": job_id })))
 }
 
@@ -162,7 +166,7 @@ pub async fn send_many(
     let (state, user, node) = (&state, &user, &node);
     let outcomes: Vec<(String, AppResult<(i64, String)>)> = stream::iter(req.studies.clone())
         .map(|id| async move {
-            let outcome = start_send(state, user, node, &id).await;
+            let outcome = start_send(state, &user.username, node, &id).await;
             (id, outcome)
         })
         .buffered(PARALLEL_STARTS)

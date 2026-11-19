@@ -25,6 +25,7 @@
 use crate::auth::{self, authenticate_share};
 use crate::db::Share;
 use crate::error::{AppError, AppResult};
+use crate::mailer::{self, LinkEvent};
 use crate::models::{SeriesSummary, StudySummary};
 use crate::orthanc::ArchiveKind;
 use crate::routes::branding::render_template;
@@ -69,7 +70,7 @@ pub async fn status(
         return Ok(unavailable());
     }
     let Some(share) = state.db.get_share_by_token(&token)? else { return Ok(unavailable()) };
-    if share.revoked_at.is_some() {
+    if share.revoked_at.is_some() || share.copies_deleted {
         return Ok(unavailable());
     }
     if !share.is_active(now_unix()) {
@@ -113,7 +114,7 @@ pub async fn unlock(
     state.throttle.check(&share_key)?;
 
     let now = now_unix();
-    if share.revoked_at.is_some() {
+    if share.revoked_at.is_some() || share.copies_deleted {
         return Err(AppError::Gone("This link is no longer available.".into()));
     }
     if now >= share.expires_at {
@@ -133,6 +134,10 @@ pub async fn unlock(
     state.throttle.record_success(&share_key);
     state.db.record_share_access(share.id, now)?;
     state.db.audit(&guest, "share_unlock", &format!("ip={ip} ({})", share.label));
+    // "Email me when it is opened": once, the first time.
+    if share.notify_email.is_some() && state.db.first_open_notice(share.id)? {
+        notify_creator(&state, &share, LinkEvent::Opened);
+    }
 
     // The session ends when the link does (at most 12 hours: a forgotten tab does not stay open for days).
     let ttl = (share.expires_at - now).clamp(60, 12 * 3600);
@@ -270,6 +275,10 @@ pub async fn download(
             let who = if study.patient_id.is_empty() { &study.patient_name } else { &study.patient_id };
             let file_name = format!("{}_{}.zip", sanitize_filename(who), sanitize_filename(&study.study_date));
             state.db.audit(&format!("guest-{}", share.id), "share_download", &format!("{} ({file_name})", share.label));
+            if share.notify_email.is_some() {
+                // `share` was read before this download was taken: one fewer is left now.
+                notify_creator(&state, &share, LinkEvent::Downloaded { left: (share.downloads_left() - 1).max(0) });
+            }
             zip_response(upstream, &file_name)
         }
         Err(e) => {
@@ -277,6 +286,18 @@ pub async fn download(
             Err(e)
         }
     }
+}
+
+/// Emails the creator of the link what just happened (they asked for it when creating the link).
+fn notify_creator(state: &AppState, share: &Share, event: LinkEvent) {
+    let Some(to) = share.notify_email.clone() else { return };
+    let settings = state.settings.get();
+    if !settings.email_configured() {
+        return;
+    }
+    let (subject, body) =
+        mailer::link_notice(&settings.portal_name, &format!("#{}", share.id), &share.note, event, settings.language);
+    mailer::send_in_background(settings, to, subject, body);
 }
 
 /// Ends this guest session (the cookie is forgotten on both sides).

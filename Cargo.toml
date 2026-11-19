@@ -10,7 +10,7 @@ description = "Web portal (intranet + Cloudflare Tunnel) for an Orthanc PACS wit
 # http-body-util: lets the upload route enforce a size limit that can be changed
 # at runtime from the Settings screen.
 axum = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync", "fs", "io-util"] }
 http-body-util = "0.1"
 
 # ---- Talking to Orthanc --------------------------------------------------
@@ -45,6 +45,16 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dotenvy = "0.15"         # loads a local .env file (optional)
 # gzip of the files built into the program (app.js, the translations...), done once at start-up.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# QR codes (SVG, drawn by the server) of invitation / upload links and of the two-step sign-in set-up.
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+# Two-step sign-in (TOTP, RFC 6238: HMAC-SHA1, what every authenticator app uses) and the
+# one-way hashes of its recovery codes (SHA-256).
+hmac = "0.12"
+sha1 = "0.10"
+sha2 = "0.10"
+# Patient CD / USB export: copies the entries of Orthanc's DICOMDIR archive as they are (no
+# recompression, hence no compression feature) next to a portable viewer.
+zip = { version = "2", default-features = false }
 
 [profile.release]
 # Smaller, faster binary for production.

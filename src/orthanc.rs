@@ -266,6 +266,13 @@ impl OrthancClient {
         Ok(self.check(resp).await?.json::<Value>().await?)
     }
 
+    /// `POST path` with a JSON body for work that can take minutes (a synchronous anonymization of
+    /// a big study): up to 30 minutes instead of one.
+    pub async fn post_json_long(&self, path: &str, body: &Value) -> Result<Value, AppError> {
+        let resp = self.request(Method::POST, path).json(body).timeout(Duration::from_secs(1800)).send().await?;
+        Ok(self.check(resp).await?.json::<Value>().await?)
+    }
+
     /// `PUT path` with an empty body (e.g. putting a label on a study).
     pub async fn put_empty(&self, path: &str) -> Result<(), AppError> {
         let resp = self.request(Method::PUT, path).body("").timeout(JSON_TIMEOUT).send().await?;

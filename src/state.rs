@@ -31,6 +31,10 @@ pub struct AppState {
     pub share_sessions: TokenStore,
     /// Series and images Orthanc confirmed to belong to a guest's shared study (`sharing::Member`).
     pub guest_members: MemberCache,
+    /// Two-step sign-in: the password was right, the code is still to come (ticket -> user id, 5 min).
+    pub login_tickets: TokenStore,
+    /// Outside people who entered the password of an UPLOAD link: cookie token -> upload link id.
+    pub upload_sessions: TokenStore,
     /// Brute-force protection for the login form.
     pub throttle: LoginThrottle,
     /// Starts, stops and moves the HTTP listeners (used by the Settings screen).

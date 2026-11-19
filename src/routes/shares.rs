@@ -61,13 +61,17 @@ pub struct EmailRequest {
 }
 
 /// An [`EmailRequest`] checked before anything is created or changed.
-struct PreparedEmail {
-    to: Vec<Mailbox>,
-    message: String,
-    include_password: bool,
+pub(crate) struct PreparedEmail {
+    pub(crate) to: Vec<Mailbox>,
+    pub(crate) message: String,
+    pub(crate) include_password: bool,
 }
 
-fn prepare_email(settings: &Settings, user: &str, req: Option<EmailRequest>) -> AppResult<Option<PreparedEmail>> {
+pub(crate) fn prepare_email(
+    settings: &Settings,
+    user: &str,
+    req: Option<EmailRequest>,
+) -> AppResult<Option<PreparedEmail>> {
     let Some(req) = req else { return Ok(None) };
     if !settings.email_configured() {
         return Err(AppError::BadRequest(
@@ -124,7 +128,7 @@ async fn send_invitation(
 
 /// The validity asked: `minutes` (days / hours / minutes of the Share windows), or `hours` (older
 /// clients). Between 1 minute and the maximum of the settings.
-fn asked_minutes(minutes: Option<u64>, hours: Option<u64>, max_hours: u64) -> AppResult<Option<u64>> {
+pub(crate) fn asked_minutes(minutes: Option<u64>, hours: Option<u64>, max_hours: u64) -> AppResult<Option<u64>> {
     match minutes.or(hours.map(|h| h.saturating_mul(60))) {
         Some(m) if (1..=max_hours * 60).contains(&m) => Ok(Some(m)),
         Some(_) => Err(AppError::BadRequest(format!(
@@ -150,6 +154,90 @@ pub struct CreateShare {
     /// `POST /api/shares` only: the studies of a link that shares several (Settings > Features).
     #[serde(default)]
     studies: Vec<String>,
+    /// Share EVERY study of the patient of this study (it comes first).
+    #[serde(default)]
+    patient: bool,
+    /// Share anonymized copies (made now, deleted when the link ends), not the originals.
+    #[serde(default)]
+    anonymize: bool,
+    /// Email me when the guest opens the link and when they download.
+    #[serde(default)]
+    notify: bool,
+}
+
+/// Label put on the anonymized copies made for links (so staff can recognise them in the archive).
+pub const ANONYMIZED_LABEL: &str = "shared-anonymized";
+
+/// Every study of the patient of study `id`, that one first (at most [`MAX_STUDIES_PER_LINK`]).
+async fn patient_studies(state: &AppState, id: &str) -> AppResult<Vec<String>> {
+    let study = state.orthanc.get_json(&format!("/studies/{id}")).await?;
+    let patient_id = study["ParentPatient"].as_str().unwrap_or_default().to_string();
+    if !is_valid_orthanc_id(&patient_id) {
+        return Ok(vec![id.to_string()]);
+    }
+    let patient = state.orthanc.get_json(&format!("/patients/{patient_id}")).await?;
+    let mut ids = vec![id.to_string()];
+    for other in patient["Studies"].as_array().into_iter().flatten().filter_map(|v| v.as_str()) {
+        if other != id && is_valid_orthanc_id(other) && ids.len() < MAX_STUDIES_PER_LINK {
+            ids.push(other.to_string());
+        }
+    }
+    Ok(ids)
+}
+
+/// Makes anonymized copies of the studies for one link: one made-up patient for all of them
+/// (`ANON-<code>`), the originals untouched. Returns the ids of the copies, in the same order.
+/// If one fails, the copies already made are deleted again.
+async fn anonymized_copies(state: &AppState, ids: &[String], code: &str) -> AppResult<Vec<String>> {
+    let body = json!({
+        "Replace": { "PatientName": "ANONYMOUS", "PatientID": format!("ANON-{code}") },
+        "KeepSource": true,
+        "Force": true,
+    });
+    let mut copies = Vec::with_capacity(ids.len());
+    for id in ids {
+        let made = state.orthanc.post_json_long(&format!("/studies/{id}/anonymize"), &body).await;
+        match made.map(|answer| answer["ID"].as_str().unwrap_or_default().to_string()) {
+            Ok(copy) if is_valid_orthanc_id(&copy) => {
+                // Best effort: the label only helps staff recognise the copy.
+                let _ = state.orthanc.put_empty(&format!("/studies/{copy}/labels/{ANONYMIZED_LABEL}")).await;
+                copies.push(copy);
+            }
+            outcome => {
+                delete_copies(state, &copies).await;
+                return Err(match outcome {
+                    Err(e) => e,
+                    Ok(_) => AppError::Upstream("Orthanc did not say where the anonymized copy is".into()),
+                });
+            }
+        }
+    }
+    Ok(copies)
+}
+
+/// Deletes anonymized copies from Orthanc (those already gone count as deleted).
+pub async fn delete_copies(state: &AppState, copies: &[String]) -> bool {
+    let mut all = true;
+    for copy in copies.iter().filter(|c| is_valid_orthanc_id(c)) {
+        match state.orthanc.delete(&format!("/studies/{copy}")).await {
+            Ok(()) | Err(AppError::NotFound) => {}
+            Err(e) => {
+                tracing::warn!("the anonymized copy {copy} could not be deleted: {e}");
+                all = false;
+            }
+        }
+    }
+    all
+}
+
+/// Housekeeping (main.rs, and right after a revocation): the anonymized copies of links that ended.
+pub async fn delete_ended_copies(state: &AppState) {
+    let Ok(due) = state.db.copies_to_delete(now_unix()) else { return };
+    for (id, copies) in due {
+        if delete_copies(state, &copies).await && state.db.mark_copies_deleted(id).is_ok() {
+            state.db.audit("portal", "share_copies_deleted", &format!("#{id}: {} anonymized studies", copies.len()));
+        }
+    }
 }
 
 /// Most studies one link may share.
@@ -182,7 +270,12 @@ pub async fn create_share(
     create(state, user, vec![id], req).await
 }
 
-async fn create(state: AppState, user: crate::db::User, ids: Vec<String>, req: CreateShare) -> AppResult<Json<Value>> {
+async fn create(
+    state: AppState,
+    user: crate::db::User,
+    mut ids: Vec<String>,
+    req: CreateShare,
+) -> AppResult<Json<Value>> {
     if ids.iter().any(|id| !is_valid_orthanc_id(id)) {
         return Err(AppError::BadRequest("Invalid study id".into()));
     }
@@ -193,6 +286,28 @@ async fn create(state: AppState, user: crate::db::User, ids: Vec<String>, req: C
              in Settings > Share links."
                 .into(),
         ));
+    }
+    feature(!req.anonymize || settings.share_anonymize, "Sharing anonymized copies is switched off")?;
+    // "Email me": the address of the account, and a mail server to send through.
+    let notify_email = if req.notify {
+        if !(settings.share_notify && settings.email_configured()) {
+            return Err(AppError::BadRequest("Notifications need a mail server (Settings > Email)".into()));
+        }
+        if user.email.is_empty() {
+            return Err(AppError::BadRequest(
+                "Add your email address in My account first, so the portal knows where to tell you".into(),
+            ));
+        }
+        Some(user.email.clone())
+    } else {
+        None
+    };
+    if req.patient {
+        if ids.len() != 1 {
+            return Err(AppError::BadRequest("Choose one study to share every study of its patient".into()));
+        }
+        ids = patient_studies(&state, &ids[0]).await?;
+        feature(ids.len() < 2 || settings.multi_study_shares, "Links for several studies are switched off")?;
     }
 
     // The two limits: what was asked, or the defaults, never beyond the administrator's maximum.
@@ -205,6 +320,16 @@ async fn create(state: AppState, user: crate::db::User, ids: Vec<String>, req: C
     let note: String = req.note.unwrap_or_default().trim().chars().filter(|c| !c.is_control()).take(120).collect();
     let email = prepare_email(&settings, &user.username, req.email)?;
 
+    let token = sharing::new_token();
+    // Anonymized: the link points at copies made for it (the originals stay as they are).
+    let owned_copies = if req.anonymize {
+        let copies = anonymized_copies(&state, &ids, &token[..8].to_ascii_uppercase()).await?;
+        ids = copies.clone();
+        copies
+    } else {
+        Vec::new()
+    };
+
     // Reading the studies checks that they exist and gives what the link will point at.
     // Read a few at a time (a link can share up to 50 studies), in the order chosen.
     let orthanc = &state.orthanc;
@@ -215,8 +340,15 @@ async fn create(state: AppState, user: crate::db::User, ids: Vec<String>, req: C
         .await;
     let mut studies = Vec::with_capacity(ids.len());
     for study in read {
-        let study = StudySummary::from_orthanc(&study?);
+        let study = match study {
+            Ok(study) => StudySummary::from_orthanc(&study),
+            Err(e) => {
+                delete_copies(&state, &owned_copies).await;
+                return Err(e);
+            }
+        };
         if study.study_instance_uid.is_empty() {
+            delete_copies(&state, &owned_copies).await;
             return Err(AppError::BadRequest("This study has no StudyInstanceUID and cannot be shared".into()));
         }
         studies.push(study);
@@ -231,7 +363,6 @@ async fn create(state: AppState, user: crate::db::User, ids: Vec<String>, req: C
 
     let password = sharing::generate_password();
     let password_hash = auth::hash_password(sharing::normalize_password(&password)).await?;
-    let token = sharing::new_token();
     let expires_at = now_unix() + (minutes as i64) * 60;
     let label: String =
         format!("{} | {} | {}", study.patient_name.replace('^', " "), study.study_date, study.study_description)
@@ -240,7 +371,7 @@ async fn create(state: AppState, user: crate::db::User, ids: Vec<String>, req: C
             .collect();
     let label = if extra.is_empty() { label } else { format!("{label} + {} more", extra.len()) };
 
-    let share = state.db.create_share(&NewShare {
+    let created = state.db.create_share(&NewShare {
         token: &token,
         password_hash: &password_hash,
         expires_at,
@@ -252,11 +383,26 @@ async fn create(state: AppState, user: crate::db::User, ids: Vec<String>, req: C
         max_downloads: downloads as i64,
         extra_studies: &extra,
         password_copy: settings.share_keep_passwords.then_some(password.as_str()),
-    })?;
+        notify_email: notify_email.as_deref(),
+        owned_copies: &owned_copies,
+    });
+    let share = match created {
+        Ok(share) => share,
+        Err(e) => {
+            delete_copies(&state, &owned_copies).await;
+            return Err(e);
+        }
+    };
     state.db.audit(
         &user.username,
         "share_created",
-        &format!("#{} {label} ({}, {downloads} downloads)", share.id, mailer::duration_words(minutes)),
+        &format!(
+            "#{} {label} ({}, {downloads} downloads{}{})",
+            share.id,
+            mailer::duration_words(minutes),
+            if owned_copies.is_empty() { "" } else { ", anonymized copy" },
+            if notify_email.is_some() { ", notify" } else { "" }
+        ),
     );
     let emailed = match email {
         Some(email) => {
@@ -277,7 +423,36 @@ async fn create(state: AppState, user: crate::db::User, ids: Vec<String>, req: C
         "email": emailed,
         "max_downloads": downloads,
         "label": label,
+        "studies": 1 + extra.len(),
+        "anonymized": !owned_copies.is_empty(),
+        "notify": notify_email.is_some(),
     })))
+}
+
+/// The link of an active invitation as a QR code (SVG picture), for a printed handout.
+pub async fn share_qr(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    Path(id): Path<i64>,
+) -> AppResult<axum::response::Response> {
+    user.require(Permission::Share)?;
+    let share = state.db.get_share(id)?.ok_or(AppError::NotFound)?;
+    if !may_manage(&user, &share) {
+        return Err(AppError::Denied("You can only print the links you created".into()));
+    }
+    let settings = state.settings.get();
+    if !share.is_active(now_unix()) || settings.share_public_url.is_empty() {
+        return Err(AppError::Conflict("This link is not active".into()));
+    }
+    qr_response(&sharing::share_url(&settings.share_public_url, &share.token))
+}
+
+/// An SVG QR code as an answer (never kept by browsers: it opens patient data).
+pub fn qr_response(text: &str) -> AppResult<axum::response::Response> {
+    use axum::http::header;
+    use axum::response::IntoResponse;
+    let svg = crate::totp::qr_svg(text).ok_or_else(|| AppError::Internal("the QR code could not be drawn".into()))?;
+    Ok(([(header::CONTENT_TYPE, "image/svg+xml"), (header::CACHE_CONTROL, "no-store")], svg).into_response())
 }
 
 /// One row of the Shares tab.
@@ -305,11 +480,17 @@ pub struct ShareView {
     last_access_at: Option<i64>,
     /// How many studies the link shares.
     study_count: usize,
+    /// It shares anonymized copies (made for it, deleted when it ends).
+    anonymized: bool,
+    /// Its creator is emailed when it is opened or downloaded.
+    notify: bool,
 }
 
 fn view(share: Share, base_url: &str, now: i64, keep_passwords: bool) -> ShareView {
     ShareView {
         study_count: 1 + share.extra_studies.len(),
+        anonymized: !share.owned_copies.is_empty(),
+        notify: share.notify_email.is_some(),
         id: share.id,
         password_available: keep_passwords && share.has_password && share.is_active(now),
         password_kept: keep_passwords,
@@ -405,6 +586,11 @@ pub async fn update_share(
     let revoked = || AppError::Conflict("A revoked link cannot be changed: create a new one".into());
     if share.revoked_at.is_some() {
         return Err(revoked());
+    }
+    if share.copies_deleted {
+        return Err(AppError::Conflict(
+            "The anonymized copy this link shared was deleted when it ended: create a new link".into(),
+        ));
     }
     let settings = state.settings.get();
     let now = now_unix();
@@ -502,5 +688,10 @@ pub async fn revoke_share(
     // database, so a guest who is looking at it right now gets "410 Gone" on their very next
     // request, and the page then tells them the link is no longer available.
     state.db.audit(&user.username, "share_revoked", &format!("#{id} {}", share.label));
+    // Anonymized copies made for the link are deleted now (in the background: Orthanc may take a while).
+    if !share.owned_copies.is_empty() {
+        let state = state.clone();
+        tokio::spawn(async move { delete_ended_copies(&state).await });
+    }
     Ok(Json(json!({ "ok": true })))
 }
