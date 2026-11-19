@@ -110,8 +110,8 @@ async function newLink(admin, body) {
   // Lists that refresh themselves would add searches to the logs the checks read: off, except in their own part.
   await admin.call("PUT", "/api/admin/settings", { recent_auto_refresh: false, transfers_auto_refresh: false });
   await sleep(1200);
-  check("all pages are in the icon column, including Shares and Transfers", admin.tabs().join() === "Home,Search,Shares,Uploads,Transfers,Help,Configuration", admin.tabs().join());
-  check("the home page opens first, with the recent studies", !!admin.$(".recent") && /Recent studies/.test(admin.$(".recent").textContent));
+  check("all pages are in the icon column, including Shares and Transfers", admin.tabs().join() === "Home,Search,Shares,Uploads,Transfers,My account,Help,Configuration", admin.tabs().join());
+  check("the home page opens first, with the recent studies", !!admin.$(".recent:not(.recently-viewed)") && /Recent studies/.test(admin.$(".recent:not(.recently-viewed)").textContent));
   check("there is a single view: no view switch", !admin.$$(".side-btn").some((b) => /view/i.test(b.dataset.tip)) && !admin.$(".nav"));
 
   console.log("--- Settings is organised in tabs (users, DICOM nodes and the audit log live there)");
@@ -119,7 +119,7 @@ async function newLink(admin, body) {
   await until(() => admin.$("form.settings-form"), 6000);
   const subtab = (name) => admin.$$(".subtabs [role=tab]").find((b) => b.textContent === name);
   const visibleSections = () => admin.$$("section.settings-section").filter((s) => !s.hidden).map((s) => s.querySelector("h2").textContent);
-  check("Settings tabs", admin.$$(".subtabs [role=tab]").map((b) => b.textContent).join() === "General,Appearance,Search & labels,Features,Orthanc,Network & sharing,Security & roles,Users,DICOM nodes,Audit log,Jobs,System",
+  check("Settings tabs", admin.$$(".subtabs [role=tab]").map((b) => b.textContent).join() === "General,Appearance,Search & labels,Features,Orthanc,Network & sharing,Security & roles,Auto-forward,Backups,Users,DICOM nodes,Audit log,Jobs,System,Statistics",
     admin.$$(".subtabs [role=tab]").map((b) => b.textContent).join());
   check("no stray 'null' text on the page (it used to appear under the title)",
     !admin.$$("main *").some((el) => Array.from(el.childNodes).some((n) => n.nodeType === 3 && n.textContent.trim() === "null")));
@@ -398,7 +398,7 @@ async function newLink(admin, body) {
   const sharer = await makeDom(STAFF);
   await sharer.login("sharer", "SharerPass123");
   await sleep(1200);
-  check("sharer: Home, Search and Shares only", sharer.tabs().join() === "Home,Search,Shares,Help", sharer.tabs().join());
+  check("sharer: Home, Search and Shares only", sharer.tabs().join() === "Home,Search,Shares,My account,Help", sharer.tabs().join());
   await until(() => sharer.$("tr.study"), 6000);
   const srow = sharer.$("tr.study");
   check("sharer: Share... and the viewers, but no Send or Download", ["Share...", "Weasis", "OHIF"].every((n) => !!sharer.button(srow, n)) && !sharer.button(srow, "Send to...") && !sharer.button(srow, "Download"), sharer.words(srow));
@@ -410,7 +410,7 @@ async function newLink(admin, body) {
   await viewer.login("viewer1", "ViewerPass123");
   await sleep(1200);
   await until(() => viewer.$("tr.study"), 6000);
-  check("viewer: Home and Search, no Share button, no Shares page", viewer.tabs().join() === "Home,Search,Help" && !viewer.button(viewer.$("tr.study"), "Share..."), viewer.tabs().join());
+  check("viewer: Home and Search, no Share button, no Shares page", viewer.tabs().join() === "Home,Search,My account,Help" && !viewer.button(viewer.$("tr.study"), "Share..."), viewer.tabs().join());
   await admin.call("POST", "/api/admin/users", { username: "reader", password: "ReaderPass123", permissions: ["read"] });
   const reader = await makeDom(STAFF);
   await reader.login("reader", "ReaderPass123");
@@ -691,7 +691,63 @@ async function newLink(admin, body) {
   const lastFind = fs.readFileSync(path.join(LOGS, "find.log"), "utf8").trim().split("\n").pop();
   check("RX chip searches CR + DX", /"ModalitiesInStudy": "CR\\\\DX"/.test(lastFind), lastFind);
 
-  const all = [admin, guest, revokedPage, viewOnlyPage, shortPage, expiredPage, nothing, garbage, unknown, noViewerPage, adminNoOhif, viewers, noButtons, sharer, viewer, reader, linked, viaUid, live, custom];
+  console.log("--- two-step sign-in, My account, statistics, the Share options, upload links");
+  const totp = (secret) => {
+    const clean = secret.replace(/\s/g, "");
+    let bits = "", bytes = [];
+    for (const c of clean) bits += "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".indexOf(c).toString(2).padStart(5, "0");
+    for (let i = 0; i + 8 <= bits.length; i += 8) bytes.push(parseInt(bits.slice(i, i + 8), 2));
+    const counter = Buffer.alloc(8); counter.writeBigUInt64BE(BigInt(Math.floor(Date.now() / 30000)));
+    const mac = require("crypto").createHmac("sha1", Buffer.from(bytes)).update(counter).digest();
+    const o = mac[19] & 15;
+    return String((mac.readUInt32BE(o) & 0x7fffffff) % 1000000).padStart(6, "0");
+  };
+  await admin.call("POST", "/api/admin/users", { username: "twostep", password: "TwoStepPass123", permissions: ["read"] });
+  await admin.call("PUT", "/api/admin/settings", { two_factor: "required", upload_links: true });
+  const ts = await makeDom(STAFF);
+  await ts.login("twostep", "TwoStepPass123");
+  check("required two-step sign-in: the set-up comes after the password", !!ts.$(".two-factor-step img.qr") && !ts.$(".simple-side"), ts.text().slice(0, 160));
+  const key = ts.$(".totp-setup .password").textContent;
+  ts.$(".two-factor-step input[name=code]").value = totp(key);
+  ts.submit(ts.$(".two-factor-step")); await until(() => ts.$(".simple-side"), 6000);
+  check("...the first code signs in", !!ts.$(".simple-side"));
+  check("...and the recovery codes are shown once", ts.$$("dialog[open] .recovery-codes li").length === 10);
+  ts.click(ts.button(ts.$("dialog[open]"), "I have saved them"));
+  await ts.tab("My account");
+  check("My account: email, password and two-step sign-in", /Email address/.test(ts.text()) && /Change password/.test(ts.text()) && /Recovery codes left: 10/.test(ts.text()), ts.text().slice(0, 200));
+  check("...required: it cannot be switched off", !ts.button(ts.$("main"), "Switch it off"));
+  ts.$("main input[type=email]").value = "two@example.org";
+  ts.submit(ts.$("main input[type=email]").closest("form")); await sleep(1000);
+  check("...the email is saved", (await (await ts.call("GET", "/api/me")).json()).email === "two@example.org");
+  await admin.call("PUT", "/api/admin/settings", { two_factor: "off" });
+
+  const st = await makeDom(STAFF); await st.login("admin", "SuperSecret123");
+  await st.tab("Settings");
+  st.click(st.$$(".subtabs [role=tab]").find((b) => b.textContent === "Statistics")); await until(() => st.$(".stat-tile"), 8000);
+  check("Statistics: the tiles, a chart per series, the table by month", st.$$(".stat-tile").length === 6 && st.$$("svg.month-bars").length === 6 && st.$$(".stats-table thead th").length === 13);
+  st.click(st.$$(".subtabs [role=tab]").find((b) => b.textContent === "Auto-forward")); await sleep(300);
+  st.click(st.button(st.section("Auto-forward"), "Add rule"));
+  check("Auto-forward: a rule row with the destinations of Orthanc", st.$$(".forward-rule select option").some((o) => o.value === "ris"));
+  await st.tab("Studies"); await until(() => st.$("tr.study"), 6000);
+  st.click(st.button(st.$("tr.study"), "Share..."));
+  const mailOn = (await (await st.call("GET", "/api/me")).json()).features.share.notify;
+  check("Share window: every study of the patient, anonymized copy (and notify me only with a mail server)", /Every study of this patient/.test(st.$("dialog[open]").textContent) && /Share an anonymized copy/.test(st.$("dialog[open]").textContent)
+    && /Email me when the link is opened/.test(st.$("dialog[open]").textContent) === mailOn, st.$("dialog[open]").textContent.slice(0, 300));
+  st.$("dialog[open]").removeAttribute("open");
+  check("Download menu: Patient CD / USB", st.$$("tr.study .menu-item").some((a) => a.textContent.startsWith("Patient CD / USB")));
+  await st.tab("Shares");
+  check("Shares: a tab for upload links", st.$$(".subtabs [role=tab]").some((b) => /Upload links/.test(b.textContent)));
+
+  const ul = await (await admin.call("POST", "/api/upload-links", { note: "ui test" })).json();
+  const sender = await makeDom(GUEST, `/u/${ul.url.split("/u/")[1]}`, SHARE);
+  await until(() => sender.$("#upload-password"), 6000);
+  check("upload link page: the password first", !!sender.$("#upload-password") && /Send us your images/.test(sender.text()));
+  sender.$("#upload-password").value = ul.password;
+  sender.submit(sender.$("form.share-password")); await until(() => sender.$(".dropzone"), 6000);
+  check("...then the area to drop files, and nothing of the archive", !!sender.$(".dropzone") && !/DOE/.test(sender.text()), sender.text().slice(0, 200));
+  await admin.call("PUT", "/api/admin/settings", { upload_links: false });
+
+  const all = [admin, guest, revokedPage, ts, st, sender, viewOnlyPage, shortPage, expiredPage, nothing, garbage, unknown, noViewerPage, adminNoOhif, viewers, noButtons, sharer, viewer, reader, linked, viaUid, live, custom];
   check("no JavaScript errors anywhere", all.every((d) => d.errors.length === 0), all.flatMap((d) => d.errors).join("|"));
   console.log(`\nRESULT: ${results.filter(Boolean).length} passed, ${results.filter((r) => !r).length} failed`);
   process.exit(results.every(Boolean) ? 0 : 1);
