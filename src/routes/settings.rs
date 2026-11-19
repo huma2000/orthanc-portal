@@ -64,9 +64,11 @@ pub async fn public_info(State(state): State<AppState>) -> Json<Value> {
 
 /// Settings + the state of the listeners + factory roles (for "Restore defaults").
 async fn settings_document(state: &AppState) -> Value {
+    // The destinations come from Orthanc: asked while the listeners are looked at.
+    let (listeners, destinations) = tokio::join!(state.listeners.status(), crate::routes::send::destinations(state));
     json!({
         "settings": state.settings.get().to_view(),
-        "listeners": state.listeners.status().await,
+        "listeners": listeners,
         // true = the listening addresses are set by the environment (Docker): read-only here.
         "listeners_from_env": state.listeners_from_env,
         "defaults": {
@@ -79,7 +81,7 @@ async fn settings_document(state: &AppState) -> Value {
         "branding": state.branding.describe(),
         // Settings > Auto-forward: what the rules did lately, and where they can send to.
         "forward": crate::forward::status(),
-        "destinations": crate::routes::send::destinations(state).await.unwrap_or_default(),
+        "destinations": destinations.unwrap_or_default(),
         // Every permission, for the roles editor.
         "permissions": Permission::ALL
             .iter()

@@ -24,31 +24,20 @@ use crate::models::StudySummary;
 use crate::permissions::Permission;
 use crate::settings::Language;
 use crate::state::AppState;
-use crate::util::{feature, now_unix, orthanc_id, random_token};
-use axum::body::{Body, Bytes};
+use crate::util::{civil_from_days, feature, now_unix, orthanc_id, random_token, temp_file_download, TempFile};
 use axum::extract::{Query, State};
-use axum::http::{header, StatusCode};
 use axum::response::Response;
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 
 /// Exports built at the same time (each needs about twice its size on disk for a moment).
 static EXPORT_GATE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 /// Most files copied from the viewer's folder (a portable Weasis has a few thousand).
 const MAX_VIEWER_FILES: usize = 20_000;
-
-/// Deletes its file when dropped: at the end of the download, or on any failure on the way.
-struct TempFile(PathBuf);
-
-impl Drop for TempFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
 
 /// Where exports are assembled; files left over by an interrupted program are removed at start-up.
 pub fn export_dir(state: &AppState) -> PathBuf {
@@ -90,9 +79,15 @@ pub async fn cd_export(
     })?;
 
     // The studies (for the patient's page and the file name); this also checks that they exist.
+    let orthanc = &state.orthanc;
+    let read: Vec<AppResult<serde_json::Value>> = futures_util::stream::iter(ids.clone())
+        .map(|id| async move { orthanc.get_json(&format!("/studies/{id}")).await })
+        .buffered(6)
+        .collect()
+        .await;
     let mut studies = Vec::with_capacity(ids.len());
-    for id in &ids {
-        studies.push(StudySummary::from_orthanc(&state.orthanc.get_json(&format!("/studies/{id}")).await?));
+    for study in read {
+        studies.push(StudySummary::from_orthanc(&study?));
     }
 
     let dir = export_dir(&state);
@@ -125,7 +120,6 @@ pub async fn cd_export(
         .map_err(|e| AppError::Internal(format!("export task failed: {e}")))??;
     drop(media); // no longer needed
 
-    let size = std::fs::metadata(&output.0).map(|m| m.len()).unwrap_or(0);
     let template = &settings.download_name_template;
     let file_name = if studies.len() == 1 {
         crate::routes::files::study_file_name(template, &studies[0], &ids[0]).replace(".zip", "_CD.zip")
@@ -138,29 +132,8 @@ pub async fn cd_export(
         &format!("{} studies: {} ({file_name}, viewer files: {viewer_files})", ids.len(), ids.join(",")),
     );
 
-    // 3. Stream it, then delete it (the guard travels with the stream).
-    let file = tokio::fs::File::open(&output.0)
-        .await
-        .map_err(|e| AppError::Internal(format!("cannot read the export: {e}")))?;
-    let stream = futures_util::stream::unfold((file, output), |(mut file, guard)| async move {
-        let mut buffer = vec![0u8; 256 * 1024];
-        match file.read(&mut buffer).await {
-            Ok(0) => None,
-            Ok(n) => {
-                buffer.truncate(n);
-                Some((Ok::<Bytes, std::io::Error>(Bytes::from(buffer)), (file, guard)))
-            }
-            Err(e) => Some((Err(e), (file, guard))),
-        }
-    });
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/zip")
-        .header(header::CONTENT_LENGTH, size)
-        .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{file_name}\""))
-        .header(header::CACHE_CONTROL, "no-store")
-        .body(Body::from_stream(stream))
-        .map_err(|e| AppError::Internal(format!("cannot build the export response: {e}")))
+    // 3. Stream it, then delete it.
+    temp_file_download(output, "application/zip", &file_name).await
 }
 
 /// Builds the final ZIP (blocking: runs on a worker thread). Returns how many viewer files were added.
@@ -313,29 +286,9 @@ pub fn patient_page(portal: &str, studies: &[StudySummary], lang: Language) -> S
     )
 }
 
-/// Days since 1970-01-01 -> (year, month, day) (Howard Hinnant's algorithm).
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (yoe + era * 400 + i64::from(m <= 2), m, d)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn dates_without_a_library() {
-        assert_eq!(civil_from_days(0), (1970, 1, 1));
-        assert_eq!(civil_from_days(19_860), (2024, 5, 17));
-        assert_eq!(civil_from_days(11_016), (2000, 2, 29));
-    }
 
     #[test]
     fn the_patient_page_escapes_what_comes_from_dicom() {

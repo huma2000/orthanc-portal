@@ -437,6 +437,8 @@ impl Db {
                  detail   TEXT    NOT NULL
              );
              CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log (ts);
+             -- Statistics: entries of one action over a period (Configuration > Statistics).
+             CREATE INDEX IF NOT EXISTS idx_audit_action_ts ON audit_log (action, ts);
 
              CREATE TABLE IF NOT EXISTS transfers (
                  id       INTEGER PRIMARY KEY AUTOINCREMENT,

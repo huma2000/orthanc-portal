@@ -18,36 +18,20 @@ use crate::auth::AuthUser;
 use crate::error::{AppError, AppResult};
 use crate::permissions::Permission;
 use crate::state::AppState;
-use crate::util::{feature, now_unix, random_token};
-use axum::body::{Body, Bytes};
+use crate::util::{civil_from_days, feature, now_unix, random_token, temp_file_download, TempFile};
 use axum::extract::State;
-use axum::http::{header, StatusCode};
 use axum::response::Response;
 use axum::Json;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use tokio::io::AsyncReadExt;
 
 const PREFIX: &str = "portal-backup-";
 
 /// `portal-backup-20241119-031500.db` for a moment (UTC).
 fn backup_name(now: i64) -> String {
-    let (y, m, d) = civil(now.div_euclid(86_400));
+    let (y, m, d) = civil_from_days(now.div_euclid(86_400));
     let secs = now.rem_euclid(86_400);
     format!("{PREFIX}{y:04}{m:02}{d:02}-{:02}{:02}{:02}.db", secs / 3600, (secs % 3600) / 60, secs % 60)
-}
-
-fn civil(days: i64) -> (i64, u32, u32) {
-    // Same algorithm as routes/export.rs (Howard Hinnant's days-from-civil, inverted).
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (yoe + era * 400 + i64::from(m <= 2), m, d)
 }
 
 /// The automatic backups in `dir`: (name, size, modified unix time), newest first.
@@ -151,14 +135,6 @@ pub async fn backup_now(State(state): State<AppState>, AuthUser(user): AuthUser)
     Ok(Json(json!({ "written": path.display().to_string() })))
 }
 
-/// Deletes its file when dropped (after the download, or if it fails).
-struct TempFile(PathBuf);
-impl Drop for TempFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
 /// A fresh copy of the database, downloaded at once (nothing is kept on the server).
 pub async fn download(State(state): State<AppState>, AuthUser(user): AuthUser) -> AppResult<Response> {
     user.require(Permission::Admin)?;
@@ -170,30 +146,9 @@ pub async fn download(State(state): State<AppState>, AuthUser(user): AuthUser) -
     tokio::task::spawn_blocking(move || db.backup_into(&path))
         .await
         .map_err(|e| AppError::Internal(format!("backup task failed: {e}")))??;
-    let size = std::fs::metadata(&temp.0).map(|m| m.len()).unwrap_or(0);
     let name = backup_name(now_unix());
     state.db.audit(&user.username, "backup_downloaded", &name);
-    let file =
-        tokio::fs::File::open(&temp.0).await.map_err(|e| AppError::Internal(format!("cannot read the backup: {e}")))?;
-    let stream = futures_util::stream::unfold((file, temp), |(mut file, guard)| async move {
-        let mut buffer = vec![0u8; 256 * 1024];
-        match file.read(&mut buffer).await {
-            Ok(0) => None,
-            Ok(n) => {
-                buffer.truncate(n);
-                Some((Ok::<Bytes, std::io::Error>(Bytes::from(buffer)), (file, guard)))
-            }
-            Err(e) => Some((Err(e), (file, guard))),
-        }
-    });
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/vnd.sqlite3")
-        .header(header::CONTENT_LENGTH, size)
-        .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{name}\""))
-        .header(header::CACHE_CONTROL, "no-store")
-        .body(Body::from_stream(stream))
-        .map_err(|e| AppError::Internal(format!("cannot build the backup response: {e}")))
+    temp_file_download(temp, "application/vnd.sqlite3", &name).await
 }
 
 #[cfg(test)]

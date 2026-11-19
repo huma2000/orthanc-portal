@@ -136,9 +136,85 @@ pub fn public_base_url(headers: &HeaderMap, settings: &Settings) -> Result<Strin
     Ok(format!("{scheme}://{host}"))
 }
 
+/// Days since 1970-01-01 -> (year, month, day), UTC (Howard Hinnant's algorithm: no date library).
+pub fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (yoe + era * 400 + i64::from(m <= 2), m, d)
+}
+
+/// The first day of a month -> days since 1970-01-01 (the inverse of [`civil_from_days`]).
+pub fn days_from_civil(year: i64, month: u32) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (i64::from(month) + 9) % 12;
+    let doy = (153 * mp + 2) / 5;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// A file the portal made for one answer (a patient CD, a backup copy): deleted when dropped,
+/// at the end of the download or on any failure on the way.
+pub struct TempFile(pub std::path::PathBuf);
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Answers with a temporary file as a download, then deletes it (the file travels with the stream).
+pub async fn temp_file_download(
+    temp: TempFile,
+    content_type: &str,
+    file_name: &str,
+) -> Result<axum::response::Response, AppError> {
+    use tokio::io::AsyncReadExt;
+    let size = std::fs::metadata(&temp.0).map(|m| m.len()).unwrap_or(0);
+    let file = tokio::fs::File::open(&temp.0)
+        .await
+        .map_err(|e| AppError::Internal(format!("cannot read {file_name}: {e}")))?;
+    let stream = futures_util::stream::unfold((file, temp), |(mut file, guard)| async move {
+        let mut buffer = vec![0u8; 256 * 1024];
+        match file.read(&mut buffer).await {
+            Ok(0) => None,
+            Ok(n) => {
+                buffer.truncate(n);
+                Some((Ok::<axum::body::Bytes, std::io::Error>(axum::body::Bytes::from(buffer)), (file, guard)))
+            }
+            Err(e) => Some((Err(e), (file, guard))),
+        }
+    });
+    axum::response::Response::builder()
+        .status(axum::http::StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_LENGTH, size)
+        .header(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{file_name}\""))
+        // Patient data / secrets: never kept by browsers or proxies.
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(axum::body::Body::from_stream(stream))
+        .map_err(|e| AppError::Internal(format!("cannot build the download: {e}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dates_without_a_library() {
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(19_860), (2024, 5, 17));
+        assert_eq!(civil_from_days(11_016), (2000, 2, 29));
+        assert_eq!(civil_from_days(days_from_civil(2024, 3)), (2024, 3, 1));
+        assert_eq!(civil_from_days(days_from_civil(2023, 1)), (2023, 1, 1));
+    }
 
     /// Tokens are 64 lowercase hex characters and never repeat.
     #[test]
