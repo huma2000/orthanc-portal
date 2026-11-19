@@ -27,7 +27,7 @@ STUDY_ID = "aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee"
 SERIES_ID = "11111111-22222222-33333333-44444444-55555555"   # a CT series (3 images)
 SR_ID = "99999999-88888888-77777777-66666666-55555555"       # a report: NO pixel data, more instances than the CT
 JOB_ID = "27d7b341-e0e2-4825-95ba-fe8b4c2c304d"
-STUDY = {"ID": STUDY_ID, "Type": "Study", "Series": [SERIES_ID, SR_ID],
+STUDY = {"ID": STUDY_ID, "Type": "Study", "Series": [SERIES_ID, SR_ID], "ParentPatient": "77777777-66666666-55555555-44444444-33333333",
          "MainDicomTags": {"StudyInstanceUID": "1.2.826.0.1.3680043.8.498.1", "StudyDate": "20240517",
                            "StudyDescription": "CT CHEST <script>alert(1)</script>", "AccessionNumber": "ACC1",
                            "ReferringPhysicianName": "HOUSE^GREGORY", "InstitutionName": "Riverside Vets"},
@@ -241,8 +241,23 @@ STUDY2 = {"ID": STUDY2_ID, "Type": "Study", "Series": [SERIES_ID],
           "RequestedTags": {"ModalitiesInStudy": "MR", "NumberOfStudyRelatedInstances": "3"}}
 
 
+PATIENT_ID = "77777777-66666666-55555555-44444444-33333333"   # the patient of STUDY and STUDY2
+ANON = {}       # anonymized copies made by POST /studies/{id}/anonymize without "Asynchronous": id -> study
+CHANGES = []    # Orthanc's list of changes (GET /changes); the tests add to it (POST /__mock/change)
+
+
 def all_studies():
-    return DEMO_STUDIES if DEMO else {STUDY_ID: STUDY, STUDY2_ID: STUDY2}
+    return DEMO_STUDIES if DEMO else {STUDY_ID: STUDY, STUDY2_ID: STUDY2, **ANON}
+
+
+def media_zip():
+    """A real ZIP with a DICOMDIR (what /tools/create-media returns), for the patient CD export."""
+    import io, zipfile
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("DICOMDIR", b"DICM-index")
+        z.writestr("IMAGES/IM0", b"DICM-image" * 50)
+    return buffer.getvalue()
 
 
 def all_series():
@@ -278,6 +293,20 @@ def apply_replace(study_id, replace):
 def extra_get(h, p, query):
     if not DEMO and p == f"/studies/{STUDY2_ID}": return h._json(with_labels(STUDY2))
     if not DEMO and p == f"/studies/{STUDY2_ID}/series": return h._json([SERIES])
+    m = re.match(r"^/studies/([^/]+)(/series)?$", p)
+    if m and m.group(1) in ANON:
+        return h._json([SERIES] if m.group(2) else with_labels(ANON[m.group(1)]))
+    if p == f"/patients/{PATIENT_ID}":
+        return h._json({"ID": PATIENT_ID, "Type": "Patient", "Studies": [STUDY_ID, STUDY2_ID]})
+    if p == "/changes":
+        last = CHANGES[-1]["Seq"] if CHANGES else 0
+        if "last" in query: return h._json({"Changes": CHANGES[-1:], "Done": True, "Last": last})
+        found = re.search(r"since=(\d+)", query)
+        since = int(found.group(1)) if found else 0
+        page = [c for c in CHANGES if c["Seq"] > since][:100]
+        return h._json({"Changes": page, "Done": True, "Last": page[-1]["Seq"] if page else since})
+    m = re.match(r"^/instances/([^/]+)/metadata/RemoteAET$", p)
+    if m: return h._send(b"SCANNER1", "text/plain")
     m = re.match(r"^/series/([^/]+)/instances$", p)
     if m and m.group(1) in all_series(): return h._json(instances_of(all_series()[m.group(1)]))
     m = re.match(r"^/instances/([^/]+)/(tags|preview|pdf|file)$", p)
@@ -328,9 +357,20 @@ def extra_post(h, path, body):
         if rid not in (all_studies() if kind == "studies" else all_series()): return h._json({"error": "nf"}, 404)
         log("modify", {"kind": kind, "id": rid, "action": action, "body": data})
         if DEMO and action == "modify" and kind == "studies": apply_replace(rid, data.get("Replace", {}))   # the tests keep their fixture
+        if action == "anonymize" and kind == "studies" and not data.get("Asynchronous"):
+            # Synchronous: Orthanc answers with the new study at once (the anonymized copy of a share link).
+            source = all_studies()[rid]
+            copy_id = f"{len(ANON) + 1:08x}-a0a0a0a0-a0a0a0a0-a0a0a0a0-a0a0a0a0"
+            replace = data.get("Replace", {})
+            ANON[copy_id] = {**source, "ID": copy_id,
+                             "MainDicomTags": {**source["MainDicomTags"], "StudyInstanceUID": f"2.25.{len(ANON) + 1}"},
+                             "PatientMainDicomTags": {"PatientName": replace.get("PatientName", "ANONYMIZED"),
+                                                      "PatientID": replace.get("PatientID", "ANON")}}
+            return h._json({"ID": copy_id, "Path": f"/studies/{copy_id}", "Type": "Study"})
         return h._json(instant_job("ResourceModification", {"ID": rid}))
     if p in ("/tools/create-archive", "/tools/create-media"):
         log("archive", {"tool": p, "body": data})
+        if p == "/tools/create-media": return h._send(media_zip(), "application/zip")
         return h._send(b"PK\x03\x04several-studies", "application/zip")
     if p == "/tools/create-dicom":
         log("create_dicom", {"parent": data.get("Parent"), "tags": data.get("Tags"), "content": (data.get("Content") or "")[:40]})
@@ -398,6 +438,7 @@ def extra_delete(h, path):
     if kind == "studies":
         if rid not in all_studies(): return h._json({"error": "nf"}, 404)
         if DEMO: del DEMO_STUDIES[rid]
+        ANON.pop(rid, None)
         return h._json({})
     if kind == "series":
         if rid not in all_series(): return h._json({"error": "nf"}, 404)
@@ -497,6 +538,9 @@ class H(BaseHTTPRequestHandler):
         body = self._body()
         if self.path == "/__mock/auth":   # test control, not part of Orthanc: switches the protection mode
             MODE["auth"] = json.loads(body)["mode"]; return self._json({"mode": MODE["auth"]})
+        if self.path == "/__mock/change":   # test control: Orthanc records a change (e.g. a study became stable)
+            change = json.loads(body); change["Seq"] = (CHANGES[-1]["Seq"] if CHANGES else 0) + 1; CHANGES.append(change)
+            return self._json(change)
         if self.path == "/__mock/copies":   # test control: how many studies a search finds
             MODE["copies"] = int(json.loads(body)["n"]); return self._json({"copies": MODE["copies"]})
         if not self._gate(): return
@@ -547,7 +591,7 @@ class H(BaseHTTPRequestHandler):
             LOG_LEVEL["level"] = raw.decode().strip(); log("loglevel", {"level": LOG_LEVEL["level"]}); return self._send(b"", "text/plain")
         m = re.match(r"^/studies/([^/]+)/labels/([^/]+)$", self.path)
         if m:
-            if m.group(1) not in (DEMO_STUDIES if DEMO else {STUDY_ID: 1}): return self._json({"error": "nf"}, 404)
+            if m.group(1) not in (DEMO_STUDIES if DEMO else {STUDY_ID: 1, **ANON}): return self._json({"error": "nf"}, 404)
             log("labels", {"put": m.group(2), "study": m.group(1)})
             LABELS.setdefault(m.group(1), set()).add(unquote(m.group(2))); return self._json({})
         m = re.match(r"^/modalities/([^/]+)$", self.path)
