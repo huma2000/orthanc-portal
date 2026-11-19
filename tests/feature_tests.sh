@@ -29,6 +29,20 @@ print(m["Subject"]); print(m.get_body(("plain",)).get_content())
 PY
 }
 mailcount() { ls "$WORK"/mail/*.eml 2>/dev/null | wc -l | tr -d ' '; }
+# mkdicom FILE STUDY_UID SIZE -> a small DICOM Part 10 file (explicit VR little endian) of that study
+mkdicom() { python3 - "$1" "$2" "$3" <<'PY'
+import sys, struct
+path, uid, size = sys.argv[1], sys.argv[2], int(sys.argv[3])
+def el(g, e, vr, v):
+    if len(v) % 2: v += b"\0" if vr == b"UI" else b" "
+    if vr in (b"OB", b"UN"): return struct.pack("<HH", g, e) + vr + b"\0\0" + struct.pack("<I", len(v)) + v
+    return struct.pack("<HH", g, e) + vr + struct.pack("<H", len(v)) + v
+data = b"\0" * 128 + b"DICM" + el(2, 0x10, b"UI", b"1.2.840.10008.1.2.1")
+data += el(8, 0x60, b"CS", b"CT") + el(0x10, 0x20, b"LO", b"EXT-1") + el(0x20, 0x0D, b"UI", uid.encode())
+data += el(0x7FE0, 0x10, b"OB", b"\x01" * max(0, size - len(data) - 12))
+open(path, "wb").write(data)
+PY
+}
 
 A=$(login $F admin SuperSecret123)
 mkuser() { body $F $A /api/admin/users -X POST -H "$J" -d "{\"username\":\"$1\",\"password\":\"$2\",\"permissions\":[$3]$4}" > /dev/null; }
@@ -50,9 +64,12 @@ has "...gives a QR code (SVG) and an otpauth:// address" "$(echo "$SETUP" | py "
 has "...for this account" "$(echo "$SETUP" | py "d['uri']")" "viewer1"
 ok "...not active until confirmed" "$(body $F $V /api/me | py "d['two_factor']")" "False"
 ok "a wrong first code is refused (400)" "$(code $F $V POST /api/account/two-factor/enable -H "$J" -d '{"code":"000000"}')" "400"
+V2=$(login $F viewer1 ViewerPass123)   # another session of the same person (another computer)
 CODES=$(post $F $V /api/account/two-factor/enable "{\"code\":\"$(totp "$SECRET")\"}")
 ok "the right one switches it on and gives ten recovery codes" "$(echo "$CODES" | py "len(d['recovery_codes'])")" "10"
 RC1=$(echo "$CODES" | py "d['recovery_codes'][0]")
+ok "...the other sessions of the account end" "$(code $F $V2 GET /api/me)" "401"
+ok "...this one goes on" "$(code $F $V GET /api/me)" "200"
 ok "...the account says so (and never shows the secret)" "$(body $F $V /api/me | py "(d['two_factor'], d['recovery_codes_left'], 'totp_secret' in d)")" "(True, 10, False)"
 STEP1=$(post $F "" /api/login '{"username":"viewer1","password":"ViewerPass123"}')
 ok "sign-in: the password alone no longer opens a session" "$(echo "$STEP1" | py "d['two_factor']")" "code"
@@ -77,9 +94,11 @@ put $A '{"two_factor":"required"}' > /dev/null
 STEP1=$(post $F "" /api/login '{"username":"doctor","password":"DoctorPass123"}')
 ok "required: an account without it sets it up at sign-in" "$(echo "$STEP1" | py "d['two_factor']+' '+str('<svg' in d['qr'])")" "setup True"
 DSECRET=$(echo "$STEP1" | py "d['secret']"); TICKET=$(echo "$STEP1" | py "d['ticket']")
-OUT=$(curl -s -H "$H" -H "$J" -d "{\"ticket\":\"$TICKET\",\"code\":\"$(totp "$DSECRET")\"}" $F/api/login/two-factor)
+OUT=$(curl -s -D hdr.txt -H "$H" -H "$J" -d "{\"ticket\":\"$TICKET\",\"code\":\"$(totp "$DSECRET")\"}" $F/api/login/two-factor)
+DNEW=$(grep -i set-cookie hdr.txt | sed 's/.*portal_session=\([0-9a-f]*\);.*/\1/')
 ok "...the first code confirms it, signs in and gives the recovery codes" "$(echo "$OUT" | py "(d['username'], len(d['recovery_codes']), d['two_factor'])")" "('doctor', 10, True)"
-ok "...it cannot be switched off while required (403)" "$(code $F $D POST /api/account/two-factor/disable -H "$J" -d '{"password":"DoctorPass123"}')" "403"
+ok "...the session opened before it was required has ended" "$(code $F $D GET /api/me)" "401"
+ok "...it cannot be switched off while required (403)" "$(code $F $DNEW POST /api/account/two-factor/disable -H "$J" -d '{"password":"DoctorPass123"}')" "403"
 ok "an administrator resets it (lost phone)" "$(body $F $A /api/admin/users/2 -X PUT -H "$J" -d '{"reset_two_factor":true}' | py "d['two_factor']")" "False"
 has "...in the audit log" "$(body $F $A /api/admin/audit)" "two_factor_reset"
 put $A '{"two_factor":"off"}' > /dev/null
@@ -158,21 +177,30 @@ ok "a wrong password: 400" "$(curl -s -o /dev/null -w '%{http_code}' -H "$H" -H 
 UC=$(curl -s -D - -o /dev/null -H "$H" -H "$J" -d "{\"password\":\"$UP\"}" $G/api/upload/$UT/unlock | grep -i set-cookie | sed 's/.*upload_session=\([0-9a-f]*\);.*/\1/')
 ok "the right one opens it" "$(curl -s -H "Cookie: upload_session=$UC" $G/api/upload/$UT/status | py "d['state']")" "open"
 ok "...the upload cookie opens no shared study (401)" "$(curl -s -o /dev/null -w '%{http_code}' -H "Cookie: share_session=$UC" $G/api/share/$LT/study)" "401"
-head -c 3000 /dev/urandom > small.dcm; printf 'BAD!not dicom' > notes.txt; head -c 1100000 /dev/urandom > big.dcm
+mkdicom small.dcm 2.25.1001 2800; mkdicom big.dcm 2.25.1001 1100000; mkdicom other.dcm 2.25.2002 2800
+mkdicom existing.dcm "$UID_" 2800; printf 'BAD!not dicom' > notes.txt
+python3 -c "import zipfile,sys;zipfile.ZipFile(sys.argv[1],'w').write(sys.argv[2])" archive.zip small.dcm
 BEFORE=$(mailcount)
 OUT=$(curl -s -X POST -H "$H" -H "Cookie: upload_session=$UC" --data-binary @small.dcm $G/api/upload/$UT/file)
 ok "a DICOM file is accepted" "$(echo "$OUT" | py "d['accepted']")" "True"
 hasnt "...and the answer names no study" "$OUT" "$SID"
-ok "...it went to Orthanc" "$(tail -1 $WORK/upload.log | py "d['len']")" "3000"
-ok "...the study got the label" "$(grep -c '"put": "received"' $WORK/labels.log)" "1"
+SMALL=$(wc -c < small.dcm | tr -d ' ')
+ok "...it went to Orthanc" "$(tail -1 $WORK/upload.log | py "d['len']")" "$SMALL"
+ok "...the new study got the label" "$(grep '"put": "received"' $WORK/labels.log | grep -c b0b0b0b0)" "1"
 sleep 1.5
 has "...and the creator is told" "$(lastmail)" "files received through your upload link"
 ok "a file that is not DICOM is counted apart" "$(curl -s -X POST -H "$H" -H "Cookie: upload_session=$UC" --data-binary @notes.txt $G/api/upload/$UT/file | py "(d['accepted'], d['reason'])")" "(False, 'not_dicom')"
 ok "a file over the link's size limit is refused (403)" "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "$H" -H "Cookie: upload_session=$UC" --data-binary @big.dcm $G/api/upload/$UT/file)" "403"
-ok "the summary counts what arrived" "$(curl -s -H "Cookie: upload_session=$UC" $G/api/upload/$UT/summary | py "(d['files'], d['rejected'], d['bytes'])")" "(1, 1, 3000)"
+ok "the summary counts what arrived" "$(curl -s -H "Cookie: upload_session=$UC" $G/api/upload/$UT/summary | py "(d['files'], d['rejected'], d['bytes'])")" "(1, 1, $SMALL)"
+UPLOADS=$(cat $WORK/upload.log | wc -l | tr -d ' ')
+ok "a file of a study ALREADY in the archive is refused" "$(curl -s -X POST -H "$H" -H "Cookie: upload_session=$UC" --data-binary @existing.dcm $G/api/upload/$UT/file | py "(d['accepted'], d['reason'])")" "(False, 'already_in_archive')"
+ok "...before Orthanc ever sees it" "$(cat $WORK/upload.log | wc -l | tr -d ' ')" "$UPLOADS"
+has "...and it is in the audit log" "$(body $F $A /api/admin/audit)" "upload_link_refused"
+ok "a ZIP archive is refused (its contents cannot be checked first)" "$(curl -s -X POST -H "$H" -H "Cookie: upload_session=$UC" --data-binary @archive.zip $G/api/upload/$UT/file | py "(d['accepted'], d['reason'])")" "(False, 'not_dicom')"
+ok "...nothing was counted against the size limit" "$(curl -s -H "Cookie: upload_session=$UC" $G/api/upload/$UT/summary | py "d['bytes']")" "$SMALL"
 ok "...one email per batch" "$(curl -s -X POST -H "$H" -H "Cookie: upload_session=$UC" --data-binary @small.dcm $G/api/upload/$UT/file > /dev/null; sleep 1; echo $(( $(mailcount) - BEFORE )))" "1"
-ok "the staff see the link and what came in" "$(body $F $D /api/upload-links | py "[(l['files_received'], l['files_rejected'], l['study_count'], l['status']) for l in d if l['id']==$UID2][0]")" "(2, 1, 1, 'active')"
-ok "...and the studies" "$(body $F $D /api/upload-links/$UID2/studies | py "d[0]['id']")" "$SID"
+ok "the staff see the link and what came in" "$(body $F $D /api/upload-links | py "[(l['files_received'], l['files_rejected'], l['study_count'], l['status']) for l in d if l['id']==$UID2][0]")" "(2, 3, 1, 'active')"
+ok "...and the study received (the new one, not the existing one)" "$(body $F $D /api/upload-links/$UID2/studies | py "[s['study_instance_uid'] for s in d]")" "['2.25.1001']"
 ok "...its password again" "$(post $F $D /api/upload-links/$UID2/password '{}' | py "d['password']")" "$UP"
 ok "...its QR code" "$(curl -s -o /dev/null -w '%{content_type}' -H "Cookie: portal_session=$D" $F/api/upload-links/$UID2/qr)" "image/svg+xml"
 ok "...nobody else's links (403)" "$(code $F $NM GET /api/upload-links/$UID2/studies)" "403"
@@ -257,7 +285,8 @@ ok "...(upload link: 403)" "$(code $F $D POST /api/upload-links -H "$J" -d '{"no
 BEFORE=$(mailcount); unlock $NLT "$NLP" > /dev/null; sleep 1.5
 ok "...and a link that asked for them earlier stays quiet" "$(mailcount)" "$BEFORE"
 put $A '{"share_notify":true}' > /dev/null
-ok "an upload session works while upload links are on" "$(curl -s -X POST -H "$H" -H "Cookie: upload_session=$U2C" --data-binary @small.dcm $G/api/upload/$U2T/file | py "d['accepted']")" "True"
+ok "an upload session works while upload links are on" "$(curl -s -X POST -H "$H" -H "Cookie: upload_session=$U2C" --data-binary @other.dcm $G/api/upload/$U2T/file | py "d['accepted']")" "True"
+ok "...nor to the study another upload link brought in" "$(curl -s -X POST -H "$H" -H "Cookie: upload_session=$U2C" --data-binary @small.dcm $G/api/upload/$U2T/file | py "d['reason']")" "already_in_archive"
 put $A '{"upload_links":false}' > /dev/null
 ok "upload links off: a sender ALREADY signed in can send nothing more (410)" "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "$H" -H "Cookie: upload_session=$U2C" --data-binary @small.dcm $G/api/upload/$U2T/file)" "410"
 ok "...nor read the summary (410)" "$(curl -s -o /dev/null -w '%{http_code}' -H "Cookie: upload_session=$U2C" $G/api/upload/$U2T/summary)" "410"

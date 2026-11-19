@@ -250,6 +250,25 @@ def all_studies():
     return DEMO_STUDIES if DEMO else {STUDY_ID: STUDY, STUDY2_ID: STUDY2, **ANON}
 
 
+def uploaded_study_uid(body):
+    """The StudyInstanceUID of an uploaded DICOM file made by the tests (explicit VR: tag, "UI", length)."""
+    at = body.find(b"\x20\x00\x0d\x00UI")
+    if at < 0: return None
+    n = int.from_bytes(body[at + 6:at + 8], "little")
+    return body[at + 8:at + 8 + n].rstrip(b"\x00 ").decode()
+
+
+def study_for_upload(uid):
+    """Like Orthanc: an image goes to the study with its UID, or starts a new one."""
+    for st in all_studies().values():
+        if st["MainDicomTags"]["StudyInstanceUID"] == uid: return st["ID"]
+    sid = f"{len(ANON) + 1:08x}-b0b0b0b0-b0b0b0b0-b0b0b0b0-b0b0b0b0"
+    ANON[sid] = {"ID": sid, "Type": "Study", "Series": [SERIES_ID],
+                 "MainDicomTags": {"StudyInstanceUID": uid, "StudyDate": "20240101", "StudyDescription": "RECEIVED"},
+                 "PatientMainDicomTags": {"PatientName": "SENT^BY^LINK", "PatientID": "EXT-1"}}
+    return sid
+
+
 def media_zip():
     """A real ZIP with a DICOMDIR (what /tools/create-media returns), for the patient CD export."""
     import io, zipfile
@@ -564,6 +583,10 @@ class H(BaseHTTPRequestHandler):
                     return self._json([{"ID": f"i-{u}", "Type": "Instance", "MainDicomTags": {"SOPInstanceUID": u}} for u in ("6.7", "6.8", "3")])
                 return self._json([SERIES])
             if q["Level"] != "Study": return self._json([SERIES])
+            if "StudyInstanceUID" in query:   # one study (or a list "a\\b"), as Orthanc matches UIDs
+                wanted = str(query["StudyInstanceUID"]).split("\\")
+                found = [with_labels(st) for st in all_studies().values() if st["MainDicomTags"]["StudyInstanceUID"] in wanted]
+                return self._json(found if q.get("Expand", True) else [st["ID"] for st in found])
             found = [with_labels(STUDY)] * MODE["copies"]
             return self._json(found[q.get("Since", 0):q.get("Since", 0) + q.get("Limit", 100)])
         if self.path == "/tools/count-resources":
@@ -581,7 +604,8 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/instances":
             log("upload", {"len": len(body), "te": self.headers.get("Transfer-Encoding")})
             if body[:4] == b"BAD!": return self._json({"error": "bad"}, 400)
-            return self._json({"ID": "x", "Status": "Success", "ParentStudy": STUDY_ID})
+            uid = uploaded_study_uid(body)
+            return self._json({"ID": "x", "Status": "Success", "ParentStudy": study_for_upload(uid) if uid else STUDY_ID})
         self._json({"error": "nf"}, 404)
 
     def do_PUT(self):

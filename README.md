@@ -729,6 +729,8 @@ receives **ten one-time recovery codes** for a lost phone (only their SHA-256 is
   `POST /api/login/two-factor` with the code opens the session. A code works **once** (the time step used is
   stored); wrong codes are throttled like passwords.
 * Setting it up, switching it off and asking for new recovery codes all ask for the password again.
+* Switching it on ends the account's other sessions (and Weasis links), as a password change does: a session
+  opened with the password alone, perhaps by someone else, does not outlive it.
 * Lost phone and recovery codes: an administrator ticks *Reset the two-step sign-in* in *Users > Edit*.
 * Switching the setting back to *off* stops asking for codes; what people set up is kept for later.
 
@@ -756,8 +758,14 @@ The **Share** window can also offer (each switchable in *Settings > Network & sh
 for a time, a total size (default and maximum in Settings) and an Orthanc **label** for what arrives (default
 `received`). The person opens it on the internet side, types the password and drops files or a whole CD folder.
 
-* They **see nothing** of the archive: each answer is only "accepted" or "not a DICOM file" (a CD's viewer
-  program and other files are skipped and counted). Their cookie (`upload_session`) is separate from invitation
+* They **see nothing** of the archive: each answer is only "accepted", "not a DICOM file" (a CD's viewer
+  program and other files are skipped and counted) or "already in the archive".
+* They can **never add images to a study already in the archive**: the portal reads the StudyInstanceUID from the
+  start of each file *before* Orthanc sees it, and refuses the file unless that study is new or came in through the
+  same link (Orthanc would otherwise file the images under the existing study). So only plain DICOM files are
+  accepted (DICOM Part 10, explicit or implicit VR little endian: practically every file of a CD); **ZIP archives
+  are refused**, since their contents cannot be checked first. Each refusal is in the audit log
+  (`upload_link_refused`). Their cookie (`upload_session`) is separate from invitation
   cookies and opens no study or viewer.
 * The size is reserved atomically before each file; the per-file limit is the upload limit of Settings.
 * The list shows files, size and studies received; *Studies* lists them; *Edit* gives more time or a bigger
@@ -1037,7 +1045,7 @@ The code compiles without warnings on Rust 1.91, passes `cargo clippy --all-targ
 formatted with `rustfmt` (see `rustfmt.toml`), and its dependencies were checked against the RustSec advisory
 database (no known vulnerable version in `Cargo.lock`). The automated tests live in the **`tests/`** folder:
 
-* `tests/feature_tests.sh`: **157 checks** of the features of section 9c on a fresh portal: two-step sign-in
+* `tests/feature_tests.sh`: **166 checks** of the features of section 9c on a fresh portal: two-step sign-in
   (set-up, codes used once, recovery codes, required mode, reset), My account, link notifications (and that they
   never name the patient), anonymized copies (made, shown, deleted on revocation), whole-patient links, QR codes,
   upload links (password, nothing leaked, size limit, non-DICOM files, revocation), the patient CD export (with

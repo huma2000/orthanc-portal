@@ -3456,7 +3456,7 @@ function helpSections() {
         h("p", null, "On the Shares page, ", h("b", null, "Upload links"), " > ", h("b", null, "New upload link"), " makes a link plus a password for a person outside (another clinic, a patient with a CD of earlier images). They open the link, type the password and drag the files or the whole CD folder onto the page. The studies arrive in the archive with the label you chose; they see nothing else."),
         ul("Give the password by a different way than the link, as for share links.",
           "The list shows how many files and studies arrived; the search button lists the studies received.",
-          "Files that are not images (a viewer program on the CD...) are skipped and counted apart."),
+          "Files that are not DICOM images (a viewer program on the CD, a ZIP archive...) are skipped and counted apart. Files of a study already in the archive are refused: an outsider can never add images to an existing study."),
       ],
     },
     {

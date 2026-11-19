@@ -132,6 +132,7 @@ pub struct CodeOnly {
 pub async fn enable_two_factor(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
+    headers: HeaderMap,
     Json(req): Json<CodeOnly>,
 ) -> AppResult<Json<Value>> {
     two_factor_available(&state)?;
@@ -153,6 +154,10 @@ pub async fn enable_two_factor(
     let codes = totp::new_recovery_codes();
     let hashes: Vec<String> = codes.iter().map(|c| totp::recovery_hash(c)).collect();
     state.db.enable_totp(user.id, &pending, step, &hashes)?;
+    // Sessions opened before (perhaps by someone who had the password) end now; this one stays.
+    let current = auth::read_cookie(&headers, auth::SESSION_COOKIE).unwrap_or_default();
+    state.sessions.revoke_user_except(user.id, &current);
+    state.weasis_tokens.revoke_user(user.id);
     state.db.audit(&user.username, "two_factor_enabled", "own account");
     Ok(Json(json!({ "recovery_codes": codes })))
 }

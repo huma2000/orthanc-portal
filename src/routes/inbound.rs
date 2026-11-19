@@ -32,6 +32,7 @@
 
 use crate::auth::{self, AuthUser};
 use crate::db::{NewUploadLink, UploadLink, User};
+use crate::dicom_peek::Peek;
 use crate::error::{AppError, AppResult};
 use crate::mailer::{self, LinkEvent, UploadInvitation};
 use crate::models::StudySummary;
@@ -48,7 +49,9 @@ use axum::Json;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::sync::{Mutex, OnceLock};
 
 const MB: i64 = 1024 * 1024;
 
@@ -502,8 +505,42 @@ pub async fn file(
         ));
     }
 
-    let stream = body.into_data_stream();
-    match state.orthanc.upload_instance(reqwest::Body::wrap_stream(stream), Some(length as u64)).await {
+    // Read the beginning of the file to learn its study BEFORE Orthanc sees it.
+    let mut stream = body.into_data_stream();
+    let mut head: Vec<u8> = Vec::new();
+    let uid = loop {
+        match crate::dicom_peek::study_uid(&head) {
+            Peek::Found(uid) => break Some(uid),
+            Peek::Unreadable => break None,
+            Peek::NeedMore if head.len() >= PEEK_LIMIT || head.len() as i64 >= length => break None,
+            Peek::NeedMore => match stream.next().await {
+                Some(Ok(chunk)) => head.extend_from_slice(&chunk),
+                Some(Err(_)) | None => {
+                    let _ = state.db.refund_upload_bytes(link.id, length);
+                    return Err(AppError::BadRequest("The file did not arrive completely".into()));
+                }
+            },
+        }
+    };
+    let refuse = |reason: &'static str| -> AppResult<Json<Value>> {
+        let _ = state.db.refund_upload_bytes(link.id, length);
+        state.db.record_upload_file(link.id, None, now)?;
+        Ok(Json(json!({ "accepted": false, "reason": reason })))
+    };
+    // Only plain DICOM files whose study is new, or came in through this same link.
+    let Some(uid) = uid else { return refuse("not_dicom") };
+    if !may_receive(&state, &link, &uid).await? {
+        state.db.audit(
+            &format!("sender-{}", link.id),
+            "upload_link_refused",
+            &format!("#{}: a file of study {uid}, which is already in the archive", link.id),
+        );
+        return refuse("already_in_archive");
+    }
+
+    // The bytes read so far, then the rest as it arrives.
+    let rest = futures_util::stream::iter([Ok::<_, axum::Error>(axum::body::Bytes::from(head))]).chain(stream);
+    match state.orthanc.upload_instance(reqwest::Body::wrap_stream(rest), Some(length as u64)).await {
         Ok(result) => {
             let study = result["ParentStudy"].as_str().unwrap_or_default().to_string();
             let is_new = !study.is_empty() && !link.studies.contains(&study);
@@ -532,6 +569,39 @@ pub async fn file(
             Err(e)
         }
     }
+}
+
+/// How much of a file is read, at most, to find its StudyInstanceUID (it is near the start).
+const PEEK_LIMIT: usize = 1024 * 1024;
+
+/// The StudyInstanceUIDs each upload link has let in (new studies it started). Two files of the same
+/// new study arriving at once must both pass, even before Orthanc has the first one; after a
+/// restart the studies recorded with the link do the same job.
+fn admitted() -> &'static Mutex<HashMap<i64, HashSet<String>>> {
+    static ADMITTED: OnceLock<Mutex<HashMap<i64, HashSet<String>>>> = OnceLock::new();
+    ADMITTED.get_or_init(Default::default)
+}
+
+/// May this link receive a file of study `uid`? Yes when the study is not in the archive yet (the
+/// link starts it), or when it came in through this link. No when it is a study already there: an
+/// outsider must never add images to a patient's existing study (Orthanc would file them under it).
+async fn may_receive(state: &AppState, link: &UploadLink, uid: &str) -> AppResult<bool> {
+    if admitted().lock().unwrap_or_else(|e| e.into_inner()).get(&link.id).is_some_and(|set| set.contains(uid)) {
+        return Ok(true);
+    }
+    let body = json!({ "Level": "Study", "Query": { "StudyInstanceUID": uid }, "Expand": false, "Limit": 20 });
+    let found = state.orthanc.find(&body).await?;
+    let ids: Vec<&str> = found.iter().filter_map(|v| v.as_str().or_else(|| v["ID"].as_str())).collect();
+    if ids.iter().all(|id| link.studies.iter().any(|s| s == id)) {
+        let mut map = admitted().lock().unwrap_or_else(|e| e.into_inner());
+        // Bounded: links rarely bring more than a few studies; forget everything past a size.
+        if map.values().map(HashSet::len).sum::<usize>() > 100_000 {
+            map.clear();
+        }
+        map.entry(link.id).or_default().insert(uid.to_string());
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 /// "Files are arriving" to the creator, at most once per quarter of an hour (one email per batch).

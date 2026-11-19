@@ -508,7 +508,7 @@ async function showUploader() {
   redraw = showUploader;
   state.clockOffset = summary.now - Date.now() / 1000;
   state.expiresAt = summary.expires_at;
-  const counts = { sent: 0, skipped: 0, failed: 0, bytes: 0 };
+  const counts = { sent: 0, skipped: 0, existing: 0, failed: 0, bytes: 0 };
   const queue = [];
   let running = 0, stopped = "";
 
@@ -518,7 +518,8 @@ async function showUploader() {
     const waiting = queue.length + running;
     progress.replaceChildren(
       h("div", null, h("b", null, t("{n} files sent", { n: counts.sent })), waiting ? ` · ${t("{n} to go", { n: waiting })}` : ""),
-      counts.skipped ? h("div", { class: "muted" }, t("{n} files skipped (not images: that is normal for the programs on a CD)", { n: counts.skipped })) : null,
+      counts.skipped ? h("div", { class: "muted" }, t("{n} files skipped (not DICOM images, or ZIP archives: that is normal for the programs on a CD)", { n: counts.skipped })) : null,
+      counts.existing ? h("div", { class: "form-error" }, t("{n} files refused: they belong to a study the practice already has. Ask them how they want to receive it.", { n: counts.existing })) : null,
       counts.failed ? h("div", { class: "form-error" }, t("{n} files could not be sent", { n: counts.failed })) : null,
       stopped ? h("div", { class: "form-error" }, stopped) : null,
       !waiting && counts.sent && !stopped ? h("div", { class: "notice" }, "Thank you: the files were received. You can send more, or close this page.") : null);
@@ -534,7 +535,9 @@ async function showUploader() {
       });
       const data = await response.json().catch(() => ({}));
       if (response.ok) {
-        if (data.accepted) { counts.sent += 1; counts.bytes += file.size; } else counts.skipped += 1;
+        if (data.accepted) { counts.sent += 1; counts.bytes += file.size; }
+        else if (data.reason === "already_in_archive") counts.existing += 1;
+        else counts.skipped += 1;
       } else if ([401, 403, 410].includes(response.status)) {
         stopped = translateMessage(data.error) || t("This link cannot receive more.");
         queue.length = 0;
@@ -560,7 +563,7 @@ async function showUploader() {
   const folderInput = h("input", { type: "file", multiple: true, webkitdirectory: true, hidden: true, onchange: (e) => { add(e.target.files); e.target.value = ""; } });
   const zone = h("div", { class: "dropzone" },
     h("h2", null, "Drop the files or the whole folder here"),
-    h("p", { class: "muted" }, "From a CD or a USB stick: drop the whole disc folder. DICOM files and ZIP archives of them are accepted; other files are skipped."),
+    h("p", { class: "muted" }, "From a CD or a USB stick: drop the whole disc folder. DICOM files are accepted; other files are skipped. A ZIP archive? Unpack it first and drop the folder."),
     h("div", { class: "buttons" },
       h("button", { class: "btn primary", type: "button", onclick: () => fileInput.click() }, "Choose files"),
       h("button", { class: "btn", type: "button", onclick: () => folderInput.click() }, "Choose a folder")),

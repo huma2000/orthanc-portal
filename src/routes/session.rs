@@ -405,6 +405,9 @@ pub async fn login_two_factor(
                 let codes = totp::new_recovery_codes();
                 let hashes: Vec<String> = codes.iter().map(|c| totp::recovery_hash(c)).collect();
                 state.db.enable_totp(user.id, &pending, step, &hashes)?;
+                // Sessions opened with the password alone, before it was required, end now.
+                state.sessions.revoke_user(user.id);
+                state.weasis_tokens.revoke_user(user.id);
                 state.db.audit(&user.username, "two_factor_enabled", "at sign-in");
                 recovery_codes = Some(codes);
                 true

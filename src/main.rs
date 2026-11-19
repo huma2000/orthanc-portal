@@ -55,6 +55,7 @@ mod auth;
 mod branding;
 mod config;
 mod db;
+mod dicom_peek;
 mod error;
 mod forward;
 mod mailer;
