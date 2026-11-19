@@ -4009,7 +4009,12 @@ function buildModalityButtonsEditor(buttons, defaults) {
   }
   draw();
 
-  const node = h("div", { class: "wide modbtn-editor" }, preview, list,
+  // Column titles, aligned with the rows below (the same grid; hidden on narrow screens, where rows wrap).
+  // aria-hidden: each control already carries its own accessible name.
+  const header = h("div", { class: "modbtn-head", "aria-hidden": "true" },
+    h("span", null, "Order"), h("span", null, "Shown"), h("span", null, "Button label"),
+    h("span", null, "DICOM codes"), h("span", null, "Description (shown on hover)"), h("span", null, ""));
+  const node = h("div", { class: "wide modbtn-editor" }, preview, header, list,
     h("div", { class: "filter-actions" },
       h("button", { class: "btn small", type: "button", onclick: () => { rows.push({ label: "", codes: "", title: "", visible: true }); draw([rows.length - 1, "shown"]); } }, "Add button"),
       h("button", { class: "btn small", type: "button", onclick: () => { rows = clone(defaults); draw(); } }, "Restore default buttons")));

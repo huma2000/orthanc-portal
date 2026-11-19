@@ -413,9 +413,11 @@ label.check { display: flex; align-items: center; gap: 0.5rem; color: var(--ink)
 .modbtn-editor { display: grid; gap: 0.8rem; }
 .modbtn-preview { display: grid; gap: 0.4rem; padding: 0.7rem 0.8rem; border: 1px dashed var(--line-strong); border-radius: 8px; background: var(--panel-alt); }
 .modbtn-list { display: grid; gap: 0.5rem; }
+/* Fixed widths for the move buttons, "Shown" and "Remove", so the column titles line up with the rows. */
+.modbtn-editor { --modbtn-cols: 4.6rem 5.6rem 6rem minmax(7rem, 10rem) minmax(10rem, 1fr) 5.6rem; }
 .modbtn-row {
   display: grid;
-  grid-template-columns: auto auto 6rem minmax(7rem, 10rem) minmax(10rem, 1fr) auto;
+  grid-template-columns: var(--modbtn-cols);
   gap: 0.6rem;
   align-items: center;
   padding: 0.45rem 0.5rem;
@@ -427,8 +429,10 @@ label.check { display: flex; align-items: center; gap: 0.5rem; color: var(--ink)
 .modbtn-row.is-hidden .modbtn-codes,
 .modbtn-row.is-hidden .modbtn-title { color: var(--ink-soft); }
 .modbtn-move { display: flex; gap: 0.25rem; }
+.modbtn-head { display: grid; grid-template-columns: var(--modbtn-cols); gap: 0.6rem; padding: 0 calc(0.5rem + 1px); margin-bottom: -0.3rem; color: var(--ink-soft); font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
+.modbtn-row > .btn.danger { justify-self: end; }
 .modbtn-move .btn { min-width: 2rem; justify-content: center; }
-@media (max-width: 900px) { .modbtn-row { grid-template-columns: auto auto 1fr; } .modbtn-codes, .modbtn-title { grid-column: 1 / -1; } }
+@media (max-width: 900px) { .modbtn-row { grid-template-columns: auto auto 1fr; } .modbtn-codes, .modbtn-title { grid-column: 1 / -1; } .modbtn-head { display: none; } }
 
 /* Notices: orange strip about Orthanc, blue box after saving settings */
 .banner { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; padding: 0.6rem 1.25rem; background: var(--danger-soft); color: var(--danger); font-weight: 600; }
