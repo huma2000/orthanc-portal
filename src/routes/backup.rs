@@ -18,7 +18,7 @@ use crate::auth::AuthUser;
 use crate::error::{AppError, AppResult};
 use crate::permissions::Permission;
 use crate::state::AppState;
-use crate::util::{now_unix, random_token};
+use crate::util::{feature, now_unix, random_token};
 use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{header, StatusCode};
@@ -80,6 +80,7 @@ fn list(dir: &Path) -> Vec<(String, u64, i64)> {
 /// Returns the file written.
 pub async fn run_backup(state: &AppState, by: &str) -> AppResult<PathBuf> {
     let settings = state.settings.get();
+    feature(settings.backups_enabled, "Backups are switched off")?;
     if settings.backup_dir.is_empty() {
         return Err(AppError::BadRequest("Choose the backup folder first (Settings > Backups)".into()));
     }
@@ -114,7 +115,7 @@ pub async fn run_backup(state: &AppState, by: &str) -> AppResult<PathBuf> {
 /// Housekeeping (main.rs): a backup when the newest one is older than the interval.
 pub async fn backup_if_due(state: &AppState) {
     let settings = state.settings.get();
-    if settings.backup_dir.is_empty() {
+    if !settings.backups_enabled || settings.backup_dir.is_empty() {
         return;
     }
     let newest = list(Path::new(&settings.backup_dir)).first().map(|b| b.2).unwrap_or(0);
@@ -133,6 +134,7 @@ pub async fn backup_if_due(state: &AppState) {
 pub async fn list_backups(State(state): State<AppState>, AuthUser(user): AuthUser) -> AppResult<Json<Value>> {
     user.require(Permission::Admin)?;
     let settings = state.settings.get();
+    feature(settings.backups_enabled, "Backups are switched off")?;
     let backups = if settings.backup_dir.is_empty() { Vec::new() } else { list(Path::new(&settings.backup_dir)) };
     let next = backups.first().map(|b| b.2 + (settings.backup_interval_hours as i64) * 3600);
     Ok(Json(json!({
@@ -160,6 +162,7 @@ impl Drop for TempFile {
 /// A fresh copy of the database, downloaded at once (nothing is kept on the server).
 pub async fn download(State(state): State<AppState>, AuthUser(user): AuthUser) -> AppResult<Response> {
     user.require(Permission::Admin)?;
+    feature(state.settings.get().backups_enabled, "Backups are switched off")?;
     let dir = crate::routes::export::export_dir(&state);
     std::fs::create_dir_all(&dir).map_err(|e| AppError::Internal(format!("cannot create {}: {e}", dir.display())))?;
     let temp = TempFile(dir.join(format!("backup-{}.db", &random_token()[..16])));

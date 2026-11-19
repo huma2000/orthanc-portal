@@ -698,6 +698,25 @@ Not included on purpose: an "inbox" processing page, administrator-defined custo
 
 ## 9c. Two-step sign-in, upload links, auto-forward, patient CDs, backups, statistics
 
+Every feature of this section has its own switch, enforced by the server (switching one off also stops what was
+already under way: a sender signed in to an upload link, notices asked for earlier, the forwarding of new
+studies). What exists is kept, so switching it on again picks up where it was.
+
+| Feature | Switch (Settings tab) | Default |
+|---|---|---|
+| Two-step sign-in | *Two-step sign-in*: off / optional / required (Security & roles) | off |
+| Changing one's own password and email | *Let each person change their own password and email address* (Security & roles) | on |
+| Every study of the patient in one link | *Offer "Every study of this patient"* (Network & sharing; also needs *One link for several studies*) | on |
+| Anonymized copies | *Offer "Share an anonymized copy"* (Network & sharing) | on |
+| Notifications of links (share and upload links) | *Offer "Email me..."* (Network & sharing; also needs a mail server) | on |
+| QR codes of links | *QR codes of the links* (Network & sharing) | on |
+| Upload links | *Upload links* (Features) | off |
+| Auto-forward | *Apply the rules below* (Auto-forward), and each rule's own *On* | off |
+| Patient CD / USB | *Patient CD / USB in the download menus* (Features) | on |
+| Backups | *Backups* (Backups); automatic ones also need the folder | on (no folder) |
+| Statistics | *Configuration > Statistics* (Features) | on |
+| Recently viewed | *Show "Recently viewed"* (Appearance) | on |
+
 ### Two-step sign-in (optional)
 
 *Settings > Security & roles > Two-step sign-in*: **off** (the default), **optional** (each person switches it on
@@ -1018,12 +1037,12 @@ The code compiles without warnings on Rust 1.91, passes `cargo clippy --all-targ
 formatted with `rustfmt` (see `rustfmt.toml`), and its dependencies were checked against the RustSec advisory
 database (no known vulnerable version in `Cargo.lock`). The automated tests live in the **`tests/`** folder:
 
-* `tests/feature_tests.sh`: **129 checks** of the features of section 9c on a fresh portal: two-step sign-in
+* `tests/feature_tests.sh`: **157 checks** of the features of section 9c on a fresh portal: two-step sign-in
   (set-up, codes used once, recovery codes, required mode, reset), My account, link notifications (and that they
   never name the patient), anonymized copies (made, shown, deleted on revocation), whole-patient links, QR codes,
   upload links (password, nothing leaked, size limit, non-DICOM files, revocation), the patient CD export (with
   and without a viewer folder), backups, statistics, recently viewed and an auto-forward rule fired by Orthanc's
-  change list.
+  change list, and that every feature can be switched off (also for what is already under way).
 * `tests/server_tests.sh`: **630 checks** of the server against a fake Orthanc (`tests/mock_orthanc.py`) and a
   fake mail server (`tests/mock_smtp.py`):
   the two doors (staff portal vs invitation links only, Cloudflare headers refused on the intranet port), creating

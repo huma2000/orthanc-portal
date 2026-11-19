@@ -120,6 +120,7 @@ pub async fn create(
     let note: String = req.note.unwrap_or_default().trim().chars().filter(|c| !c.is_control()).take(120).collect();
     let label = asked_label(req.label, &settings.upload_link_label)?;
     let notify_email = if req.notify {
+        feature(settings.share_notify, "Notifications of links are switched off")?;
         if !settings.email_configured() {
             return Err(AppError::BadRequest("Notifications need a mail server (Settings > Email)".into()));
         }
@@ -326,6 +327,7 @@ pub async fn qr(State(state): State<AppState>, AuthUser(user): AuthUser, Path(id
     require_creator(&state, &user)?;
     let link = managed(&state, &user, id)?;
     let settings = state.settings.get();
+    feature(settings.share_qr, "QR codes of links are switched off")?;
     if !link.is_active(now_unix()) || settings.share_public_url.is_empty() {
         return Err(AppError::Conflict("This link is not active".into()));
     }
@@ -360,6 +362,10 @@ pub async fn page(state: State<AppState>) -> Response {
 
 /// The link of the session cookie, if it is this link and it still works.
 fn sender_of(state: &AppState, headers: &HeaderMap, token: &str) -> AppResult<UploadLink> {
+    // Switched off: even a person who already entered the password can send nothing more.
+    if !state.settings.get().upload_links {
+        return Err(AppError::Gone("This link is no longer available.".into()));
+    }
     let cookie = auth::read_cookie(headers, auth::UPLOAD_COOKIE).ok_or(AppError::Unauthorized)?;
     let id = state.upload_sessions.lookup(&cookie).ok_or(AppError::Unauthorized)?;
     let link = state.db.get_upload_link(id)?.ok_or(AppError::Unauthorized)?;
@@ -532,7 +538,10 @@ pub async fn file(
 fn notify_received(state: &AppState, link: &UploadLink, just_sent: i64) {
     let Some(to) = link.notify_email.clone() else { return };
     let settings = state.settings.get();
-    if !settings.email_configured() || !state.db.upload_notice_due(link.id, now_unix(), 15 * 60).unwrap_or(false) {
+    if !settings.share_notify
+        || !settings.email_configured()
+        || !state.db.upload_notice_due(link.id, now_unix(), 15 * 60).unwrap_or(false)
+    {
         return;
     }
     let event = LinkEvent::Received {

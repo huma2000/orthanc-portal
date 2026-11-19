@@ -41,8 +41,10 @@ pub struct ShareFeature {
     anonymize: bool,
     /// "Email me when the link is opened or downloaded" is offered (mail server + an address on the account).
     notify: bool,
-    /// "Every study of this patient" is offered (links for several studies are switched on).
+    /// "Every study of this patient" is offered (and links for several studies are switched on).
     patient: bool,
+    /// QR codes of links are offered.
+    qr: bool,
 }
 
 /// Upload links (people outside send studies in), as the Shares page needs them.
@@ -54,6 +56,8 @@ pub struct UploadLinkFeature {
     max_hours: u64,
     max_mb: u64,
     label: String,
+    /// "Email me when files arrive" is offered.
+    notify: bool,
 }
 
 /// Options of the simplified view (Settings > Appearance).
@@ -158,6 +162,8 @@ async fn me_response(state: &AppState, user: User) -> Me {
         "raw_api": settings.raw_api && is_admin,
         "stats_page": settings.stats_page && is_admin,
         "cd_export": settings.cd_export && may(Permission::Download),
+        "backups": settings.backups_enabled && is_admin,
+        "account_self_service": settings.account_self_service,
     });
     let viewers = serde_json::json!({
         "stone": stone,
@@ -176,7 +182,8 @@ async fn me_response(state: &AppState, user: User) -> Me {
         email: settings.email_configured(),
         anonymize: settings.share_anonymize,
         notify: settings.share_notify && settings.email_configured(),
-        patient: settings.multi_study_shares,
+        patient: settings.multi_study_shares && settings.share_patient,
+        qr: settings.share_qr,
     };
     let upload_links = UploadLinkFeature {
         enabled: settings.upload_links
@@ -186,6 +193,7 @@ async fn me_response(state: &AppState, user: User) -> Me {
         max_hours: settings.share_max_hours,
         max_mb: settings.upload_link_max_mb,
         label: settings.upload_link_label.clone(),
+        notify: settings.share_notify && settings.email_configured(),
     };
     let search = SearchFeature {
         columns: settings.study_columns.clone(),

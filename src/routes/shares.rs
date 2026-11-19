@@ -290,7 +290,8 @@ async fn create(
     feature(!req.anonymize || settings.share_anonymize, "Sharing anonymized copies is switched off")?;
     // "Email me": the address of the account, and a mail server to send through.
     let notify_email = if req.notify {
-        if !(settings.share_notify && settings.email_configured()) {
+        feature(settings.share_notify, "Notifications of links are switched off")?;
+        if !settings.email_configured() {
             return Err(AppError::BadRequest("Notifications need a mail server (Settings > Email)".into()));
         }
         if user.email.is_empty() {
@@ -306,6 +307,7 @@ async fn create(
         if ids.len() != 1 {
             return Err(AppError::BadRequest("Choose one study to share every study of its patient".into()));
         }
+        feature(settings.share_patient, "Sharing every study of a patient is switched off")?;
         ids = patient_studies(&state, &ids[0]).await?;
         feature(ids.len() < 2 || settings.multi_study_shares, "Links for several studies are switched off")?;
     }
@@ -441,6 +443,7 @@ pub async fn share_qr(
         return Err(AppError::Denied("You can only print the links you created".into()));
     }
     let settings = state.settings.get();
+    feature(settings.share_qr, "QR codes of links are switched off")?;
     if !share.is_active(now_unix()) || settings.share_public_url.is_empty() {
         return Err(AppError::Conflict("This link is not active".into()));
     }

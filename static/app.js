@@ -769,7 +769,8 @@ const SIMPLE_PAGES = [
   { id: "transfers", label: "Transfers", icon: "transfers", needs: null, when: () => can("send") || !!opts().retrieve, build: buildTransfersView },
   { id: "retrieve", label: "Retrieve", icon: "retrieve", needs: null, when: () => !!opts().retrieve, build: buildRetrieveView },
   { id: "worklists", label: "Worklists", icon: "worklist", needs: null, when: () => !!opts().worklists, build: buildWorklistsView },
-  { id: "account", label: "My account", icon: "account", needs: null, bottom: true, build: buildAccountView },
+  { id: "account", label: "My account", icon: "account", needs: null, bottom: true, build: buildAccountView,
+    when: () => opts().account_self_service !== false || (state.user.features.two_factor || "off") !== "off" },
   { id: "help", label: "Help", icon: "help", needs: null, bottom: true, build: buildHelpView },
   { id: "settings", label: "Configuration", icon: "settings", needs: "admin", bottom: true, build: buildSettingsView },
 ];
@@ -2821,7 +2822,7 @@ function openShareDialog(studyOrList) {
       h("p", { class: "muted" }, t("Valid until {expires}. Downloads allowed: {n}.", { expires, n: result.max_downloads }),
         result.studies > 1 ? ` ${t("{n} studies in this link.", { n: result.studies })}` : "",
         result.anonymized ? ` ${t("The person sees an anonymized copy.")}` : ""),
-      qrBlock(`/api/shares/${result.id}/qr`, "link-qr-code.svg"),
+      feature.qr ? qrBlock(`/api/shares/${result.id}/qr`, "link-qr-code.svg") : null,
       emailOutcome(result.email),
       h("div", { class: "dialog-actions" }, copyButton("Copy invitation text (without the password)", invitation), close)));
   }
@@ -3016,7 +3017,7 @@ function buildSharesView() {
         h("td", null, h("span", { class: `chip ${s.status === "active" ? "status-on" : "status-off"}` }, s.status)),
         h("td", null, h("div", { class: "actions" },
           s.url && s.status === "active" ? copyButton("Copy link", () => s.url, "link") : null,
-          s.url && s.status === "active"
+          s.url && s.status === "active" && state.user.features.share.qr
             ? actionButton("button", "qr", "QR code", "The QR code of the link (to print)", { class: "btn small", type: "button", onclick: () => openQrDialog(`/api/shares/${s.id}/qr`, t("QR code of the link")) })
             : null,
           // Every active link: its kept password, or (made before passwords were kept) a new one.
@@ -3115,7 +3116,7 @@ function buildUploadLinksView() {
         h("td", null, h("div", { class: "actions" },
           l.study_count ? actionButton("button", "search", "Studies", "The studies received", { class: "btn small", type: "button", onclick: () => openUploadLinkStudies(l) }) : null,
           l.url && l.status === "active" ? copyButton("Copy link", () => l.url, "link") : null,
-          l.url && l.status === "active" ? actionButton("button", "qr", "QR code", "The QR code of the link (to print)", { class: "btn small", type: "button", onclick: () => openQrDialog(`/api/upload-links/${l.id}/qr`, t("QR code of the upload link")) }) : null,
+          l.url && l.status === "active" && state.user.features.share.qr ? actionButton("button", "qr", "QR code", "The QR code of the link (to print)", { class: "btn small", type: "button", onclick: () => openQrDialog(`/api/upload-links/${l.id}/qr`, t("QR code of the upload link")) }) : null,
           l.password_available ? actionButton("button", "key", "Password", "Show the password", {
             class: "btn small", type: "button",
             onclick: async () => {
@@ -3160,7 +3161,7 @@ function openUploadLinkDialog(reload) {
   const size = h("input", { type: "number", min: 1, max: feature.max_mb, value: Math.min(feature.max_mb, 2048), required: true });
   const label = h("input", { value: feature.label || "", maxlength: 64, placeholder: "received", autocomplete: "off" });
   const note = h("input", { maxlength: 120, placeholder: "For your own records, e.g. Mrs Doe, previous MRI from St Mary's", autocomplete: "off" });
-  const notify = h("input", { type: "checkbox", disabled: !state.user.email || !share.email });
+  const notify = h("input", { type: "checkbox", disabled: !state.user.email || !feature.notify });
   const emailOptions = buildEmailOptions(() => true);
   const submit = h("button", { class: "btn primary", type: "submit" }, "Create link and password");
   dialog.replaceChildren(h("form", {
@@ -3190,7 +3191,7 @@ function openUploadLinkDialog(reload) {
     h("label", null, t("Most they can send, in MB (up to {max})", { max: feature.max_mb }), size),
     h("label", null, "Label put on the studies received (empty = none)", label),
     h("label", null, "Note (optional)", note),
-    share.email ? h("div", null, h("label", { class: "check" }, notify, "Email me when files arrive"),
+    feature.notify ? h("div", null, h("label", { class: "check" }, notify, "Email me when files arrive"),
       state.user.email ? null : h("p", { class: "hint" }, "Add your email address in My account first.")) : null,
     emailOptions.node,
     h("div", { class: "dialog-actions" }, h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Cancel"), submit)));
@@ -3203,7 +3204,7 @@ function openUploadLinkDialog(reload) {
       h("div", null, h("div", { class: "muted" }, "Password"),
         h("div", { class: "secret-box" }, h("span", { class: "password" }, r.password), copyButton("Copy password", () => r.password))),
       h("p", { class: "muted" }, t("Valid until {expires}, for up to {mb} MB. Give the password by a different channel than the link.", { expires, mb: r.max_mb })),
-      qrBlock(`/api/upload-links/${r.id}/qr`, "upload-link-qr-code.svg"),
+      share.qr ? qrBlock(`/api/upload-links/${r.id}/qr`, "upload-link-qr-code.svg") : null,
       emailOutcome(r.email),
       h("div", { class: "dialog-actions" }, h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Close"))));
   }
@@ -3278,7 +3279,8 @@ function helpSections() {
           can("share") ? [helpIcon("share"), " ", h("b", null, "Shares"), ": the links you created to show a study to someone outside."] : null,
           opts().retrieve ? [helpIcon("retrieve"), " ", h("b", null, "Retrieve"), ": find studies on another system and bring them here."] : null,
           opts().worklists ? [helpIcon("worklist"), " ", h("b", null, "Worklists"), ": the examinations the scanners have to do."] : null,
-          [helpIcon("account"), " ", h("b", null, "My account"), ": your password, your email address", f.two_factor && f.two_factor !== "off" ? ", two-step sign-in" : "", "."],
+          opts().account_self_service !== false || (f.two_factor || "off") !== "off"
+            ? [helpIcon("account"), " ", h("b", null, "My account"), opts().account_self_service !== false ? ": your password, your email address" : ": two-step sign-in", opts().account_self_service !== false && f.two_factor && f.two_factor !== "off" ? ", two-step sign-in" : "", "."] : null,
           [helpIcon("help"), " ", h("b", null, "Help"), ": this page."],
         ),
         h("p", { class: "muted" }, "You only see the parts your account gives access to. If you need something that is not here, ask your administrator."),
@@ -3441,7 +3443,7 @@ function helpSections() {
             [helpButton("key", "Password"), ": shows the password again, if your administrator allows it (only while the link works; it is recorded)."],
             [helpButton("edit", "Edit..."), ": gives the link more time (this also brings back an expired link), more downloads, a new note or a new password", share.email ? ", and can email the update." : "."],
             [helpButton("revoke", "Revoke"), ": stops the link at once, for example if it was sent to the wrong person. This cannot be undone: create a new link if needed."],
-            [helpButton("qr", "QR code"), ": the link as a QR code, to print on a handout (the phone's camera opens it; it does not contain the password)."],
+            share.qr ? [helpButton("qr", "QR code"), ": the link as a QR code, to print on a handout (the phone's camera opens it; it does not contain the password)."] : null,
           ),
           share.patient ? h("p", null, h("b", null, "Every study of this patient"), " in the Share window puts all the patient's studies in one link.") : null,
           share.anonymize ? h("p", null, h("b", null, "Share an anonymized copy"), " shows the person a copy without the patient's name and ID (for teaching, a second opinion...). The copy is deleted when the link ends.") : null,
@@ -3458,9 +3460,9 @@ function helpSections() {
       ],
     },
     {
-      id: "account", title: "My account", show: true,
+      id: "account", title: "My account", show: opts().account_self_service !== false || (f.two_factor || "off") !== "off",
       body: () => [
-        h("p", null, helpIcon("account"), " ", h("b", null, "My account"), " lets you change your password and your email address."),
+        opts().account_self_service !== false ? h("p", null, helpIcon("account"), " ", h("b", null, "My account"), " lets you change your password and your email address.") : null,
         f.two_factor && f.two_factor !== "off" ? h("p", null, h("b", null, "Two-step sign-in"), ": after the password, the portal asks for a 6-digit code from an app on your phone. ",
           f.two_factor === "required" ? "It is required in this portal: you set it up at your first sign-in." : "Switch it on in My account: scan the QR code with the app and type the code it shows.",
           " Keep the recovery codes somewhere safe: each one signs you in once if you lose your phone. Lost them too? Ask your administrator to reset it.") : null,
@@ -3587,13 +3589,19 @@ const SETTINGS_FIELDS = {
       hint: "Only the person who created the link, or an administrator, and only while the link is active; every time is recorded in the audit log. A copy of the password is kept in the portal's database until the link is revoked, or 30 days after it expires (so it can still be extended with the same password). Untick it to show passwords only once, when the link is created (the copies kept so far are erased)." },
     { key: "share_anonymize", label: "Offer \"Share an anonymized copy\"", type: "checkbox", wide: true,
       hint: "Orthanc makes a copy without the patient's name and ID (labelled shared-anonymized) and the link shows that copy. The copy is deleted when the link is revoked, or 30 days after it expires." },
+    { key: "share_patient", label: "Offer \"Every study of this patient, in one link\"", type: "checkbox", wide: true,
+      hint: "Also needs \"One share link for several studies\" (Features)." },
+    { key: "share_qr", label: "QR codes of the links (share and upload links)", type: "checkbox", wide: true,
+      hint: "In the Share window and the Shares list, to print on a handout. A QR code never contains the password." },
     { key: "share_notify", label: "Offer \"Email me when the link is opened or downloaded\"", type: "checkbox", wide: true,
-      hint: "Needs the mail server below and an email address on the person's account (My account, or Users). The emails name the link, never the patient." },
+      hint: "Also \"Email me when files arrive\" of upload links. Needs the mail server below and an email address on the person's account (My account, or Users). The emails name the link, never the patient. Switching it off also stops the notices already asked for." },
   ],
   security: [
     { key: "two_factor", label: "Two-step sign-in (a code from a phone app after the password)", type: "select", wide: true,
       options: [["off", "Off: the password is enough"], ["optional", "Optional: each person may switch it on in My account"], ["required", "Required for everybody: set up at the next sign-in"]],
       hint: "Any authenticator app works (Microsoft or Google Authenticator, FreeOTP...). Each person also gets ten one-time recovery codes for a lost phone; an administrator can reset it in Users. Switching it off stops asking for codes (what was set up is kept)." },
+    { key: "account_self_service", label: "Let each person change their own password and email address (My account)", type: "checkbox", wide: true,
+      hint: "Off: only an administrator can (Users). My account then only shows two-step sign-in, when it is used." },
     { key: "session_hours", label: "Session duration (hours)", type: "number", min: 1, max: 720, hint: "Applies to the next sign-ins." },
     { key: "weasis_token_minutes", label: "Weasis link validity (minutes)", type: "number", min: 5, max: 1440 },
     { key: "login_max_failures", label: "Failed sign-ins before lockout", type: "number", min: 3, max: 20 },
@@ -3666,6 +3674,8 @@ const SETTINGS_FIELDS = {
       hint: "Every study that arrives and matches a rule is sent on as soon as Orthanc considers it complete (no new image for a while: Orthanc's StableAge). Switching it on starts from now: studies that arrived before are not sent." },
   ],
   backups: [
+    { key: "backups_enabled", label: "Backups (automatic ones, Back up now, Download a copy)", type: "checkbox", wide: true,
+      hint: "Off: no backup is made or downloaded from the portal (back up the database file yourself)." },
     { key: "backup_dir", label: "Backup folder", wide: true, placeholder: "/data/backups   or   D:\\Backups\\Portal",
       hint: "A full path on the computer (or in the container) running the portal. Empty = no automatic backups. Better on another disk, or in a folder that is itself backed up." },
     { key: "backup_interval_hours", label: "Hours between two backups", type: "number", min: 1, max: 720 },
@@ -5215,6 +5225,9 @@ function forwardStatus(status) {
 
 /** The backups in the folder, "Back up now" and "Download a copy" (Settings > Backups). */
 function buildBackupsPanel() {
+  if (!opts().backups) {
+    return h("div", { class: "setting wide" }, h("p", { class: "muted" }, "Backups are switched off: tick the box above and save to use them."));
+  }
   const listNode = h("div", null, h("div", { class: "loading" }, "Loading..."));
   async function load() {
     try {
@@ -5359,7 +5372,7 @@ function buildAccountView() {
   const view = h("div", { class: "view account" });
   async function refreshMe() {
     try { state.user = await api("GET", "/api/me"); } catch { /* keep what we have */ }
-    view.replaceChildren(...draw());
+    view.replaceChildren(...draw().flat().filter(Boolean));
   }
 
   function draw() {
@@ -5434,9 +5447,9 @@ function buildAccountView() {
       h("section", { class: "panel" }, h("h2", null, user.username),
         h("p", null, user.permissions.length ? user.permissions.map((p) => h("span", { class: "chip perm" }, p)) : h("span", { class: "muted" }, "no access")),
         h("p", { class: "muted" }, t("Last sign-in: {date}.", { date: formatTimestamp(user.last_login) }))),
-      emailPanel, passwordPanel, twoFactorPanel];
+      opts().account_self_service !== false ? [emailPanel, passwordPanel] : null, twoFactorPanel];
   }
-  view.replaceChildren(...draw());
+  view.replaceChildren(...draw().flat().filter(Boolean));
   return view;
 }
 

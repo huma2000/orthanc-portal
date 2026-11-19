@@ -430,6 +430,12 @@ pub struct Settings {
     /// and an email address on the account).
     #[serde(default = "default_true")]
     pub share_notify: bool,
+    /// The Share window offers "every study of this patient, in one link" (also needs `multi_study_shares`).
+    #[serde(default = "default_true")]
+    pub share_patient: bool,
+    /// QR codes of share and upload links (Share window, Shares list).
+    #[serde(default = "default_true")]
+    pub share_qr: bool,
 
     // ---- Upload links: people outside SEND studies in (Settings > Features) -----------
     /// Staff with the `share` and `upload` permissions may create upload links.
@@ -448,6 +454,10 @@ pub struct Settings {
     // ---- Two-step sign-in (Settings > Security & roles) -------------------------------
     #[serde(default)]
     pub two_factor: TwoFactorMode,
+    /// My account: each person may change their own password and email address. Off = only an
+    /// administrator can (Users); My account then only holds two-step sign-in, when it is used.
+    #[serde(default = "default_true")]
+    pub account_self_service: bool,
 
     // ---- Auto-forward (Settings > Auto-forward) ---------------------------------------
     /// The rules are applied (they are kept when this is off).
@@ -466,6 +476,9 @@ pub struct Settings {
     pub cd_viewer_dir: String,
 
     // ---- Backups of the portal's own database (Settings > Backups) ---------------------
+    /// Backups at all: automatic ones, "Back up now" and "Download a copy". Off = none of them.
+    #[serde(default = "default_true")]
+    pub backups_enabled: bool,
     /// Folder where copies of the database are written. Empty = no automatic backups.
     #[serde(default)]
     pub backup_dir: String,
@@ -824,6 +837,10 @@ impl Settings {
             share_keep_passwords: true,
             share_anonymize: true,
             share_notify: true,
+            share_patient: true,
+            share_qr: true,
+            backups_enabled: true,
+            account_self_service: true,
             upload_links: false,
             upload_link_default_hours: default_upload_link_hours(),
             upload_link_max_mb: default_upload_link_max_mb(),

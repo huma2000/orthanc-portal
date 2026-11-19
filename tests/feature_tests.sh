@@ -230,6 +230,58 @@ ok "an invalid UID is refused (400)" "$(code $F $D POST /api/recent/$SID -H "$J"
 ok "the list can be emptied" "$(code $F $D DELETE /api/recent > /dev/null; body $F $D /api/recent | py "len(d)")" "0"
 ok "the length reaches the home page" "$(body $F $D /api/me | py "d['features']['recently_viewed']")" "8"
 
+echo "== every feature can be switched off (and the browser is told)"
+feat() { body $F $1 /api/me | py "$2"; }
+# Things made while the features are on, to check what happens to them once switched off.
+NL=$(body $F $D /api/studies/$SID/share -X POST -H "$J" -d '{"notify":true}')
+NLT=$(echo "$NL" | py "d['url'].rsplit('/s/',1)[1]"); NLP=$(echo "$NL" | py "d['password']"); NLID=$(echo "$NL" | py "d['id']")
+put $A '{"upload_links":true}' > /dev/null
+U2=$(body $F $D /api/upload-links -X POST -H "$J" -d '{"max_mb":5}')
+U2T=$(echo "$U2" | py "d['url'].rsplit('/u/',1)[1]"); U2P=$(echo "$U2" | py "d['password']"); U2ID=$(echo "$U2" | py "d['id']")
+U2C=$(curl -s -D - -o /dev/null -H "$H" -H "$J" -d "{\"password\":\"$U2P\"}" $G/api/upload/$U2T/unlock | grep -i set-cookie | sed 's/.*upload_session=\([0-9a-f]*\);.*/\1/')
+
+put $A '{"share_patient":false}' > /dev/null
+ok "whole-patient links off: refused (403)" "$(code $F $D POST /api/studies/$SID/share -H "$J" -d '{"patient":true}')" "403"
+ok "...not offered" "$(feat $D "d['features']['share']['patient']")" "False"
+put $A '{"share_patient":true}' > /dev/null
+put $A '{"share_qr":false}' > /dev/null
+ok "QR codes off: a share link's refused (403)" "$(code $F $D GET /api/shares/$NLID/qr)" "403"
+ok "...an upload link's too (403)" "$(code $F $D GET /api/upload-links/$U2ID/qr)" "403"
+ok "...not offered" "$(feat $D "d['features']['share']['qr']")" "False"
+put $A '{"share_qr":true}' > /dev/null
+ok "QR codes on again" "$(code $F $D GET /api/shares/$NLID/qr)" "200"
+put $A '{"share_notify":false}' > /dev/null
+ok "notifications off: not offered (share and upload links)" "$(feat $D "(d['features']['share']['notify'], d['features']['upload_links']['notify'])")" "(False, False)"
+ok "...asking for one is refused (share link: 403)" "$(code $F $D POST /api/studies/$SID/share -H "$J" -d '{"notify":true}')" "403"
+ok "...(upload link: 403)" "$(code $F $D POST /api/upload-links -H "$J" -d '{"notify":true}')" "403"
+BEFORE=$(mailcount); unlock $NLT "$NLP" > /dev/null; sleep 1.5
+ok "...and a link that asked for them earlier stays quiet" "$(mailcount)" "$BEFORE"
+put $A '{"share_notify":true}' > /dev/null
+ok "an upload session works while upload links are on" "$(curl -s -X POST -H "$H" -H "Cookie: upload_session=$U2C" --data-binary @small.dcm $G/api/upload/$U2T/file | py "d['accepted']")" "True"
+put $A '{"upload_links":false}' > /dev/null
+ok "upload links off: a sender ALREADY signed in can send nothing more (410)" "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "$H" -H "Cookie: upload_session=$U2C" --data-binary @small.dcm $G/api/upload/$U2T/file)" "410"
+ok "...nor read the summary (410)" "$(curl -s -o /dev/null -w '%{http_code}' -H "Cookie: upload_session=$U2C" $G/api/upload/$U2T/summary)" "410"
+ok "...the staff cannot list them (403)" "$(code $F $D GET /api/upload-links)" "403"
+ok "...not offered" "$(feat $D "d['features']['upload_links']['enabled']")" "False"
+put $A '{"backups_enabled":false}' > /dev/null
+ok "backups off: no list (403)" "$(code $F $A GET /api/admin/backups)" "403"
+ok "...no backup now (403)" "$(code $F $A POST /api/admin/backups)" "403"
+ok "...no download (403)" "$(code $F $A GET /api/admin/backup/download)" "403"
+ok "...the screen is told" "$(feat $A "d['features']['options']['backups']")" "False"
+put $A '{"backups_enabled":true}' > /dev/null
+ok "backups on again" "$(code $F $A GET /api/admin/backups)" "200"
+put $A '{"account_self_service":false}' > /dev/null
+ok "own password and email off: changing the email is refused (403)" "$(code $F $D PUT /api/account/email -H "$J" -d '{"email":"x@example.org"}')" "403"
+ok "...the password too (403)" "$(code $F $D POST /api/account/password -H "$J" -d '{"current":"DoctorPass123","new":"Another-Pass-123"}')" "403"
+ok "...an administrator still can (Users)" "$(body $F $A /api/admin/users/2 -X PUT -H "$J" -d '{"email":"doc@example.org"}' | py "d['email']")" "doc@example.org"
+ok "...the page is told" "$(feat $D "d['features']['options']['account_self_service']")" "False"
+put $A '{"account_self_service":true}' > /dev/null
+put $A '{"cd_export":false,"stats_page":false,"recently_viewed":false,"share_anonymize":false}' > /dev/null
+ok "the other switches: CD export, statistics, recently viewed, anonymized copies (all 403)" "$(code $F $D GET "/api/export/cd?studies=$SID")/$(code $F $A GET /api/admin/stats)/$(code $F $D GET /api/recent)/$(code $F $D POST /api/studies/$SID/share -H "$J" -d '{"anonymize":true}')" "403/403/403/403"
+ok "...and none is offered" "$(feat $A "(d['features']['options']['cd_export'], d['features']['options']['stats_page'], d['features']['recently_viewed'], d['features']['share']['anonymize'])")" "(False, False, 0, False)"
+put $A '{"cd_export":true,"stats_page":true,"recently_viewed":true,"share_anonymize":true}' > /dev/null
+D=$(login $F doctor DoctorPass123)
+
 echo "== auto-forward rules"
 ok "a rule needs a destination (400)" "$(put $A '{"forward_rules":[{"name":"CT out","target":""}]}' | tail -1)" "400"
 ok "...and sane modality codes (400)" "$(put $A '{"forward_rules":[{"name":"CT out","target":"ris","modalities":["C*"]}]}' | tail -1)" "400"
@@ -246,6 +298,11 @@ ok "a stable CT study from SCANNER1 is sent by the matching rule (not by the MR 
 ok "...shown as an automatic transfer" "$(body $F $A /api/transfers | py "d[0]['username']")" "auto: CT out"
 ok "...the Settings screen says so" "$(body $F $A /api/admin/settings | py "d['forward']['forwarded']")" "1"
 put $A '{"forward_enabled":false}' > /dev/null
+STORES_BEFORE=$(stores)
+curl -s -X POST -d "{\"ChangeType\":\"StableStudy\",\"ID\":\"$SID\",\"ResourceType\":\"Study\"}" http://127.0.0.1:18042/__mock/change > /dev/null
+sleep 17
+ok "switched off: a new stable study is not sent" "$(( $(stores) - STORES_BEFORE ))" "0"
+ok "...and the rules are kept for later" "$(body $F $A /api/admin/settings | py "len(d['settings']['forward_rules'])")" "2"
 
 echo; echo "RESULT: $PASS passed, $FAIL failed$([ "$SKIP" -gt 0 ] && echo ", $SKIP skipped")"
 stack_stop

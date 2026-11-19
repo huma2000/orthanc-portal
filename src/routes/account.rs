@@ -52,6 +52,14 @@ fn two_factor_available(state: &AppState) -> AppResult<TwoFactorMode> {
     }
 }
 
+/// Changing one's own email and password (Settings > Security & roles; an administrator can always, in Users).
+fn self_service(state: &AppState) -> AppResult<()> {
+    crate::util::feature(
+        state.settings.get().account_self_service,
+        "Changing your own password and email is switched off: ask an administrator",
+    )
+}
+
 #[derive(Deserialize)]
 pub struct EmailRequest {
     email: String,
@@ -63,6 +71,7 @@ pub async fn set_email(
     AuthUser(user): AuthUser,
     Json(req): Json<EmailRequest>,
 ) -> AppResult<Json<Value>> {
+    self_service(&state)?;
     let email = mailer::single_address(&req.email).map_err(AppError::BadRequest)?;
     state.db.set_user_email(user.id, &email)?;
     state.db.audit(&user.username, "account_email", if email.is_empty() { "removed" } else { &email });
@@ -82,6 +91,7 @@ pub async fn change_password(
     headers: HeaderMap,
     Json(req): Json<PasswordChange>,
 ) -> AppResult<Json<Value>> {
+    self_service(&state)?;
     confirm_password(&state, &user, req.current).await?;
     auth::validate_password(&req.new)?;
     let hash = auth::hash_password(req.new).await?;

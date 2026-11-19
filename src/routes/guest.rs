@@ -292,7 +292,7 @@ pub async fn download(
 fn notify_creator(state: &AppState, share: &Share, event: LinkEvent) {
     let Some(to) = share.notify_email.clone() else { return };
     let settings = state.settings.get();
-    if !settings.email_configured() {
+    if !settings.share_notify || !settings.email_configured() {
         return;
     }
     let (subject, body) =
