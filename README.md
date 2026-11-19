@@ -23,6 +23,9 @@ A web front-end for an **Orthanc PACS** (recent releases), written in Rust. One 
 | User management, audit log | yes | no |
 | **Configuration from the web**: Orthanc connection, ports, share links, sessions, upload limit, roles, **DICOM nodes**, portal name | yes (admins) | no |
 | **Optional features**, each switched on or off by an administrator: actions on several studies, images / DICOM tags / PDF reports, delete, modify, anonymize, add a series, more viewers (Stone, VolView, WSI, MedDream, OHIF modes), one link for several studies, sending to Orthanc peers and DICOMweb servers, query / retrieve, worklists, Jobs and System pages, date / name formats and custom CSS (section 9b) | yes (with the permissions) | the multi-study links |
+| **Two-step sign-in** (authenticator app), optional or required; **My account** (own password, email) | yes (set by admins) | - |
+| **Upload links**: somebody outside sends you studies (a CD folder) with a link + password | yes (`share` + `upload`) | the upload page only |
+| **Auto-forward rules**, **patient CD / USB export** with a viewer, **database backups**, **statistics**, **recently viewed** studies | yes | - |
 | Talks to Orthanc **with an account or without one** (an Orthanc that only accepts a list of allowed computers) | choose in Settings | - |
 
 One self-contained executable: the web UI is compiled into it, users and settings live in a SQLite file,
@@ -685,8 +688,105 @@ permission: hiding a button is only the visible part.
 | **System page** | on | *Configuration > System*, see section 4 |
 | **Read Orthanc's REST API** | off | On the System page: GET only, addresses checked (no `..`, no files, archives or pictures), each read audited |
 | **Language, dates, names, custom CSS** | English, ISO, DOE, JOHN, none | *Appearance > Language, dates, names and style*; see [Languages](#languages-english-and-spanish) |
+| **Upload links** | off | People outside send studies in (section 9c) |
+| **Patient CD / USB** | on | DICOMDIR + a page for the patient + an optional portable viewer (section 9c) |
+| **Statistics page** | on | *Configuration > Statistics* (section 9c) |
 
 Not included on purpose: an "inbox" processing page, administrator-defined custom buttons and single sign-on.
+
+---
+
+## 9c. Two-step sign-in, upload links, auto-forward, patient CDs, backups, statistics
+
+### Two-step sign-in (optional)
+
+*Settings > Security & roles > Two-step sign-in*: **off** (the default), **optional** (each person switches it on
+in **My account**) or **required** (an account without it sets it up at its next sign-in, before any session
+exists). It is the standard TOTP of every authenticator app (Microsoft / Google Authenticator, FreeOTP,
+1Password...): the portal shows a QR code (and the key to type by hand), the first code confirms it, and the person
+receives **ten one-time recovery codes** for a lost phone (only their SHA-256 is stored).
+
+* At sign-in the password is checked first; the answer is then only a 5-minute ticket, and
+  `POST /api/login/two-factor` with the code opens the session. A code works **once** (the time step used is
+  stored); wrong codes are throttled like passwords.
+* Setting it up, switching it off and asking for new recovery codes all ask for the password again.
+* Lost phone and recovery codes: an administrator ticks *Reset the two-step sign-in* in *Users > Edit*.
+* Switching the setting back to *off* stops asking for codes; what people set up is kept for later.
+
+**My account** (the person icon, for everybody): change one's own password (the other sessions end), set one's
+email address (used for link notifications), manage two-step sign-in.
+
+### More for share links
+
+The **Share** window can also offer (each switchable in *Settings > Network & sharing > Share links*):
+
+* **Every study of this patient, in one link** (needs *One link for several studies*).
+* **Share an anonymized copy**: Orthanc makes a copy with the patient renamed `ANONYMOUS` / `ANON-<code>` (labelled
+  `shared-anonymized`) and the link shows the copy. The copy is deleted when the link is revoked, or 30 days after
+  it expires (until then the link can still be extended); after that the link cannot come back.
+* **Email me when the link is opened or downloaded**: needs a mail server and an email address on the account.
+  The notice is sent once for the first opening and once per download; it names the link (`#12` and your note),
+  never the patient.
+* A **QR code** of the link in the result and in the Shares list (to print on a handout; it never contains the
+  password).
+
+### Upload links: people outside send studies in
+
+*Settings > Features > Upload links* (off by default). People with the `share` **and** `upload` permissions get
+**Shares > Upload links > New upload link**: a link `https://<public address>/u/<code>` and a generated password,
+for a time, a total size (default and maximum in Settings) and an Orthanc **label** for what arrives (default
+`received`). The person opens it on the internet side, types the password and drops files or a whole CD folder.
+
+* They **see nothing** of the archive: each answer is only "accepted" or "not a DICOM file" (a CD's viewer
+  program and other files are skipped and counted). Their cookie (`upload_session`) is separate from invitation
+  cookies and opens no study or viewer.
+* The size is reserved atomically before each file; the per-file limit is the upload limit of Settings.
+* The list shows files, size and studies received; *Studies* lists them; *Edit* gives more time or a bigger
+  limit; *Revoke* stops the sender at once. Optional email to the creator when files arrive (at most one per
+  quarter of an hour).
+
+### Auto-forward rules
+
+*Settings > Auto-forward*: rules such as "every CT sent by `SCAN*` goes to the reporting workstation". Conditions
+(all optional): modalities (any of; `RX` = CR + DX), the calling AE title (`*` / `?` wildcards), text in the
+institution or the study description; the destination is any *Send to...* destination (DICOM node, Orthanc peer,
+DICOMweb server). The portal reads Orthanc's `/changes` every 15 seconds and forwards a study when Orthanc
+reports it **stable** (Orthanc's `StableAge`). Its position is kept in the database: a restart repeats nothing and
+misses nothing; switching the rules on starts from that moment. Each transfer appears on the Transfers page as
+sent by `auto: <rule>`. A study that receives more images later becomes stable again and is sent again.
+
+### Patient CD / USB export
+
+*Download > Patient CD / USB* (on a study, or on ticked studies; `download` permission, *Settings > Features*): a
+ZIP to unpack onto a CD, DVD or USB stick with Orthanc's DICOMDIR and images (copied as they are), a
+`README.html` for the patient (who, which studies, how to view them; no script) and, when *Folder of a portable
+DICOM viewer* is set, every file of that folder (for example an unpacked **Weasis portable** with its
+`autorun.inf`). The archive is assembled in `<folder of the database>/exports` and deleted once downloaded; at most
+two are prepared at a time. In Docker mount the viewer read-only, e.g. `- ./cd-viewer:/cd-viewer:ro`, and enter
+`/cd-viewer` (or set `CD_VIEWER_DIR` before the first start).
+
+### Backups of the portal's database
+
+*Settings > Backups*: a folder (`BACKUP_DIR` seeds it at the first start), every N hours (24) and how many to keep
+(7). Files are `portal-backup-YYYYMMDD-HHMMSS.db`, made with SQLite's `VACUUM INTO` (consistent while the portal
+runs, readable by their owner only). *Back up now* and *Download a copy now* (nothing kept on the server) are
+there too; each is in the audit log. They contain password hashes and the Orthanc / mail server passwords. **To
+restore**: stop the portal, replace the database file (`DATABASE_PATH`, `/data/portal.db` in Docker) with the copy,
+start it. In Docker use a host folder, e.g. `- /srv/backups/portal:/backups` and `/backups`.
+
+### Statistics
+
+*Configuration > Statistics* (administrators): the size of the archive, studies per month for 12 months (by study
+date, in total and for each modality button, counted by Orthanc), share links created / opened / downloaded,
+upload links and the studies received, transfers, sign-ins, patient CD exports, and who uploads, shares and
+downloads most (90 days). Activity comes from the audit log, so it only goes back as far as its retention.
+Counted again at most every 10 minutes (*Count again* forces it).
+
+### Recently viewed
+
+The home page shows each person's own **Recently viewed** studies (opened in a viewer, in the study window, or
+their series unfolded): 8 by default, up to 30 (*Settings > Appearance*). Nobody else, administrators included,
+can read someone's list; *Clear the list* empties it.
 
 ---
 
@@ -832,6 +932,14 @@ All JSON. State-changing calls need the header `X-Requested-With: portal`.
 | `POST /api/admin/orthanc/test` | admin | "Test connection" (saved or typed values) |
 | `POST /api/admin/email/test` `{ "to" }` | admin | "Send a test email" with the saved mail server settings: `{ ok, message }` |
 | `GET /api/admin/nodes`, `PUT/DELETE /api/admin/nodes/{name}`, `POST /api/admin/nodes/{name}/echo` | admin | Manage DICOM nodes, DICOM ping |
+| `POST /api/login/two-factor` `{ ticket, code }` | the ticket of `/api/login` | Second step of a two-step sign-in (`/api/login` then answers `{ two_factor: "code"\|"setup", ticket, qr?, secret? }`); a set-up at sign-in answers the `recovery_codes` too |
+| `PUT /api/account/email`, `POST /api/account/password`, `POST /api/account/two-factor/{setup,enable,disable,recovery}` | session | My account |
+| `GET /api/shares/{id}/qr` | share (creator) or admin | The link as an SVG QR code (`share` also takes `patient`, `anonymize`, `notify`) |
+| `GET/POST /api/upload-links`, `PUT /api/upload-links/{id}`, `POST .../{id}/revoke`, `POST .../{id}/password`, `GET .../{id}/qr`, `GET .../{id}/studies` | share + upload (+ feature) | Upload links |
+| `GET /api/export/cd?studies=a,b` | download (+ feature) | Patient CD / USB ZIP |
+| `GET/DELETE /api/recent`, `POST /api/recent/{id}` `{ uid }` | read | My recently viewed studies |
+| `GET /api/admin/stats[?refresh=true]` | admin | Statistics |
+| `GET/POST /api/admin/backups`, `GET /api/admin/backup/download` | admin | List / make backups, download a fresh copy |
 
 **Guest (internet)**: no session login; the password of the link gives the `share_session` cookie.
 
@@ -843,6 +951,7 @@ All JSON. State-changing calls need the header `X-Requested-With: portal`.
 | `GET /api/share/{token}/study` | guest cookie | Patient, study, series, server time, expiry, downloads `{max, used, left}`, viewer address |
 | `GET /api/share/{token}/download` | guest cookie | ZIP of the shared study; uses one download (403 when none are left, 410 when over) |
 | `POST /api/share/{token}/lock` | guest cookie | End this guest session |
+| `GET /u/{token}`; `GET /api/upload/{token}/status`, `POST .../unlock`, `POST .../file` (raw body, Content-Length), `GET .../summary`, `POST .../lock` | none / `upload_session` cookie | Upload links: the page, the password, one file (`{ accepted, reason? }`), what was sent |
 | `GET /dicom-web/*`, `GET /wado`, `GET /ohif/*` | guest cookie | The viewer, confined to the shared study (no whole DICOM files) |
 
 **Both listeners**
@@ -909,6 +1018,12 @@ The code compiles without warnings on Rust 1.91, passes `cargo clippy --all-targ
 formatted with `rustfmt` (see `rustfmt.toml`), and its dependencies were checked against the RustSec advisory
 database (no known vulnerable version in `Cargo.lock`). The automated tests live in the **`tests/`** folder:
 
+* `tests/feature_tests.sh`: **129 checks** of the features of section 9c on a fresh portal: two-step sign-in
+  (set-up, codes used once, recovery codes, required mode, reset), My account, link notifications (and that they
+  never name the patient), anonymized copies (made, shown, deleted on revocation), whole-patient links, QR codes,
+  upload links (password, nothing leaked, size limit, non-DICOM files, revocation), the patient CD export (with
+  and without a viewer folder), backups, statistics, recently viewed and an auto-forward rule fired by Orthanc's
+  change list.
 * `tests/server_tests.sh`: **630 checks** of the server against a fake Orthanc (`tests/mock_orthanc.py`) and a
   fake mail server (`tests/mock_smtp.py`):
   the two doors (staff portal vs invitation links only, Cloudflare headers refused on the intranet port), creating
@@ -1022,7 +1137,8 @@ Before publishing a change: `cargo fmt`, `cargo clippy --all-targets`, `cargo te
 Check the dependencies for known vulnerabilities regularly (for example monthly) with
 [`cargo audit`](https://crates.io/crates/cargo-audit) and update with `cargo update` (patch-level updates are
 compatible). The portal itself needs no maintenance task: sessions, tokens and old audit records are cleaned up
-automatically (audit retention is a setting).
+automatically (audit retention is a setting). Set a backup folder in *Settings > Backups* (section 9c): the
+database holds the users, settings, audit log and links.
 
 Known limits, by design: Orthanc credentials are stored in `portal.db` in clear (the portal must use them);
 there is no per-study access control; sessions live in memory; the portal writes no access log of its own (the

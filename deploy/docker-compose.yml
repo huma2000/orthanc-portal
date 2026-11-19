@@ -77,6 +77,12 @@ services:
       # RESET_SETTINGS: "true"                  # recovery: forget the settings saved from the web
     volumes:
       - portal-data:/data                       # users + audit log (BACK THIS UP)
+      # Optional (README, section 9c): backups of the portal's database on this server, and a portable
+      # viewer copied onto patient CDs. Uncomment, then enter /backups and /cd-viewer in Settings
+      # (or set BACKUP_DIR / CD_VIEWER_DIR before the first start). The backup folder must be writable
+      # by the container's user: sudo chown 10001 /srv/backups/portal
+      # - /srv/backups/portal:/backups
+      # - ./cd-viewer:/cd-viewer:ro
       - orthanc-logs:/orthanc-logs:ro           # Orthanc's log files, read only (Configuration > System)
     ports:
       # intranet access: http://<server>:<INTRANET_PORT>
