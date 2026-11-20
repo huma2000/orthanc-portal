@@ -54,6 +54,19 @@ pub async fn public_info(State(state): State<AppState>) -> Json<Value> {
         "theme": settings.theme(),
         // How dates and names are written (the invitation page follows it too).
         "format": { "date": settings.date_format, "name": settings.name_format },
+        // The colour of each modality code chosen in Settings (the invitation page shows modality tags too).
+        "modality_colors": settings
+            .modality_buttons
+            .iter()
+            .filter(|b| !b.color.is_empty())
+            .flat_map(|b| {
+                b.codes
+                    .iter()
+                    .flat_map(|c| if c == "RX" { vec!["CR".to_string(), "DX".to_string()] } else { vec![c.clone()] })
+                    .map(|c| (c, b.color.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<std::collections::BTreeMap<String, String>>(),
         // The language of the interface (each browser may choose another one).
         "language": settings.language,
         "languages": LANGUAGES,

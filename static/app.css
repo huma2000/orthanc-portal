@@ -414,7 +414,7 @@ label.check { display: flex; align-items: center; gap: 0.5rem; color: var(--ink)
 .modbtn-preview { display: grid; gap: 0.4rem; padding: 0.7rem 0.8rem; border: 1px dashed var(--line-strong); border-radius: 8px; background: var(--panel-alt); }
 .modbtn-list { display: grid; gap: 0.5rem; }
 /* Fixed widths for the move buttons, "Shown" and "Remove", so the column titles line up with the rows. */
-.modbtn-editor { --modbtn-cols: 4.6rem 5.6rem 6rem minmax(7rem, 10rem) minmax(10rem, 1fr) 5.6rem; }
+.modbtn-editor { --modbtn-cols: 4.6rem 5.6rem 6rem 7.4rem minmax(7rem, 10rem) minmax(10rem, 1fr) 5.6rem; }
 .modbtn-row {
   display: grid;
   grid-template-columns: var(--modbtn-cols);
@@ -432,7 +432,7 @@ label.check { display: flex; align-items: center; gap: 0.5rem; color: var(--ink)
 .modbtn-head { display: grid; grid-template-columns: var(--modbtn-cols); gap: 0.6rem; padding: 0 calc(0.5rem + 1px); margin-bottom: -0.3rem; color: var(--ink-soft); font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
 .modbtn-row > .btn.danger { justify-self: end; }
 .modbtn-move .btn { min-width: 2rem; justify-content: center; }
-@media (max-width: 900px) { .modbtn-row { grid-template-columns: auto auto 1fr; } .modbtn-codes, .modbtn-title { grid-column: 1 / -1; } .modbtn-head { display: none; } }
+@media (max-width: 900px) { .modbtn-row { grid-template-columns: auto auto 1fr auto; } .modbtn-codes, .modbtn-title { grid-column: 1 / -1; } .modbtn-head { display: none; } }
 
 /* Notices: orange strip about Orthanc, blue box after saving settings */
 .banner { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; padding: 0.6rem 1.25rem; background: var(--danger-soft); color: var(--danger); font-weight: 600; }
@@ -862,3 +862,14 @@ dialog.wide-dialog { width: min(1000px, calc(100vw - 2rem)); }
 .more-options[open] > summary { margin-bottom: 0.5rem; }
 .more-options > div { margin-top: 0.4rem; }
 .share-preview ul { margin: 0.3rem 0 0; padding-left: 1.2rem; max-height: 14rem; overflow: auto; }
+
+/* Colours chosen in Settings (modality buttons, labels): blended with the page's own colours, so one
+   choice reads well in the light and the dark theme. More specific than the built-in modality colours. */
+html:root .chip.tinted[style] { background: color-mix(in srgb, var(--chip) 16%, var(--panel)); border-color: color-mix(in srgb, var(--chip) 45%, var(--panel)); color: color-mix(in srgb, var(--chip) 55%, var(--ink)); }
+html:root .chip-toggle.tinted[style] { border-color: color-mix(in srgb, var(--chip) 55%, var(--panel)); color: color-mix(in srgb, var(--chip) 55%, var(--ink)); }
+html:root .chip-toggle.tinted[style][aria-pressed="true"] { background: var(--chip); border-color: var(--chip); color: var(--chip-ink, #fff); }
+.label-colors { display: grid; gap: 0.4rem; grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr)); }
+.label-color-row { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; padding: 0.3rem 0.5rem; border: 1px solid var(--line); border-radius: 8px; }
+.label-color-row .color-setting input[type="color"] { width: 2.4rem; }
+.modbtn-row .color-setting { flex-wrap: nowrap; gap: 0.4rem; }
+.modbtn-row .color-setting input[type="color"] { width: 2.4rem; }

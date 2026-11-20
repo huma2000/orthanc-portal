@@ -88,6 +88,8 @@ pub struct SearchFeature {
     infinite: bool,
     /// Labels that may be put on studies (empty = any).
     allowed_labels: Vec<String>,
+    /// Colours of labels chosen in Settings > Search & labels (label -> #rrggbb).
+    label_colors: std::collections::BTreeMap<String, String>,
     label_counts: bool,
     /// This user may put labels on studies.
     can_edit_labels: bool,
@@ -205,6 +207,7 @@ async fn me_response(state: &AppState, user: User) -> Me {
         min_chars: settings.search_min_chars,
         infinite: settings.infinite_scroll,
         allowed_labels: settings.available_labels.clone(),
+        label_colors: settings.label_colors.clone(),
         label_counts: settings.label_counts,
         can_edit_labels: crate::routes::labels::can_edit_labels(&user),
     };

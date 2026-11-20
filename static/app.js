@@ -327,7 +327,25 @@ function formatDicomDate(value) {
 const formatTimestamp = (unixSeconds) => (unixSeconds ? new Date(unixSeconds * 1000).toLocaleString(i18n.locale) : t("never"));
 
 /** Coloured modality badge (colours defined in app.css through data-m). */
-const chip = (modality) => h("span", { class: "chip", "data-m": modality, title: modalityName(modality) }, modality || "?");
+const chip = (modality) => tint(h("span", { class: "chip", "data-m": modality, title: modalityName(modality) }, modality || "?"), modalityColor(modality));
+
+/**
+ * Gives a tag or a filter button the colour chosen in Settings (a modality button, a label). The
+ * stylesheet blends it with the page's own colours, so one choice reads well in light and dark;
+ * a pressed button shows the colour itself, with black or white text (whichever reads better).
+ * Through the DOM (allowed by the Content-Security-Policy, unlike style attributes in HTML).
+ */
+function tint(el, color) {
+  if (!isColor(color)) return el;
+  el.classList.add("tinted");
+  el.style.setProperty("--chip", color);
+  el.style.setProperty("--chip-ink", inkOn(color));
+  return el;
+}
+/** The colour of a modality code (Settings > Search & labels > Modality buttons), or undefined. */
+const modalityColor = (code) => ((state.brand && state.brand.modality_colors) || {})[code];
+/** The colour of a label (Settings > Search & labels > Label colours), or undefined. */
+const labelColor = (label) => (searchOptions().label_colors || {})[label];
 
 /**
  * Full names of the DICOM modality codes (DICOM PS3.3, "Modality" attribute), used as
@@ -1239,7 +1257,7 @@ function buildModalityPicker(initial, onChange, chips = modalityButtons()) {
   const other = h("input", { class: "mod-other", placeholder: "Other codes: SR, ES...", "aria-label": "Other modality codes" });
   const buttons = chips.map((chip) => ({
     chip,
-    button: h("button", {
+    button: tint(h("button", {
       type: "button", class: "chip-toggle", title: chip.title, "aria-pressed": "false",
       onclick: () => {
         const active = chip.codes.every((c) => selected.has(c));
@@ -1247,7 +1265,7 @@ function buildModalityPicker(initial, onChange, chips = modalityButtons()) {
         refresh();
         onChange();
       },
-    }, chip.label),
+    }, chip.label), chip.color),
   }));
 
   /** Lights up the buttons whose codes are all selected. */
@@ -1288,7 +1306,7 @@ function loadLabels() {
 }
 
 /** Labels as small tags. */
-const labelChips = (labels) => (labels && labels.length ? labels.map((l) => h("span", { class: "chip label-chip" }, l)) : dash());
+const labelChips = (labels) => (labels && labels.length ? labels.map((l) => tint(h("span", { class: "chip label-chip", "data-label": l }, l), labelColor(l))) : dash());
 
 /**
  * Labels search box: a toggle per label (with its number of studies), "Without labels", and
@@ -1309,12 +1327,12 @@ function buildLabelPicker(initial, onChange) {
     }
   }
   function draw() {
-    const toggle = (pressed, text, title, onclick) => h("button", { type: "button", class: "chip-toggle label-toggle", "aria-pressed": String(pressed), title, onclick }, text);
+    const toggle = (pressed, text, title, onclick, color) => tint(h("button", { type: "button", class: "chip-toggle label-toggle", "aria-pressed": String(pressed), title, onclick }, text), color);
     const known = labels.map((l) => l.name);
     const all = [...labels, ...[...selected].filter((n) => !known.includes(n)).map((name) => ({ name, count: null }))];
     box.replaceChildren(...[
       ...all.map((l) => toggle(selected.has(l.name), l.count == null ? l.name : `${l.name} (${l.count})`, t("Studies labelled {label}", { label: l.name }),
-        () => { none = false; if (selected.has(l.name)) selected.delete(l.name); else selected.add(l.name); draw(); onChange(); })),
+        () => { none = false; if (selected.has(l.name)) selected.delete(l.name); else selected.add(l.name); draw(); onChange(); }, labelColor(l.name))),
       toggle(none, "Without labels", "Studies that have no label at all", () => { none = !none; selected.clear(); draw(); onChange(); }),
       selected.size > 1
         ? h("select", { class: "label-mode", "aria-label": "Match", onchange: (e) => { mode = e.target.value; onChange(); } },
@@ -1353,8 +1371,8 @@ function openLabelsDialog(study, onChange) {
 
   function draw() {
     list.replaceChildren(...(study.labels.length
-      ? study.labels.map((l) => h("span", { class: "chip label-chip" }, l,
-        h("button", { type: "button", class: "chip-remove", "aria-label": t("Take the label {label} off", { label: l }), title: "Take it off", onclick: () => change("DELETE", l) }, "×")))
+      ? study.labels.map((l) => tint(h("span", { class: "chip label-chip", "data-label": l }, l,
+        h("button", { type: "button", class: "chip-remove", "aria-label": t("Take the label {label} off", { label: l }), title: "Take it off", onclick: () => change("DELETE", l) }, "×")), labelColor(l)))
       : [h("span", { class: "muted" }, "No label yet.")]));
   }
   async function change(method, label) {
@@ -3964,15 +3982,28 @@ function buildPickList(what, catalog, chosen, defaults) { // `what`: "columns", 
  * restore defaults. A live preview shows the row exactly as users will see it, with the
  * "Other codes" box that is always there. Saved with the rest of the form.
  */
+/**
+ * A colour picker with a "Default" box: `onChange(color)` gets "#rrggbb", or "" while Default is ticked
+ * (the built-in colour). `label` names it for screen readers.
+ */
+function colorChoice(value, onChange, label) {
+  const picker = h("input", { type: "color", value: isColor(value) ? value : "#2547c8", disabled: !isColor(value), "aria-label": label });
+  const useDefault = h("input", { type: "checkbox", checked: !isColor(value) });
+  const changed = () => { picker.disabled = useDefault.checked; onChange(useDefault.checked ? "" : picker.value); };
+  picker.addEventListener("input", changed);
+  useDefault.addEventListener("change", changed);
+  return h("div", { class: "color-setting" }, picker, h("label", { class: "check" }, useDefault, "Default"));
+}
+
 function buildModalityButtonsEditor(buttons, defaults) {
-  const clone = (list) => list.map((b) => ({ label: b.label, codes: b.codes.join(", "), title: b.title || "", visible: b.visible !== false }));
+  const clone = (list) => list.map((b) => ({ label: b.label, codes: b.codes.join(", "), title: b.title || "", visible: b.visible !== false, color: b.color || "" }));
   let rows = clone(buttons);
   const parseCodes = (text) => text.split(/[\s,;]+/).map((c) => c.toUpperCase()).filter(Boolean);
   const list = h("div", { class: "modbtn-list" });
   const preview = h("div", { class: "modbtn-preview" });
 
   function drawPreview() {
-    const shown = rows.filter((r) => r.visible && r.label.trim()).map((r) => ({ label: r.label.trim(), codes: parseCodes(r.codes), title: r.title }));
+    const shown = rows.filter((r) => r.visible && r.label.trim()).map((r) => ({ label: r.label.trim(), codes: parseCodes(r.codes), title: r.title, color: r.color }));
     const picker = buildModalityPicker("", () => {}, shown);
     preview.replaceChildren(h("span", { class: "field-label" }, "Preview (what users see)"), picker.node);
   }
@@ -3997,6 +4028,7 @@ function buildModalityButtonsEditor(buttons, defaults) {
           h("input", { type: "checkbox", checked: row.visible, onchange: (e) => { row.visible = e.target.checked; draw([index, "shown"]); }, "data-control": "shown" }),
           "Shown"),
         h("input", { class: "modbtn-label", value: row.label, maxlength: 16, placeholder: "Label", "aria-label": "Button label", oninput: (e) => { row.label = e.target.value; drawPreview(); } }),
+        colorChoice(row.color, (color) => { row.color = color; drawPreview(); }, t("Colour of the button {label}", { label: row.label || "" })),
         h("input", { class: "modbtn-codes mono", value: row.codes, placeholder: "DICOM codes, e.g. CR, DX", "aria-label": "DICOM modality codes", oninput: (e) => { row.codes = e.target.value; drawPreview(); } }),
         h("input", { class: "modbtn-title", value: row.title, maxlength: 80, placeholder: "Description (shown on hover)", "aria-label": "Description", oninput: (e) => { row.title = e.target.value; drawPreview(); } }),
         h("button", { class: "btn small danger", type: "button", onclick: () => { rows.splice(index, 1); draw(); } }, "Remove"));
@@ -4012,17 +4044,43 @@ function buildModalityButtonsEditor(buttons, defaults) {
   // Column titles, aligned with the rows below (the same grid; hidden on narrow screens, where rows wrap).
   // aria-hidden: each control already carries its own accessible name.
   const header = h("div", { class: "modbtn-head", "aria-hidden": "true" },
-    h("span", null, "Order"), h("span", null, "Shown"), h("span", null, "Button label"),
+    h("span", null, "Order"), h("span", null, "Shown"), h("span", null, "Button label"), h("span", null, "Colour"),
     h("span", null, "DICOM codes"), h("span", null, "Description (shown on hover)"), h("span", null, ""));
   const node = h("div", { class: "wide modbtn-editor" }, preview, header, list,
     h("div", { class: "filter-actions" },
-      h("button", { class: "btn small", type: "button", onclick: () => { rows.push({ label: "", codes: "", title: "", visible: true }); draw([rows.length - 1, "shown"]); } }, "Add button"),
+      h("button", { class: "btn small", type: "button", onclick: () => { rows.push({ label: "", codes: "", title: "", visible: true, color: "" }); draw([rows.length - 1, "shown"]); } }, "Add button"),
       h("button", { class: "btn small", type: "button", onclick: () => { rows = clone(defaults); draw(); } }, "Restore default buttons")));
 
   return {
     node,
-    get: () => rows.map((r) => ({ label: r.label.trim(), codes: parseCodes(r.codes), title: r.title.trim(), visible: r.visible })),
+    get: () => rows.map((r) => ({ label: r.label.trim(), codes: parseCodes(r.codes), title: r.title.trim(), visible: r.visible, color: r.color })),
   };
+}
+
+/**
+ * Settings > Search & labels > Label colours: one row per label (those in use, the allowed ones, and those
+ * already coloured), with a live preview of its tag. `get()` = { label: "#rrggbb" } for the coloured ones.
+ */
+function buildLabelColorsEditor(colors) {
+  const chosen = { ...(colors || {}) };
+  const list = h("div", { class: "label-colors" }, h("span", { class: "muted" }, "Loading labels..."));
+  const row = (name) => {
+    const tag = h("span", { class: "chip label-chip" }, name);
+    const paint = (color) => {
+      tag.classList.remove("tinted");
+      tag.style.removeProperty("--chip");
+      tint(tag, color);
+    };
+    paint(chosen[name]);
+    return h("div", { class: "label-color-row" }, tag,
+      colorChoice(chosen[name], (color) => { if (color) chosen[name] = color; else delete chosen[name]; paint(color); }, t("Colour of the label {label}", { label: name })));
+  };
+  const draw = (names) => list.replaceChildren(...(names.length ? names.map(row) : [h("span", { class: "muted" }, "No label yet.")]));
+  const allowed = searchOptions().allowed_labels || [];
+  api("GET", "/api/labels")
+    .then((r) => draw([...new Set([...r.labels.map((l) => l.name), ...allowed, ...Object.keys(chosen)])].sort((a, b) => a.localeCompare(b))))
+    .catch(() => draw([...new Set([...allowed, ...Object.keys(chosen)])].sort((a, b) => a.localeCompare(b))));
+  return { node: list, get: () => ({ ...chosen }) };
 }
 
 /**
@@ -4275,6 +4333,7 @@ function buildSettingsView() {
       ...colorFields,
     ];
     const modalityEditor = buildModalityButtonsEditor(s.modality_buttons, doc.defaults.modality_buttons);
+    const labelColorsEditor = buildLabelColorsEditor(s.label_colors);
     const columnsEditor = buildPickList("columns", Object.entries(STUDY_COLUMNS).map(([k, c]) => [k, c.title]), s.study_columns, doc.defaults.study_columns);
     const fieldsEditor = buildPickList("search boxes", Object.entries(STUDY_FIELDS).map(([k, f]) => [k, f.title]), s.study_search_fields, doc.defaults.study_search_fields);
     const detailEditor = buildPickList("fields", Object.entries(STUDY_DETAIL_TITLES), s.study_detail_fields || [], doc.defaults.study_detail_fields || []);
@@ -4321,6 +4380,7 @@ function buildSettingsView() {
         }
         body.roles = rolesEditor.get();
         body.modality_buttons = modalityEditor.get();
+        body.label_colors = labelColorsEditor.get();
         body.study_columns = columnsEditor.get();
         body.study_search_fields = fieldsEditor.get();
         body.study_detail_fields = detailEditor.get();
@@ -4366,7 +4426,10 @@ function buildSettingsView() {
         h("div", { class: "setting" }, h("span", { class: "field-label" }, "Fields of the study window (a click on a card)"), detailEditor.node),
         SETTINGS_FIELDS.lists.map(field)),
       section("labels", "Labels", "Short words staff put on studies to find them again (urgent, insurance, teaching...). Everyone who can search sees them and can search by them; people with the labels permission (and administrators) put them on and take them off. They are Orthanc's own labels.",
-        SETTINGS_FIELDS.labels.map(field)),
+        SETTINGS_FIELDS.labels.map(field),
+        h("div", { class: "setting wide" }, h("span", { class: "field-label" }, "Label colours"),
+          h("p", { class: "hint" }, "The colour of each label's tags and filter button. \"Default\" keeps the accent colour. The colours adapt to the light and the dark theme."),
+          labelColorsEditor.node)),
       section("theme", "Colours", "Match the portal to your practice's colours. Changes are previewed on this page at once and kept when you save. The logo, the portal name and the window title are in the General tab.",
         themeFields),
       section("simplified", "Home page and icons", "The portal shows the logo, the practice name and the total of studies at the top, a column of icons (Home, Search, Shares, Uploads, Transfers, Help, Configuration, Log out) on the left, and a home page with the most recent studies and an area to drop files into. Each person sees only the icons their permissions allow.",

@@ -119,6 +119,8 @@ the section in brackets has the details.
 **Look and language** (section 4)
 
 * **Branding**: window title, website icon, logo, portal name, login notice; **colours** and light / dark;
+  a **colour for each modality button** (also its modality tags) and **for each label**, blended with the page so
+  one choice reads well in both themes ("Default" keeps the built-in colours);
   the home page as a table or as cards; auto-refresh of the lists.
 * **English and Spanish**, chosen per portal and per browser; date and name formats; custom CSS.
 
@@ -308,9 +310,9 @@ screens whose changes apply at once.
 | Tab > section | What you can change |
 |---|---|
 | **General > Branding** | **Browser window title**, **website icon**, **logo**, portal name, whether the name is shown next to the logo, notice shown on the login page (see below) |
-| **Search & labels > Modality buttons** | The quick modality filters of the Studies and Series pages: order, shown / hidden, label, DICOM codes, description; add, remove, restore defaults (the *Other codes* box is always shown) |
+| **Search & labels > Modality buttons** | The quick modality filters of the Studies and Series pages: order, shown / hidden, label, **colour**, DICOM codes, description; add, remove, restore defaults (the *Other codes* box is always shown). A button's colour is also the colour of the modality tags of its codes everywhere, the invitation page included |
 | **Appearance > Colours** | Light / dark / automatic, and the **accent**, **header**, **icon column** and **page background** colours (each can go back to the built-in one). Previewed at once, kept when saved (see [The layout and the colours](#the-layout-and-the-colours)) |
-| **Search & labels** | The modality buttons; the columns of the studies tables and the boxes of the Studies search (which ones, in which order); the fields of the study window; live search on or off and its minimum number of letters; endless lists on or off; **labels on or off altogether**, the allowed labels and whether their counts are shown |
+| **Search & labels** | The modality buttons; the columns of the studies tables and the boxes of the Studies search (which ones, in which order); the fields of the study window; live search on or off and its minimum number of letters; endless lists on or off; **labels on or off altogether**, the allowed labels, whether their counts are shown, and the **colour of each label** (its tags and filter button) |
 | **Features** | Every optional feature of section 9b, each on or off, the name of downloaded ZIP files, and the **More viewers** (Stone Web Viewer, VolView, whole-slide viewer: automatic / always / never; a MedDream address; the OHIF modes offered) |
 | **Appearance > Language, dates, names and style** | The **language** of the portal (English or Spanish, see [Languages](#languages-english-and-spanish)), how dates (2024-05-17, 17/05/2024, 05/17/2024, 17.05.2024, 17 May 2024) and patient names (DOE, JOHN / JOHN DOE / DOE^JOHN) are written everywhere, and **custom CSS** added after the portal's own (also on the invitation page; no `@import` or `url(...)`) |
 | **Appearance > Home page and icons** | How many recent studies the home page shows, which ones (last received / newest study date) and how (the Studies table, or cards with big previews), card size, the two texts of the home page, the total of studies in the header, names under the icons; auto-refresh of the recent studies and of Transfers (each on or off) and its interval (30 s by default, 5 s to 1 hour) |
@@ -1148,7 +1150,7 @@ The code compiles without warnings on Rust 1.91, passes `cargo clippy --all-targ
 formatted with `rustfmt` (see `rustfmt.toml`), and its dependencies were checked against the RustSec advisory
 database (no known vulnerable version in `Cargo.lock`). The automated tests live in the **`tests/`** folder:
 
-* `tests/feature_tests.sh`: **174 checks** of the features of section 9c on a fresh portal: two-step sign-in
+* `tests/feature_tests.sh`: **180 checks** of the features of section 9c on a fresh portal: two-step sign-in
   (set-up, codes used once, recovery codes, required mode, reset), My account, link notifications (and that they
   never name the patient), anonymized copies (made, shown, deleted on revocation), whole-patient links, QR codes,
   upload links (password, nothing leaked, size limit, non-DICOM files, revocation), the patient CD export (with

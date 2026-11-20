@@ -325,6 +325,15 @@ ok "...and none is offered" "$(feat $A "(d['features']['options']['cd_export'], 
 put $A '{"cd_export":true,"stats_page":true,"recently_viewed":true,"share_anonymize":true}' > /dev/null
 D=$(login $F doctor DoctorPass123)
 
+echo "== colours of modality buttons and labels"
+BTNS=$(body $F $A /api/admin/settings | python3 -c "import sys,json;b=json.load(sys.stdin)['settings']['modality_buttons'];b[0]['color']='#D9480F';b[3]['color']='#f59f00';print(json.dumps({'modality_buttons':b,'label_colors':{'urgent':'#C92A2A','teaching':''}}))")
+ok "colours are saved" "$(put $A "$BTNS" | tail -1)" "200"
+ok "...a button's colour reaches every user (lower case)" "$(body $F $V /api/me | py "d['features']['modality_buttons'][0]['color']")" "#d9480f"
+ok "...and each of its codes, for the tags (the RX button: CR and DX), on the invitation page too" "$(curl -s $G/api/public | py "(d['modality_colors']['CT'], d['modality_colors']['CR'], d['modality_colors']['DX'], 'MR' in d['modality_colors'])")" "('#d9480f', '#f59f00', '#f59f00', False)"
+ok "...label colours: set ones kept, a label put back to Default forgotten" "$(body $F $V /api/me | py "d['features']['search']['label_colors']")" "{'urgent': '#c92a2a'}"
+ok "...a colour that is not #rrggbb is refused (400)" "$(put $A '{"label_colors":{"urgent":"red"}}' | tail -1)" "400"
+ok "...a label colour for an invalid label is refused (400)" "$(put $A '{"label_colors":{"no spaces":"#123456"}}' | tail -1)" "400"
+
 echo "== auto-forward rules"
 ok "a rule needs a destination (400)" "$(put $A '{"forward_rules":[{"name":"CT out","target":""}]}' | tail -1)" "400"
 ok "...and sane modality codes (400)" "$(put $A '{"forward_rules":[{"name":"CT out","target":"ris","modalities":["C*"]}]}' | tail -1)" "400"

@@ -155,6 +155,17 @@ async function api(method, url, body) {
   return data;
 }
 
+/** A modality tag, in the colour chosen in the portal's Settings (blended with the page's colours by app.css). */
+function modalityChip(code) {
+  const el = h("span", { class: "chip", "data-m": code }, code || "?");
+  const color = ((state.brand && state.brand.modality_colors) || {})[code];
+  if (/^#[0-9a-f]{6}$/i.test(color || "")) {
+    el.classList.add("tinted");
+    el.style.setProperty("--chip", color);
+  }
+  return el;
+}
+
 /** How the practice writes dates and names (Settings > Appearance, from /api/public). */
 const format = () => (state.brand && state.brand.format) || {};
 
@@ -293,13 +304,13 @@ async function showStudy() {
     row("Study date", formatDate(study.date)),
     row("Description", study.description),
     row("Accession", study.accession),
-    row("Modalities", study.modalities.length ? study.modalities.map((m) => h("span", { class: "chip", "data-m": m }, m)) : ""));
+    row("Modalities", study.modalities.length ? study.modalities.map((m) => modalityChip(m)) : ""));
 
   const table = series.length
     ? h("div", { class: "table-wrap" }, h("table", { class: "data" },
         h("thead", null, h("tr", null, ["#", "Modality", "Description", "Body part", "Images"].map((t) => h("th", { class: t === "Images" ? "num" : null }, t)))),
         h("tbody", null, series.map((s) => h("tr", null,
-          h("td", null, s.number || "-"), h("td", null, h("span", { class: "chip", "data-m": s.modality }, s.modality || "?")),
+          h("td", null, s.number || "-"), h("td", null, modalityChip(s.modality)),
           h("td", null, s.description || "-"), h("td", null, s.body_part || "-"), h("td", { class: "num" }, s.images))))))
     : h("p", { class: "muted" }, "This study has no series.");
 
@@ -350,7 +361,7 @@ function showStudies(data, studies) {
       h("h2", null, `${formatDate(study.date)}  ${study.description || ""}`.trim()),
       h("dl", { class: "share-details" },
         row("Patient", formatName(patient.name)), row("Patient ID", patient.id), row("Accession", study.accession),
-        row("Modalities", study.modalities.length ? study.modalities.map((m) => h("span", { class: "chip", "data-m": m }, m)) : ""),
+        row("Modalities", study.modalities.length ? study.modalities.map((m) => modalityChip(m)) : ""),
         row("Series", t("{n} ({images} images)", { n: series.length, images: series.reduce((n, s) => n + (Number(s.images) || 0), 0) }))),
       h("div", { class: "share-actions" },
         viewer.available ? h("a", { class: "btn", href: item.viewer_url, target: "_blank", rel: "noopener" }, "View online") : null,
@@ -596,7 +607,7 @@ async function showUploader() {
 (async function start() {
   try {
     const info = await api("GET", "/api/public");
-    state.brand = { name: info.name, show_name: info.show_name, logo: info.logo, format: info.format || {} };
+    state.brand = { name: info.name, show_name: info.show_name, logo: info.logo, format: info.format || {}, modality_colors: info.modality_colors || {} };
     state.languages = info.languages || [];
     applyTheme(info.theme);
     await loadLanguage(chosenLanguage(info));

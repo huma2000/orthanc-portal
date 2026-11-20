@@ -285,6 +285,9 @@ pub struct ModalityButton {
     /// Hidden buttons stay in the list (so they can be shown again) but are not offered.
     #[serde(default = "default_true")]
     pub visible: bool,
+    /// `#rrggbb` of the button and of the modality tags of its codes; empty = the built-in colours.
+    #[serde(default)]
+    pub color: String,
 }
 
 /// The modality buttons every new installation starts with.
@@ -294,6 +297,7 @@ pub fn default_modality_buttons() -> Vec<ModalityButton> {
         codes: codes.iter().map(|c| c.to_string()).collect(),
         title: title.into(),
         visible: true,
+        color: String::new(),
     };
     vec![
         button("CT", &["CT"], "Computed tomography"),
@@ -598,6 +602,9 @@ pub struct Settings {
     /// The only labels that may be put on studies. Empty = any label.
     #[serde(default)]
     pub available_labels: Vec<String>,
+    /// The colour of some labels (`#rrggbb`), for their tags and filter buttons; the others keep the accent.
+    #[serde(default)]
+    pub label_colors: std::collections::BTreeMap<String, String>,
     /// Show how many studies carry each label (one count per label for Orthanc).
     #[serde(default = "default_true")]
     pub label_counts: bool,
@@ -904,6 +911,7 @@ impl Settings {
             infinite_scroll: false,
             available_labels: Vec::new(),
             label_counts: true,
+            label_colors: Default::default(),
             labels_enabled: true,
             study_detail_fields: default_study_detail_fields(),
             bulk_actions: true,
@@ -1074,6 +1082,7 @@ impl Settings {
         for button in &mut self.modality_buttons {
             button.label = button.label.trim().to_string();
             button.title = button.title.trim().to_string();
+            button.color = button.color.trim().to_lowercase();
             let mut codes: Vec<String> = Vec::new();
             for code in button.codes.iter().map(|c| c.trim().to_uppercase()).filter(|c| !c.is_empty()) {
                 if !codes.contains(&code) {
@@ -1092,6 +1101,12 @@ impl Settings {
             *label = label.trim().to_string();
         }
         self.available_labels.retain(|l| !l.is_empty());
+        // Colours: lower case; a label set back to "Default" (empty) is simply forgotten.
+        self.label_colors = std::mem::take(&mut self.label_colors)
+            .into_iter()
+            .map(|(label, color)| (label.trim().to_string(), color.trim().to_lowercase()))
+            .filter(|(label, color)| !label.is_empty() && !color.is_empty())
+            .collect();
         self.available_labels.dedup();
         self.simplified_upload_text = self.simplified_upload_text.trim().to_string();
         self.meddream_url = self.meddream_url.trim().to_string();
@@ -1276,6 +1291,12 @@ impl Settings {
                     button.label
                 ));
             }
+            if !valid_color(&button.color) {
+                return bad(format!(
+                    "The colour of the modality button '{}' must look like #1a2b3c (or be empty for the default)",
+                    button.label
+                ));
+            }
             if button.title.chars().count() > 80 || has_control(&button.title) {
                 return bad(format!(
                     "The description of the modality button '{}' can have at most 80 characters",
@@ -1398,6 +1419,17 @@ impl Settings {
         range("Letters before searching while typing", self.search_min_chars, 1, 10)?;
         if self.available_labels.len() > 100 {
             return bad("At most 100 allowed labels".into());
+        }
+        if self.label_colors.len() > 200 {
+            return bad("At most 200 label colours".into());
+        }
+        for (label, color) in &self.label_colors {
+            if !crate::routes::labels::valid_label(label) {
+                return bad(format!("'{label}' is not a valid label (label colours)"));
+            }
+            if !valid_color(color) {
+                return bad(format!("The colour of the label '{label}' must look like #1a2b3c"));
+            }
         }
         if let Some(bad_label) = self.available_labels.iter().find(|l| !crate::routes::labels::valid_label(l)) {
             return bad(format!(
@@ -1697,6 +1729,24 @@ mod tests {
         assert!(mail("none", "").is_ok(), "a relay without sign-in");
         assert!(mail("starttls", "mailer").is_ok());
         assert!(mail("tls", "mailer").is_ok());
+    }
+
+    /// Colours of modality buttons and labels: `#rrggbb`, tidied, and "Default" (empty) forgets a label's.
+    #[test]
+    fn modality_and_label_colours() {
+        let base = Settings::defaults();
+        let mut buttons = default_modality_buttons();
+        buttons[0].color = " #1A2B3C ".into();
+        let edited = base.with_patch(&json!({ "modality_buttons": buttons })).unwrap();
+        assert_eq!(edited.modality_buttons[0].color, "#1a2b3c");
+        assert_eq!(edited.modality_buttons[1].color, "", "the others keep the built-in colours");
+        buttons[0].color = "red".into();
+        assert!(base.with_patch(&json!({ "modality_buttons": buttons })).is_err());
+        let labels = base.with_patch(&json!({ "label_colors": { "urgent": "#C00000", "teaching": "" } })).unwrap();
+        assert_eq!(labels.label_colors.len(), 1);
+        assert_eq!(labels.label_colors["urgent"], "#c00000");
+        assert!(base.with_patch(&json!({ "label_colors": { "urgent": "url(x)" } })).is_err());
+        assert!(base.with_patch(&json!({ "label_colors": { "no spaces": "#123456" } })).is_err());
     }
 
     /// Columns, search boxes and allowed labels are checked.

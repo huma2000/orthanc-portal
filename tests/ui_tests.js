@@ -104,6 +104,7 @@ async function newLink(admin, body) {
 }
 
 (async () => {
+  const all_extra = []; // more pages checked for JavaScript errors at the end
   console.log("--- intranet administrator: the staff portal");
   const admin = await makeDom(STAFF);
   await admin.login("admin", "SuperSecret123");
@@ -765,7 +766,30 @@ async function newLink(admin, body) {
   check("...then the area to drop files, and nothing of the archive", !!sender.$(".dropzone") && !/DOE/.test(sender.text()), sender.text().slice(0, 200));
   await admin.call("PUT", "/api/admin/settings", { upload_links: false });
 
-  const all = [admin, guest, revokedPage, ts, st, sender, viewOnlyPage, shortPage, expiredPage, nothing, garbage, unknown, noViewerPage, adminNoOhif, viewers, noButtons, sharer, viewer, reader, linked, viaUid, live, custom];
+  console.log("--- colours of modality buttons and labels");
+  {
+    const cur = (await (await admin.call("GET", "/api/admin/settings")).json()).settings;
+    const buttons = cur.modality_buttons.map((b) => (b.label === "CT" ? { ...b, color: "#d9480f" } : b));
+    await admin.call("PUT", "/api/admin/settings", { modality_buttons: buttons, label_colors: { "second-opinion": "#2b8a3e" } });
+    const c = await makeDom(STAFF); await c.login("admin", "SuperSecret123");
+    await c.tab("Studies"); await until(() => c.$("tr.study"), 6000);
+    const ctButton = c.$$(".mod-picker .chip-toggle").find((b) => b.textContent === "CT");
+    check("the CT filter button wears its colour", ctButton.classList.contains("tinted") && ctButton.style.getPropertyValue("--chip") === "#d9480f");
+    const ctTag = c.$$("tr.study .chip[data-m]").find((el) => el.dataset.m === "CT");
+    check("...and so do the CT tags of the table", !!ctTag && ctTag.style.getPropertyValue("--chip") === "#d9480f");
+    const srTag = c.$$("tr.study .chip[data-m]").find((el) => el.dataset.m === "SR");
+    check("...the others keep the built-in colours", !!srTag && !srTag.classList.contains("tinted"));
+    const labelToggle = c.$$(".label-toggle").find((b) => b.textContent.startsWith("second-opinion"));
+    check("a label's filter button wears its colour", !!labelToggle && labelToggle.style.getPropertyValue("--chip") === "#2b8a3e");
+    await c.tab("Settings");
+    c.click(c.$$(".subtabs [role=tab]").find((b) => b.textContent === "Search & labels")); await sleep(1500);
+    check("Settings: a colour column in the modality buttons, and the label colours", !!c.$(".modbtn-head") && /Colour/.test(c.$(".modbtn-head").textContent)
+      && c.$$(".modbtn-row input[type=color]").length >= 1 && c.$$(".label-color-row").length >= 1);
+    await admin.call("PUT", "/api/admin/settings", { modality_buttons: cur.modality_buttons, label_colors: {} });
+    all_extra.push(c);
+  }
+
+  const all = [...all_extra, admin, guest, revokedPage, ts, st, sender, viewOnlyPage, shortPage, expiredPage, nothing, garbage, unknown, noViewerPage, adminNoOhif, viewers, noButtons, sharer, viewer, reader, linked, viaUid, live, custom];
   check("no JavaScript errors anywhere", all.every((d) => d.errors.length === 0), all.flatMap((d) => d.errors).join("|"));
   console.log(`\nRESULT: ${results.filter(Boolean).length} passed, ${results.filter((r) => !r).length} failed`);
   process.exit(results.every(Boolean) ? 0 : 1);
