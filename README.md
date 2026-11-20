@@ -1150,7 +1150,7 @@ The code compiles without warnings on Rust 1.91, passes `cargo clippy --all-targ
 formatted with `rustfmt` (see `rustfmt.toml`), and its dependencies were checked against the RustSec advisory
 database (no known vulnerable version in `Cargo.lock`). The automated tests live in the **`tests/`** folder:
 
-* `tests/feature_tests.sh`: **180 checks** of the features of section 9c on a fresh portal: two-step sign-in
+* `tests/feature_tests.sh`: **183 checks** of the features of section 9c on a fresh portal: two-step sign-in
   (set-up, codes used once, recovery codes, required mode, reset), My account, link notifications (and that they
   never name the patient), anonymized copies (made, shown, deleted on revocation), whole-patient links, QR codes,
   upload links (password, nothing leaked, size limit, non-DICOM files, revocation), the patient CD export (with

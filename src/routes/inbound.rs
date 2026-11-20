@@ -49,7 +49,7 @@ use axum::Json;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Mutex, OnceLock};
 
@@ -529,12 +529,14 @@ pub async fn file(
     };
     // Only plain DICOM files whose study is new, or came in through this same link.
     let Some(uid) = uid else { return refuse("not_dicom") };
-    if !may_receive(&state, &link, &uid).await? {
-        state.db.audit(
-            &format!("sender-{}", link.id),
-            "upload_link_refused",
-            &format!("#{}: a file of study {uid}, which is already in the archive", link.id),
-        );
+    if let Admission::No { first } = may_receive(&state, &link, &uid).await? {
+        if first {
+            state.db.audit(
+                &format!("sender-{}", link.id),
+                "upload_link_refused",
+                &format!("#{}: files of study {uid}, which is already in the archive", link.id),
+            );
+        }
         return refuse("already_in_archive");
     }
 
@@ -574,34 +576,49 @@ pub async fn file(
 /// How much of a file is read, at most, to find its StudyInstanceUID (it is near the start).
 const PEEK_LIMIT: usize = 1024 * 1024;
 
-/// The StudyInstanceUIDs each upload link has let in (new studies it started). Two files of the same
-/// new study arriving at once must both pass, even before Orthanc has the first one; after a
-/// restart the studies recorded with the link do the same job.
-fn admitted() -> &'static Mutex<HashMap<i64, HashSet<String>>> {
-    static ADMITTED: OnceLock<Mutex<HashMap<i64, HashSet<String>>>> = OnceLock::new();
-    ADMITTED.get_or_init(Default::default)
+/// What each upload link decided per StudyInstanceUID: `true` = let in (a new study it started),
+/// `false` = refused (a study already in the archive).
+/// * Two files of the same new study arriving at once must both pass, even before Orthanc has the
+///   first one; after a restart the studies recorded with the link do the same job.
+/// * A CD of a study the practice already has is thousands of files: only the first one needs
+///   Orthanc's answer (and a line in the audit log). A study in the archive stays there, so a refusal
+///   stays valid.
+fn decided() -> &'static Mutex<HashMap<i64, HashMap<String, bool>>> {
+    static DECIDED: OnceLock<Mutex<HashMap<i64, HashMap<String, bool>>>> = OnceLock::new();
+    DECIDED.get_or_init(Default::default)
+}
+
+/// What [`may_receive`] answers.
+#[derive(PartialEq, Eq)]
+enum Admission {
+    Yes,
+    /// Refused; `first` = the first file of that study refused for this link (worth an audit line).
+    No {
+        first: bool,
+    },
 }
 
 /// May this link receive a file of study `uid`? Yes when the study is not in the archive yet (the
 /// link starts it), or when it came in through this link. No when it is a study already there: an
 /// outsider must never add images to a patient's existing study (Orthanc would file them under it).
-async fn may_receive(state: &AppState, link: &UploadLink, uid: &str) -> AppResult<bool> {
-    if admitted().lock().unwrap_or_else(|e| e.into_inner()).get(&link.id).is_some_and(|set| set.contains(uid)) {
-        return Ok(true);
+async fn may_receive(state: &AppState, link: &UploadLink, uid: &str) -> AppResult<Admission> {
+    let known = decided().lock().unwrap_or_else(|e| e.into_inner()).get(&link.id).and_then(|m| m.get(uid).copied());
+    match known {
+        Some(true) => return Ok(Admission::Yes),
+        Some(false) => return Ok(Admission::No { first: false }),
+        None => {}
     }
     let body = json!({ "Level": "Study", "Query": { "StudyInstanceUID": uid }, "Expand": false, "Limit": 20 });
     let found = state.orthanc.find(&body).await?;
     let ids: Vec<&str> = found.iter().filter_map(|v| v.as_str().or_else(|| v["ID"].as_str())).collect();
-    if ids.iter().all(|id| link.studies.iter().any(|s| s == id)) {
-        let mut map = admitted().lock().unwrap_or_else(|e| e.into_inner());
-        // Bounded: links rarely bring more than a few studies; forget everything past a size.
-        if map.values().map(HashSet::len).sum::<usize>() > 100_000 {
-            map.clear();
-        }
-        map.entry(link.id).or_default().insert(uid.to_string());
-        return Ok(true);
+    let admitted = ids.iter().all(|id| link.studies.iter().any(|s| s == id));
+    let mut map = decided().lock().unwrap_or_else(|e| e.into_inner());
+    // Bounded: links rarely bring more than a few studies; forget everything past a size.
+    if map.values().map(HashMap::len).sum::<usize>() > 100_000 {
+        map.clear();
     }
-    Ok(false)
+    map.entry(link.id).or_default().insert(uid.to_string(), admitted);
+    Ok(if admitted { Admission::Yes } else { Admission::No { first: true } })
 }
 
 /// "Files are arriving" to the creator, at most once per quarter of an hour (one email per batch).

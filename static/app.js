@@ -3131,7 +3131,7 @@ function openAdvancedShare(reload) {
     h("button", { class: "btn", type: "button", onclick: () => look() }, "Find")));
   const labelField = h("label", null, "Label", labelSelect);
   if (feature.label) {
-    api("GET", "/api/labels").then((r) => labelSelect.append(...r.labels.filter((l) => l.count !== 0).map((l) =>
+    loadLabels().then((labels) => labelSelect.append(...labels.filter((l) => l.count !== 0).map((l) =>
       h("option", { value: l.name }, l.count != null ? `${l.name} (${l.count})` : l.name)))).catch(() => {});
   }
   labelSelect.addEventListener("change", () => look());
@@ -4077,9 +4077,8 @@ function buildLabelColorsEditor(colors) {
   };
   const draw = (names) => list.replaceChildren(...(names.length ? names.map(row) : [h("span", { class: "muted" }, "No label yet.")]));
   const allowed = searchOptions().allowed_labels || [];
-  api("GET", "/api/labels")
-    .then((r) => draw([...new Set([...r.labels.map((l) => l.name), ...allowed, ...Object.keys(chosen)])].sort((a, b) => a.localeCompare(b))))
-    .catch(() => draw([...new Set([...allowed, ...Object.keys(chosen)])].sort((a, b) => a.localeCompare(b))));
+  // The list the search pages already loaded (asking for it again makes Orthanc count every label).
+  loadLabels().then((labels) => draw([...new Set([...labels.map((l) => l.name), ...allowed, ...Object.keys(chosen)])].sort((a, b) => a.localeCompare(b))));
   return { node: list, get: () => ({ ...chosen }) };
 }
 
