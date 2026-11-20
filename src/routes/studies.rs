@@ -238,6 +238,9 @@ async fn label_filter(state: &AppState, p: &SearchParams) -> AppResult<Option<(V
 
 // ------------------------------------------------------------------ studies
 
+/// Computed tags that are not part of an expanded study itself (modalities, counts).
+const STUDY_TAGS: [&str; 3] = ["ModalitiesInStudy", "NumberOfStudyRelatedInstances", "NumberOfStudyRelatedSeries"];
+
 pub async fn search_studies(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
@@ -284,8 +287,7 @@ pub async fn search_studies(
         "Level": "Study",
         "Query": query,
         "Expand": true,
-        // Computed tags that are not part of the expanded study itself.
-        "RequestedTags": ["ModalitiesInStudy", "NumberOfStudyRelatedInstances", "NumberOfStudyRelatedSeries"],
+        "RequestedTags": STUDY_TAGS,
         "OrderBy": order,
         "Limit": limit + 1, // ask for one extra row to know whether another page exists
         "Since": offset,
@@ -357,6 +359,9 @@ pub async fn search_series(
         "Level": "Series",
         "Query": query,
         "Expand": true,
+        // The parent study's UID (a main tag Orthanc keeps in its database): lets the parent
+        // studies of the whole page be read in one search below.
+        "RequestedTags": ["StudyInstanceUID"],
         "Limit": limit + 1,
         "Since": offset,
     });
@@ -367,16 +372,50 @@ pub async fn search_series(
     let has_more = found.len() > limit;
     found.truncate(limit);
 
+    let mut uids: Vec<String> =
+        found.iter().filter_map(|v| v["RequestedTags"]["StudyInstanceUID"].as_str()).map(str::to_string).collect();
+    uids.sort();
+    uids.dedup();
     let mut items: Vec<SeriesSummary> = found.iter().map(SeriesSummary::from_orthanc).collect();
 
-    // A lone series is meaningless without its patient/study, so fetch each
-    // distinct parent study once (up to 8 requests in parallel) and attach it.
+    // A lone series is meaningless without its patient/study: attach each one's parent.
     let mut parent_ids: Vec<String> = items.iter().map(|s| s.study_id.clone()).collect();
     parent_ids.sort();
     parent_ids.dedup();
+    let studies = parent_studies(&state, parent_ids, &uids).await;
 
+    for series in &mut items {
+        series.study = studies.get(&series.study_id).cloned();
+    }
+    Ok(Json(Page { items, has_more, offset, limit }))
+}
+
+/// The parent studies of a page of series, by Orthanc id. ONE study search for all of them (by the
+/// StudyInstanceUIDs the series search returned: a page of 50 series used to cost up to 50 requests),
+/// then one request per study that search did not bring (up to 8 at a time): an Orthanc that did not
+/// return the UIDs, a study modified meanwhile. The same studies either way.
+async fn parent_studies(state: &AppState, ids: Vec<String>, uids: &[String]) -> HashMap<String, StudySummary> {
+    let mut studies = HashMap::new();
+    if !uids.is_empty() && uids.iter().all(|uid| is_valid_dicom_uid(uid)) {
+        let body = json!({
+            "Level": "Study",
+            // A backslash-separated list of UIDs is DICOM's "any of".
+            "Query": { "StudyInstanceUID": uids.join("\\") },
+            "Expand": true,
+            "RequestedTags": STUDY_TAGS,
+            "Limit": uids.len() + 5,
+        });
+        if let Ok(found) = state.orthanc.find(&body).await {
+            for study in found.iter().map(StudySummary::from_orthanc) {
+                if ids.contains(&study.id) {
+                    studies.insert(study.id.clone(), study);
+                }
+            }
+        }
+    }
+    let missing: Vec<String> = ids.into_iter().filter(|id| !studies.contains_key(id)).collect();
     let orthanc = &state.orthanc;
-    let studies: HashMap<String, StudySummary> = stream::iter(parent_ids)
+    let fetched: Vec<(String, StudySummary)> = stream::iter(missing)
         .map(|study_id| async move {
             let result = orthanc.get_json(&format!("/studies/{study_id}")).await;
             (study_id, result)
@@ -385,9 +424,6 @@ pub async fn search_series(
         .filter_map(|(study_id, result)| async move { result.ok().map(|v| (study_id, StudySummary::from_orthanc(&v))) })
         .collect()
         .await;
-
-    for series in &mut items {
-        series.study = studies.get(&series.study_id).cloned();
-    }
-    Ok(Json(Page { items, has_more, offset, limit }))
+    studies.extend(fetched);
+    studies
 }

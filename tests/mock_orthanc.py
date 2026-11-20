@@ -161,7 +161,15 @@ def demo_find(q):
         items.sort(key=value, reverse=order.get("Direction") == "DESC")
     since = q.get("Since", 0)
     found = items[since:since + q.get("Limit", 100)]
-    return [with_labels(s) for s in found] if level == "Study" else found
+    return [with_labels(s) for s in found] if level == "Study" else [with_parent_uid(r, q) for r in found]
+
+
+def with_parent_uid(series, q):
+    """A series as Orthanc returns it when the find asked for its parent study's StudyInstanceUID."""
+    if "StudyInstanceUID" not in q.get("RequestedTags", []):
+        return series
+    study = all_studies().get(series["ParentStudy"], {})
+    return {**series, "RequestedTags": {"StudyInstanceUID": study.get("MainDicomTags", {}).get("StudyInstanceUID", "")}}
 
 
 DEMO_JOBS = {}
@@ -582,7 +590,7 @@ class H(BaseHTTPRequestHandler):
                 if q["Level"] == "Instance" and "SOPInstanceUID" not in query:   # all the images of a series
                     return self._json([{"ID": f"i-{u}", "Type": "Instance", "MainDicomTags": {"SOPInstanceUID": u}} for u in ("6.7", "6.8", "3")])
                 return self._json([SERIES])
-            if q["Level"] != "Study": return self._json([SERIES])
+            if q["Level"] != "Study": return self._json([with_parent_uid(SERIES, q)])
             if "Labels" in q and q.get("Expand") is False:   # ids of the studies with ALL these labels (share by label)
                 found = [st["ID"] for st in all_studies().values() if set(q["Labels"]) <= LABELS.get(st["ID"], set())]
                 return self._json(found[:q.get("Limit", 100)])

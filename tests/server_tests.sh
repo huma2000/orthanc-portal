@@ -156,7 +156,9 @@ ok "sorting by a column (the study date breaks ties)" "$(tail -1 $WORK/find.log 
 ok "...an unknown column is refused (400)" "$(code $F $V GET '/api/studies?sort=shoe_size')" "400"
 ok "...and so is an unknown direction (400)" "$(code $F $V GET '/api/studies?sort=patient&dir=up')" "400"
 body $F $V "/api/series?sort=modality" > /dev/null
-ok "series can be sorted too" "$(tail -1 $WORK/find.log | py "[(o['Key'], o['Direction']) for o in d['OrderBy']]")" "[('Modality', 'ASC')]"
+ok "series can be sorted too" "$(tail -2 $WORK/find.log | head -1 | py "[(o['Key'], o['Direction']) for o in d['OrderBy']]")" "[('Modality', 'ASC')]"
+ok "...their parent studies are read in ONE search, by the UIDs the series search returned" "$(tail -1 $WORK/find.log | py "(d['Level'], d['Query']['StudyInstanceUID'])")" "('Study', '$UID_')"
+ok "...with the study's modalities too" "$(body $F $V /api/series | py "','.join(d['items'][0]['study']['modalities'])")" "CT,SR"
 ok "an unknown column in the settings is refused (400)" "$(put $A '{"study_columns":["patient","shoe_size"]}' | tail -1)" "400"
 put $A '{"study_columns":["patient","accession"],"search_as_you_type":true,"infinite_scroll":true}' > /dev/null
 ok "every user gets the columns and the search options" "$(body $F $V /api/me | py "(d['features']['search']['columns'], d['features']['search']['live'], d['features']['search']['infinite'], d['features']['search']['can_edit_labels'])")" "(['patient', 'accession'], True, True, False)"
@@ -546,7 +548,7 @@ has "modalities become a DICOM 'any of' list CT\\CR\\DX" "$Q" '"ModalitiesInStud
 has "newest first (OrderBy) and computed tags" "$Q" '"OrderBy"'
 ok "invalid modality -> 400" "$(code $F $V GET '/api/studies?modality=C%3BT')" "400"
 body $F $V "/api/series?modality=US,mr" > /dev/null
-has "series search uses Modality list" "$(tail -1 find.log)" '"Modality": "US\\\\MR"'
+has "series search uses Modality list" "$(tail -2 find.log | head -1)" '"Modality": "US\\\\MR"'
 ok "study result carries its modalities" "$(body $F $V '/api/studies' | py "','.join(d['items'][0]['modalities'])")" "CT,SR"
 ok "series of a study sorted, 2 series" "$(body $F $V /api/studies/$SID/series | py "len(d)")" "2"
 ok "read-only user can search" "$(code $F $RD GET /api/studies)" "200"
