@@ -1,19 +1,23 @@
 //! # forward.rs
 //!
 //! **Auto-forward**: studies that arrive in Orthanc and match a rule (Settings > Auto-forward) are
-//! sent on automatically: "every CT from the scanner goes to the reporting workstation too".
+//! sent on automatically: "every CT from the scanner goes to the reporting workstation too", and/or
+//! announced by email: "tell the radiologist when a CT from Riverside arrives, or one labelled urgent".
 //!
 //! How it works: every 15 seconds the portal reads Orthanc's list of changes (`GET /changes`) from
 //! where it stopped last time (the position is kept in the database, so a restart misses nothing and
 //! repeats nothing). A study is looked at when Orthanc says it is **stable** (no new image for a
 //! while, Orthanc's `StableAge`): it is complete by then. Each matching rule starts an ordinary
 //! transfer, shown on the Transfers page as sent by "auto: <rule>", and written in the audit log.
+//! A rule with addresses to notify emails them, once per study (a study that becomes stable again
+//! is not announced twice). The email never names the patient.
 //!
 //! Switching the feature on starts from the CURRENT end of the list: studies that arrived while it
 //! was off are not sent all at once. A study that gets more images later becomes stable again and is
 //! sent again, as Orthanc's own routing scripts do (the destination stores each image once).
 
 use crate::error::AppError;
+use crate::mailer::{self, RuleNotice};
 use crate::routes::send::{find_destination, start_send};
 use crate::settings::ForwardRule;
 use crate::state::AppState;
@@ -35,10 +39,11 @@ struct Status {
     last_error: Option<String>,
     forwarded: u64,
     last_forward: Option<Value>,
+    notified: u64,
 }
 
 static STATUS: Mutex<Status> =
-    Mutex::new(Status { last_check: None, last_error: None, forwarded: 0, last_forward: None });
+    Mutex::new(Status { last_check: None, last_error: None, forwarded: 0, last_forward: None, notified: 0 });
 
 fn status_lock() -> std::sync::MutexGuard<'static, Status> {
     STATUS.lock().unwrap_or_else(|e| e.into_inner())
@@ -52,6 +57,7 @@ pub fn status() -> Value {
         "last_error": s.last_error,
         "forwarded": s.forwarded,
         "last_forward": s.last_forward,
+        "notified": s.notified,
     })
 }
 
@@ -117,6 +123,11 @@ pub struct StudyFacts {
     pub description: String,
     /// The AE title of the system that sent it to Orthanc (empty when unknown).
     pub calling_aet: String,
+    pub labels: Vec<String>,
+    // For the emails only.
+    pub date: String,
+    pub accession: String,
+    pub uid: String,
 }
 
 async fn facts(state: &AppState, id: &str, need_aet: bool) -> Result<StudyFacts, AppError> {
@@ -144,11 +155,19 @@ async fn facts(state: &AppState, id: &str, need_aet: bool) -> Result<StudyFacts,
                 .to_string();
         }
     }
+    let tag = |name: &str| study["MainDicomTags"][name].as_str().unwrap_or_default().to_string();
     Ok(StudyFacts {
         modalities,
-        institution: study["MainDicomTags"]["InstitutionName"].as_str().unwrap_or_default().to_string(),
-        description: study["MainDicomTags"]["StudyDescription"].as_str().unwrap_or_default().to_string(),
+        institution: tag("InstitutionName"),
+        description: tag("StudyDescription"),
         calling_aet,
+        labels: study["Labels"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|l| l.as_str().map(str::to_string)).collect())
+            .unwrap_or_default(),
+        date: tag("StudyDate"),
+        accession: tag("AccessionNumber"),
+        uid: tag("StudyInstanceUID"),
     })
 }
 
@@ -189,10 +208,12 @@ pub fn matches(rule: &ForwardRule, study: &StudyFacts) -> bool {
         && (rule.calling_aet.is_empty() || wildcard(&rule.calling_aet, &study.calling_aet))
         && (rule.institution.is_empty() || contains(&study.institution, &rule.institution))
         && (rule.description.is_empty() || contains(&study.description, &rule.description))
+        && (rule.labels.is_empty() || study.labels.iter().any(|l| rule.labels.contains(l)))
 }
 
 async fn forward_study(state: &AppState, rules: &[ForwardRule], id: &str) {
-    let need_aet = rules.iter().any(|r| !r.calling_aet.is_empty());
+    // The sender is one more question to Orthanc: only when a rule looks at it or tells it.
+    let need_aet = rules.iter().any(|r| !r.calling_aet.is_empty() || !r.notify.is_empty());
     let study = match facts(state, id, need_aet).await {
         Ok(study) => study,
         Err(AppError::NotFound) => return, // deleted meanwhile
@@ -202,6 +223,12 @@ async fn forward_study(state: &AppState, rules: &[ForwardRule], id: &str) {
         }
     };
     for rule in rules.iter().filter(|r| matches(r, &study)) {
+        if !rule.notify.is_empty() {
+            notify(state, rule, id, &study);
+        }
+        if rule.target.is_empty() {
+            continue; // a rule that only notifies
+        }
         let who = format!("auto: {}", rule.name);
         let outcome = async {
             let node = find_destination(state, &rule.target).await?;
@@ -222,6 +249,54 @@ async fn forward_study(state: &AppState, rules: &[ForwardRule], id: &str) {
     }
 }
 
+/// Emails the rule's addresses about the study, once per study and rule, in the background (the
+/// rounds never wait for the mail server). Written in the audit log either way.
+fn notify(state: &AppState, rule: &ForwardRule, id: &str, study: &StudyFacts) {
+    let who = format!("auto: {}", rule.name);
+    match state.db.first_rule_notice(&rule.name, id, now_unix()) {
+        Ok(true) => {}
+        Ok(false) => return, // already announced
+        Err(e) => {
+            tracing::warn!("auto-forward '{}': {e}", rule.name);
+            return;
+        }
+    }
+    let settings = state.settings.get();
+    let base = settings.public_base_url.trim_end_matches('/');
+    let link = (!base.is_empty() && !study.uid.is_empty()).then(|| format!("{base}/?study_uid={}", study.uid));
+    let (subject, body) = RuleNotice {
+        portal: &settings.portal_name,
+        rule: &rule.name,
+        modalities: &study.modalities,
+        institution: &study.institution,
+        description: &study.description,
+        date: &study.date,
+        accession: &study.accession,
+        calling_aet: &study.calling_aet,
+        labels: &study.labels,
+        link,
+        lang: settings.language,
+    }
+    .email();
+    let (state, to, id) = (state.clone(), rule.notify.clone(), id.to_string());
+    tokio::spawn(async move {
+        let outcome = match mailer::parse_recipients(&to) {
+            Ok(mailboxes) => mailer::send(&settings, mailboxes, &subject, &body).await,
+            Err(e) => Err(e),
+        };
+        match outcome {
+            Ok(()) => {
+                status_lock().notified += 1;
+                state.db.audit(&who, "auto_notified", &format!("{id} -> {to}"));
+            }
+            Err(e) => {
+                tracing::warn!("{who}: the email about study {id} could not be sent: {e}");
+                state.db.audit(&who, "auto_notify_failed", &format!("{id} -> {to}: {e}"));
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,7 +309,9 @@ mod tests {
             calling_aet: String::new(),
             institution: String::new(),
             description: String::new(),
+            labels: vec![],
             target: "ris".into(),
+            notify: String::new(),
         }
     }
 
@@ -250,6 +327,8 @@ mod tests {
             institution: "Riverside Vets".into(),
             description: "CT CHEST".into(),
             calling_aet: "SCANNER1".into(),
+            labels: vec!["urgent".into()],
+            ..Default::default()
         };
         let with = |f: fn(&mut ForwardRule)| {
             let mut r = rule();
@@ -268,6 +347,8 @@ mod tests {
             r.modalities = vec!["CT".into()];
             r.description = "knee".into();
         }));
+        assert!(with(|r| r.labels = vec!["teaching".into(), "urgent".into()]));
+        assert!(!with(|r| r.labels = vec!["teaching".into()]));
     }
 
     #[test]

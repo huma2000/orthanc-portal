@@ -3702,7 +3702,7 @@ const SETTINGS_FIELDS = {
     { key: "bind_addr", label: "Intranet address (the whole portal)", placeholder: "0.0.0.0:8080", hint: "IP:PORT. 0.0.0.0 = every network card." },
     { key: "remote_enabled", label: "Enable the internet listener (share links only)", type: "checkbox", wide: true },
     { key: "remote_bind_addr", label: "Internet address (share links only)", placeholder: "0.0.0.0:8081", hint: "Point the Cloudflare Tunnel here. Only invitation links work through it: there are no accounts and no search on this side." },
-    { key: "public_base_url", label: "Public address for Weasis (optional)", placeholder: "https://pacs.example.com", hint: "Empty = automatic: the address you used to open the portal. (Weasis is for staff on the intranet; guests only get the browser viewer.)" },
+    { key: "public_base_url", label: "Public address of the portal (optional)", placeholder: "https://pacs.example.com", hint: "The address staff use to open the portal: given to Weasis, and used for the links in the auto-forward emails. Empty = automatic for Weasis (the address you used to open the portal) and no link in the emails. (Weasis is for staff on the intranet; guests only get the browser viewer.)" },
   ],
   email: [
     { key: "smtp_host", label: "Mail server", placeholder: "smtp.example.com", hint: "Your practice's outgoing mail server (SMTP). Empty = the portal sends no email." },
@@ -3806,7 +3806,7 @@ const SETTINGS_FIELDS = {
   ],
   forward: [
     { key: "forward_enabled", label: "Apply the rules below", type: "checkbox", wide: true,
-      hint: "Every study that arrives and matches a rule is sent on as soon as Orthanc considers it complete (no new image for a while: Orthanc's StableAge). Switching it on starts from now: studies that arrived before are not sent." },
+      hint: "Every study that arrives and matches a rule is sent on (or announced) as soon as Orthanc considers it complete (no new image for a while: Orthanc's StableAge). Switching it on starts from now: studies that arrived before are not sent." },
   ],
   backups: [
     { key: "backups_enabled", label: "Backups (automatic ones, Back up now, Download a copy)", type: "checkbox", wide: true,
@@ -4451,7 +4451,7 @@ function buildSettingsView() {
       section("email", "Email (sending share invitations)", "The Share windows can send the invitation by email (optional, for each link) when a mail server is set here. The emails are plain text; the password is included only when the staff member ticks it.",
         emailFields, testMailField),
       section("security", "Sessions and sign-in security", null, SETTINGS_FIELDS.security.map(field)),
-      section("forward", "Auto-forward", "Send the studies that arrive on to another system automatically, for example every CT from the scanner to the reporting workstation. A rule matches when every condition filled in holds; empty conditions match everything. The transfers appear on the Transfers page as \"auto: <rule>\".",
+      section("forward", "Auto-forward", "Send the studies that arrive on to another system automatically, for example every CT from the scanner to the reporting workstation, or be told by email, for example when a CT from a given centre or a study labelled urgent arrives. A rule matches when every condition filled in holds; empty conditions match everything. The transfers appear on the Transfers page as \"auto: <rule>\".",
         SETTINGS_FIELDS.forward.map(field), forwardEditor.node, forwardStatus(doc.forward)),
       section("backups", "Backups of the portal's database", "Users, settings, the audit log and the links (the images are in Orthanc, which has its own backups). A copy is written to the folder every few hours; you can also make one now or download one. To restore: stop the portal, put the copy in place of the database file, start it again.",
         SETTINGS_FIELDS.backups.map(field), buildBackupsPanel()),
@@ -5355,13 +5355,13 @@ function buildSystemView() {
  * and its destination. `destinations` = the places studies can be sent to. `get()` = the rules.
  */
 function buildForwardRulesEditor(rules, destinations) {
-  const clone = (list) => list.map((r) => ({ ...r, modalities: (r.modalities || []).join(", ") }));
+  const clone = (list) => list.map((r) => ({ ...r, modalities: (r.modalities || []).join(", "), labels: (r.labels || []).join(", ") }));
   let rows = clone(rules);
   const list = h("div", { class: "forward-rules" });
   const destinationSelect = (row) => {
     const known = destinations.some((d) => d.id === row.target);
     return h("select", { "aria-label": "Destination", onchange: (e) => { row.target = e.target.value; } },
-      h("option", { value: "", selected: !row.target }, "Choose the destination"),
+      h("option", { value: "", selected: !row.target }, "Do not send it (only notify)"),
       !known && row.target ? h("option", { value: row.target, selected: true }, t("{name} (not found in Orthanc)", { name: row.target })) : null,
       destinations.map((d) => h("option", { value: d.id, selected: d.id === row.target }, d.description ? `${d.description}: ${d.id}` : d.id)));
   };
@@ -5379,18 +5379,22 @@ function buildForwardRulesEditor(rules, destinations) {
         h("label", null, "Sent by (calling AE title)", text(row, "calling_aet", "SCANNER1 or SCAN* (empty = any)", "Calling AE title", 16)),
         h("label", null, "Institution contains", text(row, "institution", "(empty = any)", "Institution")),
         h("label", null, "Description contains", text(row, "description", "(empty = any)", "Description")),
-        h("label", null, "Send to", destinationSelect(row)))))
+        h("label", null, "Has a label (any of)", text(row, "labels", "urgent, teaching (empty = any)", "Labels", 400)),
+        h("label", null, "Send to", destinationSelect(row)),
+        h("label", null, "Notify by email", text(row, "notify", "a@example.org, b@example.org (empty = nobody)", "Notify by email", 1000)))))
       : [h("p", { class: "muted" }, "No rule yet.")]));
   }
   draw();
   return {
     node: h("div", { class: "wide" }, list,
       h("div", { class: "filter-actions" },
-        h("button", { class: "btn small", type: "button", onclick: () => { rows.push({ name: "", enabled: true, modalities: "", calling_aet: "", institution: "", description: "", target: "" }); draw(); } }, "Add rule"))),
+        h("button", { class: "btn small", type: "button", onclick: () => { rows.push({ name: "", enabled: true, modalities: "", calling_aet: "", institution: "", description: "", labels: "", target: "", notify: "" }); draw(); } }, "Add rule")),
+      h("p", { class: "hint" }, "A rule sends the study on, emails the addresses given, or both. The email goes out once per study, through the mail server of Settings > Email, and never names the patient: it gives the modalities, institution, description, date and accession number, and a link to the study when the portal's public address is set (Settings > Network & sharing). Labels are those the study has when it is complete: a label put on later does not count.")),
     get: () => rows.map((r) => ({
       name: (r.name || "").trim(), enabled: r.enabled !== false, target: r.target || "",
       modalities: String(r.modalities || "").split(/[\s,;]+/).map((c) => c.toUpperCase()).filter(Boolean),
       calling_aet: (r.calling_aet || "").trim(), institution: (r.institution || "").trim(), description: (r.description || "").trim(),
+      labels: String(r.labels || "").split(/[\s,;]+/).filter(Boolean), notify: (r.notify || "").trim(),
     })),
   };
 }
@@ -5401,6 +5405,7 @@ function forwardStatus(status) {
   const lines = [];
   if (status.last_check) lines.push(t("Last look at Orthanc's new studies: {date}.", { date: formatTimestamp(status.last_check) }));
   lines.push(t("Studies sent by the rules since the portal started: {n}.", { n: status.forwarded || 0 }));
+  if (status.notified) lines.push(t("Emails sent by the rules since the portal started: {n}.", { n: status.notified }));
   if (status.last_forward) lines.push(t("Last one: {date}, rule \"{rule}\".", { date: formatTimestamp(status.last_forward.ts), rule: status.last_forward.rule }));
   return h("div", { class: "setting wide" },
     h("ul", { class: "listener-status" }, lines.map((l) => h("li", null, l))),

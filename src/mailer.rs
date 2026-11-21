@@ -422,6 +422,74 @@ pub fn send_in_background(settings: std::sync::Arc<Settings>, to: String, subjec
     });
 }
 
+/// What a rule's email says about the study. Never the patient: emails travel through mail
+/// servers the practice does not control.
+pub struct RuleNotice<'a> {
+    pub portal: &'a str,
+    pub rule: &'a str,
+    pub modalities: &'a [String],
+    pub institution: &'a str,
+    pub description: &'a str,
+    /// `YYYYMMDD` as stored in DICOM.
+    pub date: &'a str,
+    pub accession: &'a str,
+    pub calling_aet: &'a str,
+    pub labels: &'a [String],
+    /// The study in the staff portal, when its address is known (Settings > `public_base_url`).
+    pub link: Option<String>,
+    pub lang: Language,
+}
+
+impl RuleNotice<'_> {
+    /// (subject, body).
+    pub fn email(&self) -> (String, String) {
+        // DICOM texts go in the subject too: no line breaks or other control characters.
+        let clean = |s: &str| s.chars().filter(|c| !c.is_control()).collect::<String>().trim().to_string();
+        let date = match self.date.len() {
+            8 if self.date.is_ascii() => format!("{}-{}-{}", &self.date[..4], &self.date[4..6], &self.date[6..]),
+            _ => clean(self.date),
+        };
+        let modalities = self.modalities.join(", ");
+        let es = matches!(self.lang, Language::Es);
+        let rows = [
+            (if es { "Modalidades" } else { "Modalities" }, modalities.clone()),
+            (if es { "Centro" } else { "Institution" }, clean(self.institution)),
+            (if es { "Descripción" } else { "Description" }, clean(self.description)),
+            (if es { "Fecha del estudio" } else { "Study date" }, date),
+            (if es { "Número de acceso" } else { "Accession number" }, clean(self.accession)),
+            (if es { "Enviado por" } else { "Sent by" }, clean(self.calling_aet)),
+            (if es { "Etiquetas" } else { "Labels" }, self.labels.join(", ")),
+        ];
+        let facts: String = rows.iter().filter(|(_, v)| !v.is_empty()).map(|(k, v)| format!("{k}: {v}\n")).collect();
+        let what: Vec<String> = [modalities, clean(self.institution)].into_iter().filter(|s| !s.is_empty()).collect();
+        let what = if what.is_empty() { String::new() } else { format!(" ({})", what.join(", ")) };
+        let (rule, portal) = (clean(self.rule), self.portal);
+        if es {
+            let open = match &self.link {
+                Some(link) => format!("Ábralo en el portal: {link}"),
+                None => "Búsquelo en el portal (por ejemplo por su número de acceso).".to_string(),
+            };
+            (
+                format!("{portal}: nuevo estudio para la regla «{rule}»{what}"),
+                format!(
+                    "Ha llegado un estudio que cumple la regla «{rule}».\n\n{facts}\n{open}\n\nRecibe este correo porque un administrador añadió su dirección a la regla «{rule}» (Ajustes > Reenvío automático). Este correo no nombra al paciente a propósito.\n"
+                ),
+            )
+        } else {
+            let open = match &self.link {
+                Some(link) => format!("Open it in the portal: {link}"),
+                None => "Find it in the portal (by its accession number, for example).".to_string(),
+            };
+            (
+                format!("{portal}: new study for the rule \"{rule}\"{what}"),
+                format!(
+                    "A study that matches the rule \"{rule}\" has arrived.\n\n{facts}\n{open}\n\nYou receive this email because an administrator added your address to the rule \"{rule}\" (Settings > Auto-forward). This email names no patient on purpose.\n"
+                ),
+            )
+        }
+    }
+}
+
 /// The test email of Settings > Email: (subject, body).
 pub fn test_email(portal: &str, admin: &str, lang: Language) -> (String, String) {
     match lang {

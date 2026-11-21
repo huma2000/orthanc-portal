@@ -72,7 +72,7 @@ the section in brackets has the details.
   page follows each one (progress, images, time left, outcome).
 * **Query / retrieve** from other DICOM nodes or DICOMweb servers *(switch)*.
 * **Auto-forward rules**: studies that arrive and match (modality, sending AE title, institution,
-  description) are sent on automatically *(switch)*.
+  description, labels) are sent on automatically and/or **announced by email** *(switch)*.
 * **Modality worklists**: see, create, change and delete *(switch)*.
 
 **Changing the archive** (section 9b, each *(switch)* and its own permission)
@@ -634,7 +634,7 @@ weasis://$dicom:rs --url "http://10.0.0.5:8080/dicom-web" -r "studyUID=1.2.840..
 ```
 
 Weasis then reads `/dicom-web/...` on the portal with that token. The address inside the link is the one the
-user is currently using (or *Settings > Network > Public address for Weasis*). It opens the **whole study**.
+user is currently using (or *Settings > Network > Public address of the portal*). It opens the **whole study**.
 Weasis saves the images on the workstation, which is why it is **never** offered to guests: its link route does
 not exist on the internet listener, and a Weasis token is ignored there.
 
@@ -881,11 +881,19 @@ for a time, a total size (default and maximum in Settings) and an Orthanc **labe
 
 *Settings > Auto-forward*: rules such as "every CT sent by `SCAN*` goes to the reporting workstation". Conditions
 (all optional): modalities (any of; `RX` = CR + DX), the calling AE title (`*` / `?` wildcards), text in the
-institution or the study description; the destination is any *Send to...* destination (DICOM node, Orthanc peer,
-DICOMweb server). The portal reads Orthanc's `/changes` every 15 seconds and forwards a study when Orthanc
+institution or the study description, labels (any of: those the study has when it is complete). A rule **sends the
+study on**, **emails** a list of addresses (*Notify by email*, up to 10), or both. The destination is any *Send
+to...* destination (DICOM node, Orthanc peer, DICOMweb server). The portal reads Orthanc's `/changes` every 15 seconds and forwards a study when Orthanc
 reports it **stable** (Orthanc's `StableAge`). Its position is kept in the database: a restart repeats nothing and
 misses nothing; switching the rules on starts from that moment. Each transfer appears on the Transfers page as
 sent by `auto: <rule>`. A study that receives more images later becomes stable again and is sent again.
+
+The email ("CT from Riverside", "a study labelled `urgent`") goes through the mail server of *Settings > Email*,
+**once per study and rule** (a study that becomes stable again is not announced twice), in the portal's language.
+Like the link notices it **never names the patient**: it gives the modalities, institution, description, study
+date, accession number, sending AE title and labels, and a link to the study (`/?study_uid=...`) when *Public
+address of the portal* is set (*Settings > Network & sharing*). Each email is in the audit log (`auto_notified`,
+or `auto_notify_failed` with the mail server's answer).
 
 ### Patient CD / USB export
 
@@ -1150,7 +1158,7 @@ The code compiles without warnings on Rust 1.91, passes `cargo clippy --all-targ
 formatted with `rustfmt` (see `rustfmt.toml`), and its dependencies were checked against the RustSec advisory
 database (no known vulnerable version in `Cargo.lock`). The automated tests live in the **`tests/`** folder:
 
-* `tests/feature_tests.sh`: **183 checks** of the features of section 9c on a fresh portal: two-step sign-in
+* `tests/feature_tests.sh`: **195 checks** of the features of section 9c on a fresh portal: two-step sign-in
   (set-up, codes used once, recovery codes, required mode, reset), My account, link notifications (and that they
   never name the patient), anonymized copies (made, shown, deleted on revocation), whole-patient links, QR codes,
   upload links (password, nothing leaked, size limit, non-DICOM files, revocation), the patient CD export (with
@@ -1169,7 +1177,7 @@ database (no known vulnerable version in `Cargo.lock`). The automated tests live
   one, and when it refuses the portal** (what is sent, what is not, the message for each case), an
   administrator changing their own password (every other session of that account is signed out), and the
   portal in Spanish (the setting, the dictionary on both listeners, the pages and the invitation emails);
-* `tests/ui_tests.js`: **191 checks** of both web pages in a simulated browser (jsdom): the Share dialog and the
+* `tests/ui_tests.js`: **215 checks** of both web pages in a simulated browser (jsdom): the Share dialog and the
   Shares tab, the guest page (password, study, series, countdown, downloads left, expiry, revoked, 0-download
   links, no OHIF), what each kind of staff account sees, search, the with/without-account choice in Settings,
   and the translations (every `t()` text translated, the language menu, the portal's language, the server's

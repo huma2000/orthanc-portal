@@ -524,6 +524,15 @@ impl Db {
                  study_uid TEXT    NOT NULL,
                  ts        INTEGER NOT NULL,
                  PRIMARY KEY (user_id, study_id)
+             );
+
+             -- The emails the auto-forward rules sent: one per study and rule, even when the study
+             -- gets more images later and becomes stable again.
+             CREATE TABLE IF NOT EXISTS rule_notices (
+                 rule     TEXT    NOT NULL,
+                 study_id TEXT    NOT NULL,
+                 ts       INTEGER NOT NULL,
+                 PRIMARY KEY (rule, study_id)
              );",
         )?;
         add_missing_columns(
@@ -1073,6 +1082,17 @@ impl Db {
     // --------------------------------------------------------- recently viewed
 
     /// `user` looked at a study: it goes to the top of their list (which keeps [`RECENT_VIEWS_KEPT`]).
+    /// Notes that the rule `rule` emailed about `study_id`. `false` when it already had (the study
+    /// became stable again after more images): no second email. Forgotten after 90 days.
+    pub fn first_rule_notice(&self, rule: &str, study_id: &str, now: i64) -> Result<bool, AppError> {
+        let conn = self.lock();
+        conn.prepare_cached("DELETE FROM rule_notices WHERE ts < ?1")?.execute(params![now - 90 * 86_400])?;
+        let added = conn
+            .prepare_cached("INSERT OR IGNORE INTO rule_notices (rule, study_id, ts) VALUES (?1, ?2, ?3)")?
+            .execute(params![rule, study_id, now])?;
+        Ok(added == 1)
+    }
+
     pub fn note_view(&self, user: i64, study_id: &str, study_uid: &str, now: i64) -> Result<(), AppError> {
         let conn = self.lock();
         conn.prepare_cached(

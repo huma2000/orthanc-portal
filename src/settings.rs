@@ -247,8 +247,17 @@ pub struct ForwardRule {
     /// The study description contains this text (empty = any; case does not matter).
     #[serde(default)]
     pub description: String,
+    /// The study carries any of these labels when it becomes stable (empty = any).
+    #[serde(default)]
+    pub labels: Vec<String>,
     /// The destination: a DICOM node alias, `peer:<name>` or `dicomweb:<name>` (see routes/send.rs).
+    /// Empty = the study is not sent anywhere (a rule that only notifies).
+    #[serde(default)]
     pub target: String,
+    /// Email these addresses ("a@b.org, c@d.org") when a study matches: once per study and rule.
+    /// Empty = nobody. The email never names the patient.
+    #[serde(default)]
+    pub notify: String,
 }
 
 /// A named bundle of permissions, offered as a shortcut when editing a user.
@@ -1120,6 +1129,17 @@ impl Settings {
             rule.institution = rule.institution.trim().to_string();
             rule.description = rule.description.trim().to_string();
             rule.target = rule.target.trim().to_string();
+            rule.notify = match crate::mailer::parse_recipients(&rule.notify) {
+                Ok(to) => crate::mailer::addresses(&to),
+                Err(_) => rule.notify.trim().to_string(), // empty, or refused by validate()
+            };
+            let mut labels: Vec<String> = Vec::new();
+            for label in rule.labels.iter().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()) {
+                if !labels.contains(&label) {
+                    labels.push(label);
+                }
+            }
+            rule.labels = labels;
             let mut codes: Vec<String> = Vec::new();
             for code in rule.modalities.iter().map(|c| c.trim().to_uppercase()).filter(|c| !c.is_empty()) {
                 if !codes.contains(&code) {
@@ -1472,11 +1492,27 @@ impl Settings {
             if !(1..=60).contains(&rule.name.chars().count()) || has_control(&rule.name) {
                 return bad("Each forwarding rule needs a name of 1 to 60 characters".into());
             }
-            if rule.target.is_empty()
-                || rule.target.len() > 80
+            if rule.target.is_empty() && rule.notify.is_empty() {
+                return bad(format!(
+                    "The rule '{}' must send the study somewhere or notify somebody by email (or both)",
+                    rule.name
+                ));
+            }
+            if rule.target.len() > 80
                 || !rule.target.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
             {
                 return bad(format!("The forwarding rule '{}' needs a destination", rule.name));
+            }
+            if !rule.notify.is_empty() {
+                if let Err(e) = crate::mailer::parse_recipients(&rule.notify) {
+                    return bad(format!("The rule '{}': {e}", rule.name));
+                }
+            }
+            if rule.labels.len() > 20 || rule.labels.iter().any(|l| !crate::routes::labels::valid_label(l)) {
+                return bad(format!(
+                    "The labels of the rule '{}' are made of letters, digits, '-' or '_' (at most 20)",
+                    rule.name
+                ));
             }
             if rule.modalities.len() > 20
                 || rule.modalities.iter().any(|c| c.len() > 16 || !c.chars().all(|ch| ch.is_ascii_alphanumeric()))

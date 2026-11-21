@@ -339,7 +339,9 @@ ok "...a colour that is not #rrggbb is refused (400)" "$(put $A '{"label_colors"
 ok "...a label colour for an invalid label is refused (400)" "$(put $A '{"label_colors":{"no spaces":"#123456"}}' | tail -1)" "400"
 
 echo "== auto-forward rules"
-ok "a rule needs a destination (400)" "$(put $A '{"forward_rules":[{"name":"CT out","target":""}]}' | tail -1)" "400"
+ok "a rule must send the study somewhere or notify somebody (400)" "$(put $A '{"forward_rules":[{"name":"CT out","target":""}]}' | tail -1)" "400"
+ok "...an invalid address to notify is refused (400)" "$(put $A '{"forward_rules":[{"name":"Tell","notify":"not an address"}]}' | tail -1)" "400"
+ok "...and so is an invalid label (400)" "$(put $A '{"forward_rules":[{"name":"Tell","notify":"rad@example.org","labels":["no spaces"]}]}' | tail -1)" "400"
 ok "...and sane modality codes (400)" "$(put $A '{"forward_rules":[{"name":"CT out","target":"ris","modalities":["C*"]}]}' | tail -1)" "400"
 put $A '{"forward_enabled":true,"forward_rules":[{"name":"CT out","target":"ris","modalities":["ct"],"calling_aet":"SCAN*"},{"name":"MR only","target":"ris","modalities":["MR"]}]}' > /dev/null
 ok "the codes are tidied" "$(body $F $A /api/admin/settings | py "d['settings']['forward_rules'][0]['modalities']")" "['CT']"
@@ -359,6 +361,27 @@ curl -s -X POST -d "{\"ChangeType\":\"StableStudy\",\"ID\":\"$SID\",\"ResourceTy
 sleep 17
 ok "switched off: a new stable study is not sent" "$(( $(stores) - STORES_BEFORE ))" "0"
 ok "...and the rules are kept for later" "$(body $F $A /api/admin/settings | py "len(d['settings']['forward_rules'])")" "2"
+
+echo "== rules that notify by email (a CT from a given place, or with a given label)"
+put $A "{\"public_base_url\":\"https://pacs.example.org/\",\"forward_enabled\":true,\"forward_rules\":[{\"name\":\"Teaching CT\",\"modalities\":[\"CT\"],\"institution\":\"riverside\",\"labels\":[\"teaching\",\"urgent\"],\"notify\":\"Dr Rad <rad@example.org>; second@example.org\"},{\"name\":\"Never\",\"labels\":[\"no-such-label\"],\"notify\":\"x@example.org\"}]}" > /dev/null
+ok "the addresses are tidied, a rule that only notifies has no destination" "$(body $F $A /api/admin/settings | py "(d['settings']['forward_rules'][0]['notify'], d['settings']['forward_rules'][0]['target'])")" "('rad@example.org, second@example.org', '')"
+for i in $(seq 1 40); do [ -n "$(sqlval "select value from settings where key='value:forward_seq'" 2>/dev/null)" ] && break; sleep 0.5; done
+MAILS=$(mailcount); STORES_BEFORE=$(stores)
+curl -s -X POST -d "{\"ChangeType\":\"StableStudy\",\"ID\":\"$SID\",\"ResourceType\":\"Study\"}" http://127.0.0.1:18042/__mock/change > /dev/null
+for i in $(seq 1 40); do [ "$(mailcount)" -gt "$MAILS" ] && break; sleep 0.5; done
+ok "a CT from Riverside with the label teaching is announced by email (by the matching rule only)" "$(( $(mailcount) - MAILS ))" "1"
+OUT=$(lastmail)
+has "...the subject names the rule, the modalities and the place" "$OUT" 'new study for the rule "Teaching CT" (CT, SR, Riverside Vets)'
+has "...the body has the accession number and the labels" "$OUT" "Accession number: ACC1"
+has "...and links to the study in the portal" "$OUT" "https://pacs.example.org/?study_uid=$UID_"
+ok "...but never names the patient" "$(echo "$OUT" | grep -c -e DOE -e P-001)" "0"
+ok "...nothing is sent to a DICOM node by a rule that only notifies" "$(( $(stores) - STORES_BEFORE ))" "0"
+ok "...written in the audit log" "$(body $F $A '/api/admin/audit?limit=50' | py "[e['username'] for e in d['entries'] if e['action']=='auto_notified'][0]")" "auto: Teaching CT"
+ok "...and counted on the Settings screen" "$(body $F $A /api/admin/settings | py "d['forward']['notified']")" "1"
+curl -s -X POST -d "{\"ChangeType\":\"StableStudy\",\"ID\":\"$SID\",\"ResourceType\":\"Study\"}" http://127.0.0.1:18042/__mock/change > /dev/null
+sleep 17
+ok "the same study becoming stable again (more images) is not announced twice" "$(( $(mailcount) - MAILS ))" "1"
+put $A '{"forward_enabled":false,"public_base_url":""}' > /dev/null
 
 echo; echo "RESULT: $PASS passed, $FAIL failed$([ "$SKIP" -gt 0 ] && echo ", $SKIP skipped")"
 stack_stop

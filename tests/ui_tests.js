@@ -729,6 +729,9 @@ async function newLink(admin, body) {
   st.click(st.$$(".subtabs [role=tab]").find((b) => b.textContent === "Auto-forward")); await sleep(300);
   st.click(st.button(st.section("Auto-forward"), "Add rule"));
   check("Auto-forward: a rule row with the destinations of Orthanc", st.$$(".forward-rule select option").some((o) => o.value === "ris"));
+  check("...a label condition, addresses to notify, and no destination needed (only notify)",
+    !!st.$(".forward-rule input[aria-label=Labels]") && !!st.$(".forward-rule input[aria-label='Notify by email']")
+      && st.$$(".forward-rule select option").some((o) => o.value === "" && o.textContent === "Do not send it (only notify)"));
   await st.tab("Studies"); await until(() => st.$("tr.study"), 6000);
   st.click(st.button(st.$("tr.study"), "Share..."));
   const mailOn = (await (await st.call("GET", "/api/me")).json()).features.share.notify;
