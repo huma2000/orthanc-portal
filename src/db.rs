@@ -733,6 +733,20 @@ impl Db {
         Ok(())
     }
 
+    /// Gives several accounts new permissions and role (a role edited in Settings), all or none.
+    pub fn set_users_role_permissions(&self, changes: &[(i64, &str, &PermissionSet)]) -> Result<(), AppError> {
+        let conn = self.lock();
+        let tx = conn.unchecked_transaction()?;
+        for (id, role, permissions) in changes {
+            tx.execute(
+                "UPDATE users SET permissions = ?1, role = ?2 WHERE id = ?3",
+                params![permissions.to_db_string(), role, id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn delete_user(&self, id: i64) -> Result<(), AppError> {
         let conn = self.lock();
         conn.prepare_cached("DELETE FROM users WHERE id = ?1")?.execute(params![id])?;

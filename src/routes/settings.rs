@@ -22,9 +22,10 @@
 //!   one is released); if that fails nothing is saved and the reason is shown.
 
 use crate::auth::AuthUser;
+use crate::db::User;
 use crate::error::{AppError, AppResult};
 use crate::orthanc::{Diagnosis, OrthancClient};
-use crate::permissions::Permission;
+use crate::permissions::{Permission, PermissionSet};
 use crate::settings::{default_modality_buttons, default_roles, Settings};
 use crate::state::AppState;
 use crate::util::now_unix;
@@ -132,6 +133,12 @@ pub async fn update_settings(
         ));
     }
     let changed = old.changed_keys(&new);
+    // Users follow their role: work out who gets new permissions (and refuse a lock-out) now.
+    let role_changes = if changed.iter().any(|k| k == "roles") {
+        role_updates(&old, &new, &state.db.list_users()?, admin.id)?
+    } else {
+        Vec::new()
+    };
     if changed.is_empty() {
         let mut document = settings_document(&state).await;
         document["messages"] = json!(["Nothing was changed."]);
@@ -155,6 +162,40 @@ pub async fn update_settings(
             let _ = state.listeners.apply(&state, &old).await;
         }
         return Err(e);
+    }
+    // The users of the changed roles, in one transaction. If that fails, put everything back.
+    if !role_changes.is_empty() {
+        let rows: Vec<(i64, &str, &PermissionSet)> =
+            role_changes.iter().map(|u| (u.user_id, u.role.as_str(), &u.permissions)).collect();
+        if let Err(e) = state.db.set_users_role_permissions(&rows) {
+            if let Ok(previous) = serde_json::to_string(&*old) {
+                let _ = state.db.save_settings(&previous);
+            }
+            if listeners_changed {
+                let _ = state.listeners.apply(&state, &old).await;
+            }
+            return Err(e);
+        }
+        // Signed-in people are not signed out: permissions are read again on every request.
+        for role in new.roles.iter() {
+            let names: Vec<&str> =
+                role_changes.iter().filter(|u| u.role == role.key).map(|u| u.username.as_str()).collect();
+            if names.is_empty() {
+                continue;
+            }
+            state.db.audit(
+                &admin.username,
+                "role_applied_to_users",
+                &format!(
+                    "{} [{}] -> {}",
+                    role.key,
+                    PermissionSet::from_slice(&role.permissions).to_db_string(),
+                    names.join(", ")
+                ),
+            );
+            let (label, count, users) = (&role.label, names.len(), names.join(", "));
+            messages.push(format!("The new permissions of the role \"{label}\" were given to {count} user(s): {users}."));
+        }
     }
 
     // 4. Publish: from now on every request sees the new values.
@@ -411,4 +452,149 @@ pub async fn echo_node(
     }
     state.orthanc.echo_modality(&alias).await?;
     Ok(Json(json!({ "ok": true })))
+}
+
+// ------------------------------------------------------------ roles -> users
+
+/// An account that follows a role whose permissions were just changed.
+#[derive(Debug, PartialEq)]
+struct RoleUpdate {
+    user_id: i64,
+    username: String,
+    role: String,
+    permissions: PermissionSet,
+}
+
+/// Users follow their role: when a role's permissions change, every account with that role gets
+/// the new permissions. The role of an account is the one stored with it, or (older accounts,
+/// a deleted role) the role with exactly its permissions, as the Users list shows it.
+///
+/// Refused (nothing is saved) when the new permissions would leave no active administrator, or
+/// would take the administrator rights away from the person saving, as in the user form.
+fn role_updates(old: &Settings, new: &Settings, users: &[User], acting_admin: i64) -> AppResult<Vec<RoleUpdate>> {
+    // Roles that exist before and after with other permissions (a renamed key is a new role).
+    let changed: Vec<(&str, PermissionSet)> = new
+        .roles
+        .iter()
+        .filter_map(|r| {
+            let before = old.roles.iter().find(|o| o.key == r.key)?;
+            let after = PermissionSet::from_slice(&r.permissions);
+            (PermissionSet::from_slice(&before.permissions) != after).then_some((r.key.as_str(), after))
+        })
+        .collect();
+    if changed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut updates = Vec::new();
+    let (mut admins_after, mut admin_removed) = (0, false);
+    for user in users {
+        let role = old.role_of(&user.role, &user.permissions).map(|r| r.key.as_str());
+        let follow = changed.iter().find(|(key, _)| Some(*key) == role);
+        let after = follow.map_or(&user.permissions, |(_, p)| p);
+        let loses_admin = user.permissions.contains(Permission::Admin) && !after.contains(Permission::Admin);
+        if user.active && after.contains(Permission::Admin) {
+            admins_after += 1;
+        }
+        if let Some((key, permissions)) = follow {
+            if loses_admin && user.active {
+                if user.id == acting_admin {
+                    return Err(AppError::Conflict(format!(
+                        "You cannot remove the administrator rights of your own account: you have the role \
+                         '{key}'. Give your account another role first (Users)."
+                    )));
+                }
+                admin_removed = true;
+            }
+            if *permissions != user.permissions || user.role != *key {
+                updates.push(RoleUpdate {
+                    user_id: user.id,
+                    username: user.username.clone(),
+                    role: key.to_string(),
+                    permissions: permissions.clone(),
+                });
+            }
+        }
+    }
+    if admin_removed && admins_after == 0 {
+        return Err(AppError::Conflict(
+            "At least one active administrator is required: these role changes would remove the last one".into(),
+        ));
+    }
+    Ok(updates)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::Role;
+
+    fn user(id: i64, role: &str, permissions: &[Permission]) -> User {
+        User {
+            id,
+            username: format!("user{id}"),
+            password_hash: String::new(),
+            permissions: PermissionSet::from_slice(permissions),
+            role: role.into(),
+            active: true,
+            created_at: 0,
+            last_login: None,
+            email: String::new(),
+            two_factor: false,
+            recovery_codes_left: 0,
+            totp_secret: None,
+            totp_pending: None,
+        }
+    }
+
+    fn with_role(settings: &Settings, key: &str, permissions: &[Permission]) -> Settings {
+        let mut s = settings.clone();
+        s.roles.iter_mut().find(|r| r.key == key).unwrap().permissions = permissions.to_vec();
+        s
+    }
+
+    const VIEWER: [Permission; 2] = [Permission::Read, Permission::Visualize];
+    const VIEWER_PLUS: [Permission; 3] = [Permission::Read, Permission::Visualize, Permission::Download];
+
+    #[test]
+    fn users_follow_their_role() {
+        let old = Settings::defaults();
+        let new = with_role(&old, "viewer", &VIEWER_PLUS);
+        let users = [
+            user(1, "administrator", &Permission::ALL),
+            user(2, "viewer", &VIEWER),         // stored role
+            user(3, "", &VIEWER),               // older account: found by its permissions
+            user(4, "", &[Permission::Read]),   // custom: untouched
+            user(5, "exporter", &[Permission::Read, Permission::Visualize, Permission::Download, Permission::Send, Permission::Share]),
+        ];
+        let updates = role_updates(&old, &new, &users, 1).unwrap();
+        let ids: Vec<i64> = updates.iter().map(|u| u.user_id).collect();
+        assert_eq!(ids, [2, 3]);
+        assert!(updates.iter().all(|u| u.role == "viewer" && u.permissions == PermissionSet::from_slice(&VIEWER_PLUS)));
+    }
+
+    #[test]
+    fn nothing_when_only_the_label_changes() {
+        let old = Settings::defaults();
+        let mut new = old.clone();
+        new.roles[0].label = "Readers".into();
+        new.roles.push(Role { key: "new".into(), label: "New".into(), permissions: VIEWER.to_vec() });
+        assert!(role_updates(&old, &new, &[user(2, "viewer", &VIEWER)], 1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn administrators_are_protected() {
+        let old = Settings::defaults();
+        let new = with_role(&old, "administrator", &VIEWER);
+        // Your own role: refused.
+        let users = [user(1, "administrator", &Permission::ALL), user(2, "", &[Permission::Admin, Permission::Read])];
+        assert!(matches!(role_updates(&old, &new, &users, 1), Err(AppError::Conflict(_))));
+        // Somebody else's, with another administrator left: allowed.
+        let users = [user(1, "", &[Permission::Admin, Permission::Read]), user(2, "administrator", &Permission::ALL)];
+        assert_eq!(role_updates(&old, &new, &users, 1).unwrap().len(), 1);
+        // The role of the only active administrator: refused (the other one is disabled).
+        let mut disabled = user(1, "", &[Permission::Admin, Permission::Read]);
+        disabled.active = false;
+        let users = [disabled, user(2, "administrator", &Permission::ALL)];
+        assert!(matches!(role_updates(&old, &new, &users, 1), Err(AppError::Conflict(_))));
+    }
 }

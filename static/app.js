@@ -2510,12 +2510,21 @@ function openUserDialog(user, meta, reload) {
   const checks = {};
   const permissionBoxes = meta.permissions.map((p) => {
     const box = h("input", { type: "checkbox", checked: user ? user.permissions.includes(p.key) : ["read", "visualize"].includes(p.key) });
+    // Users follow their role, so ticking by hand makes the account the role that matches, or Custom.
+    box.addEventListener("change", () => { preset.value = matchingRole(); });
     checks[p.key] = box;
     return h("label", null, box, h("span", null, p.key, h("small", null, p.description)));
   });
 
   // The role is saved with the account (shown in the users list). Choosing one ticks its permissions.
   const initialRole = user ? user.effective_role || "" : (meta.presets.some((p) => p.key === "viewer") ? "viewer" : "");
+  /** The role whose permissions are exactly the ticked ones: the current one first, else the first; "" = Custom. */
+  function matchingRole() {
+    const ticked = Object.keys(checks).filter((key) => checks[key].checked).sort().join(",");
+    const same = (p) => [...p.permissions].sort().join(",") === ticked;
+    const current = meta.presets.find((p) => p.key === preset.value);
+    return current && same(current) ? current.key : (meta.presets.find(same) || { key: "" }).key;
+  }
   const preset = h("select", {
     onchange: (event) => {
       const chosen = meta.presets.find((p) => p.key === event.target.value);
@@ -2563,7 +2572,7 @@ function openUserDialog(user, meta, reload) {
     h("label", null, "Email address", email),
     user && user.two_factor ? h("label", { class: "check" }, resetTwoFactor, "Reset the two-step sign-in (lost phone): the next sign-in needs only the password, or sets it up again if it is required") : null,
     h("label", null, "Role", preset),
-    h("p", { class: "hint" }, "Choosing a role ticks its permissions (you can still change them)."),
+    h("p", { class: "hint" }, "Choosing a role ticks its permissions. The user then follows the role: when the role is changed in Settings > Roles, this user changes too. Ticking other permissions by hand makes the account Custom."),
     h("fieldset", { class: "perm-list" }, h("legend", null, "Permissions"), permissionBoxes),
     isNew ? null : h("label", { class: "perm-list" }, h("span", null, active, " Account is active")),
     h("div", { class: "dialog-actions" },
@@ -4414,10 +4423,16 @@ function buildSettingsView() {
           // Viewer buttons, thumbnails and the "Share..." dialog follow the features: take the
           // server's fresh view of them (it also knows whether Orthanc has the OHIF plugin), so
           // what was just saved applies right away, without signing in again.
-          try { state.user.features = (await api("GET", "/api/me")).features; } catch { /* keep the old ones */ }
+          // A changed role can also change your own permissions (the menu and the buttons follow them).
+          let permissionsChanged = false;
+          try {
+            const me = await api("GET", "/api/me");
+            permissionsChanged = [...me.permissions].sort().join(",") !== [...state.user.permissions].sort().join(",");
+            if (permissionsChanged) state.user = me; else state.user.features = me.features;
+          } catch { /* keep the old ones */ }
           refreshOrthancStatus(true);
           toast(t("Settings saved."));
-          if (languageChanged) { renderApp(); return; } // everything in the new language
+          if (languageChanged || permissionsChanged) { renderApp(); return; } // everything in the new language / menu
           draw(doc.messages || []);
         } catch (e) {
           toastError(e);
@@ -4468,7 +4483,7 @@ function buildSettingsView() {
         SETTINGS_FIELDS.forward.map(field), forwardEditor.node, forwardStatus(doc.forward)),
       section("backups", "Backups of the portal's database", "Users, settings, the audit log and the links (the images are in Orthanc, which has its own backups). A copy is written to the folder every few hours; you can also make one now or download one. To restore: stop the portal, put the copy in place of the database file, start it again.",
         SETTINGS_FIELDS.backups.map(field), buildBackupsPanel()),
-      section("roles", "Roles", "Shortcuts that pre-tick permissions when you create or edit a user (Users tab). Users keep their own permissions: changing a role does not change existing users.", rolesEditor.node),
+      section("roles", "Roles", "Bundles of permissions given to users (Users tab). Users follow their role: changing a role's permissions here changes the permissions of every user with that role when you save (signed-in people too, without signing them out). Users with \"Custom\" permissions are not changed.", rolesEditor.node),
       h("div", { class: "settings-actions" },
         save,
         h("span", { class: "muted" }, "Saves the General, Appearance, Search & labels, Features, Orthanc, Network & sharing and Security & roles, Auto-forward and Backups tabs together.")));

@@ -115,6 +115,23 @@ ok "an unknown role is refused (400)" "$(code $F $A PUT /api/admin/users/$VID -H
 code $F $A PUT /api/admin/users/$VID -H "$J" -d '{"role":"contributor"}' > /dev/null
 ok "the role saved with the account wins over the permissions" "$(body $F $A /api/admin/users | py "[u['effective_role'] for u in d['users'] if u['username']=='viewer1'][0]")" "contributor"
 code $F $A PUT /api/admin/users/$VID -H "$J" -d '{"role":""}' > /dev/null
+echo "== users follow their role (Settings > Roles)"
+ROLES=$(body $F $A /api/admin/settings | py "json.dumps(d['settings']['roles'])")
+role_patch() { echo "$ROLES" | python3 -c "import sys,json;r=json.load(sys.stdin);[x.update(permissions=$2) for x in r if x['key']=='$1'];print(json.dumps({'roles':r}))"; }
+perms_of() { body $F $A /api/admin/users | py "','.join(sorted([u['permissions'] for u in d['users'] if u['username']=='$1'][0]))"; }
+OUT=$(put $A "$(role_patch viewer "['read','visualize','download']")")
+ok "a role's permissions are changed" "$(echo "$OUT" | tail -1)" "200"
+has "...and the answer names the users that follow it" "$OUT" "viewer1"
+ok "a user of that role (found by its permissions) gets the new permissions" "$(perms_of viewer1)" "download,read,visualize"
+ok "...and is now linked to the role" "$(body $F $A /api/admin/users | py "[u['role'] for u in d['users'] if u['username']=='viewer1'][0]")" "viewer"
+ok "...at once, in the session that was already open" "$(body $F $V /api/me | py "'download' in d['permissions']")" "True"
+ok "a user with custom permissions is not changed" "$(perms_of reader)" "read"
+has "the audit log says so" "$(body $F $A '/api/admin/audit?limit=20')" "role_applied_to_users"
+put $A "{\"roles\":$ROLES}" > /dev/null
+ok "the role back as it was: the user follows again" "$(perms_of viewer1)" "read,visualize"
+ok "taking the admin right away from your own role is refused (409)" "$(put $A "$(role_patch administrator "['read','visualize']")" | tail -1)" "409"
+ok "...and nothing changed" "$(perms_of admin | tr ',' '\n' | grep -c '^admin$')" "1"
+code $F $A PUT /api/admin/users/$VID -H "$J" -d '{"role":""}' > /dev/null
 mkuser uponly UploadOnlyPass123 '"upload"'
 UP=$(login $F uponly UploadOnlyPass123)
 ok "total number of studies (from Orthanc's statistics)" "$(body $F $V /api/stats | py "d['studies']")" "1"
