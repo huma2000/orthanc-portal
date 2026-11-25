@@ -320,7 +320,7 @@ screens whose changes apply at once.
 | **Orthanc > Orthanc connection** | Address; **with an account** (user name + password, write-only: never sent back to the browser) **or without an account** (for an Orthanc that only accepts a list of allowed computers); **Test connection** (mode used, version, DICOMweb/OHIF plugins, number of DICOM nodes; works on values you have typed but not yet saved); the optional **folder of Orthanc's log files**, for the System page |
 | **Network & sharing > Network** | Intranet address, enable/disable the internet listener (invitation links only) and its address, optional fixed public address for Weasis |
 | **Network & sharing > Share links** | **The public address of the share links** (your Cloudflare hostname; sharing stays off until it is set), the default and maximum validity (hours) and the default and maximum number of ZIP downloads |
-| **Network & sharing > Email** | The mail server that sends share invitations (optional): server, port, encryption (STARTTLS / TLS / none), user name and password (write-only), sender address, a text added at the end of every email, and **Send a test email** |
+| **Network & sharing > Email** | The mail server that sends share invitations (optional): server, port, encryption (STARTTLS / TLS / none), sign-in with a user name and password (write-only) or **Microsoft 365 OAuth 2.0** (tenant, client ID, client secret: write-only), sender address, a text added at the end of every email, and **Send a test email** |
 | **Security & roles > Sessions and sign-in security** | Session length, Weasis link validity, failed sign-ins before lockout, lockout length, secure-cookie mode, how long to keep the audit log (0 = forever) |
 | **Security & roles > Roles** | The role shortcuts offered in the user form (add, rename, change permissions, restore defaults) |
 | **Users** | Accounts, permissions, enable/disable, password reset |
@@ -692,6 +692,39 @@ read the email could otherwise open the study). The addresses are checked before
 changed; if the mail server then fails, the link is kept and the window says why the email was not sent. Every
 email is recorded in the audit log (`share_emailed`, with or without the password). Without a mail server
 nothing is ever sent and the windows say how to set one up.
+
+**Email through Microsoft 365 (OAuth 2.0).** Microsoft 365 / Exchange Online no longer accepts a user name and
+password for sending mail (SMTP), so the portal signs in with **OAuth 2.0** instead: an app registered in your
+Microsoft Entra ID gets a token with its client secret (no person signs in) and sends as one mailbox, with the
+`SMTP.SendAsApp` permission. Set it up once (a Microsoft 365 administrator):
+
+1. **Microsoft Entra admin center > App registrations > New registration**: a name (e.g. *Orthanc Portal*),
+   *Accounts in this organizational directory only*, no redirect address. On its **Overview**, note the
+   **Application (client) ID** and the **Directory (tenant) ID**.
+2. **API permissions > Add a permission > APIs my organization uses > Office 365 Exchange Online >
+   Application permissions > `SMTP.SendAsApp`**, then **Grant admin consent**.
+3. **Certificates & secrets > New client secret**: copy its **Value** (shown once; not the *Secret ID*). Secrets
+   expire (at most 24 months): put the new one in the portal before the old one ends.
+4. Let the app use the mailbox, in **Exchange Online PowerShell**. `<object-id>` is the **Object ID** of the app
+   under **Enterprise applications** (not the one under App registrations):
+   ```powershell
+   Connect-ExchangeOnline
+   New-ServicePrincipal -AppId <client-id> -ObjectId <object-id> -DisplayName "Orthanc Portal"
+   Add-MailboxPermission -Identity pacs@example.com -User <object-id> -AccessRights FullAccess
+   Set-CASMailbox -Identity pacs@example.com -SmtpClientAuthenticationDisabled $false
+   ```
+   A shared mailbox (no licence) is fine. The last line switches on SMTP sign-in for that mailbox, which many
+   organisations switch off by default.
+5. In the portal, **Settings > Network & sharing > Email**: *Sign-in to the mail server* = **Microsoft 365**
+   (this fills in `smtp.office365.com`, port 587, STARTTLS), the **mailbox** (e.g. `pacs@example.com`), the
+   tenant ID, the client ID and the client secret, and as **sender** that same mailbox (e.g.
+   `Chalklands PACS <pacs@example.com>`). Save, then **Send a test email**.
+
+The server needs to reach `login.microsoftonline.com` (HTTPS, 443) and `smtp.office365.com` (587). Tokens are
+kept in memory and renewed before they expire (about every hour). When something is wrong, the test email says
+what: a wrong client ID or tenant, a secret that is wrong (its Secret ID instead of its Value) or expired, a
+missing permission or mailbox access, SMTP sign-in switched off, or a sender the mailbox may not send as. For a
+national cloud (e.g. GCC High), fill in the advanced *Token address* and *Scope*.
 
 **Seeing a password again.** The guest lost the password, or you did not write it down? **Password** in the
 Shares list shows it again: only to the person who created the link or an administrator, only while the link

@@ -251,6 +251,7 @@ STUDY2 = {"ID": STUDY2_ID, "Type": "Study", "Series": [SERIES_ID],
 
 PATIENT_ID = "77777777-66666666-55555555-44444444-33333333"   # the patient of STUDY and STUDY2
 ANON = {}       # anonymized copies made by POST /studies/{id}/anonymize without "Asynchronous": id -> study
+OAUTH = []      # token requests received by /__mock/oauth/token (Microsoft 365 email tests)
 CHANGES = []    # Orthanc's list of changes (GET /changes); the tests add to it (POST /__mock/change)
 
 
@@ -568,6 +569,15 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/__mock/change":   # test control: Orthanc records a change (e.g. a study became stable)
             change = json.loads(body); change["Seq"] = (CHANGES[-1]["Seq"] if CHANGES else 0) + 1; CHANGES.append(change)
             return self._json(change)
+        if self.path == "/__mock/oauth/token":   # stands in for Microsoft Entra ID (client credentials)
+            from urllib.parse import parse_qs
+            form = {k: v[0] for k, v in parse_qs(body.decode() if isinstance(body, bytes) else body).items()}
+            OAUTH.append({k: form.get(k, "") for k in ("grant_type", "client_id", "scope")})
+            if form.get("client_secret") != "good-secret":
+                return self._json({"error": "invalid_client", "error_description": "AADSTS7000215: Invalid client secret provided.\r\nTrace ID: 1"}, 401)
+            return self._json({"token_type": "Bearer", "expires_in": 3599, "access_token": "mock-access-token"})
+        if self.path == "/__mock/oauth/requests":   # test control: the token requests received so far
+            return self._json(OAUTH)
         if self.path == "/__mock/copies":   # test control: how many studies a search finds
             MODE["copies"] = int(json.loads(body)["n"]); return self._json({"copies": MODE["copies"]})
         if not self._gate(): return

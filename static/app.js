@@ -3728,7 +3728,18 @@ const SETTINGS_FIELDS = {
     { key: "smtp_host", label: "Mail server", placeholder: "smtp.example.com", hint: "Your practice's outgoing mail server (SMTP). Empty = the portal sends no email." },
     { key: "smtp_port", label: "Port", type: "number", min: 1, max: 65535, hint: "Usually 587 (STARTTLS), 465 (TLS) or 25 (a relay on your network)." },
     { key: "smtp_security", label: "Encryption", type: "select", options: [["starttls", "STARTTLS (usually port 587)"], ["tls", "TLS (usually port 465)"], ["none", "None (only for a relay on your own network)"]] },
+    { key: "smtp_auth", label: "Sign-in to the mail server", type: "select", wide: true,
+      options: [["password", "User name and password (or none, for a relay)"], ["microsoft365", "Microsoft 365 / Exchange Online (OAuth 2.0)"]],
+      hint: "Microsoft 365 no longer accepts a password for sending mail: choose Microsoft 365 and register an app in Microsoft Entra ID (README, section on email)." },
     { key: "smtp_username", label: "User name on the mail server", hint: "Empty when the server accepts the portal without signing in (a relay on your network)." },
+    { key: "smtp_oauth_tenant", label: "Directory (tenant) ID", placeholder: "00000000-0000-0000-0000-000000000000", m365: true,
+      hint: "Entra ID > Overview. The tenant's domain also works, e.g. contoso.onmicrosoft.com." },
+    { key: "smtp_oauth_client_id", label: "Application (client) ID", placeholder: "00000000-0000-0000-0000-000000000000", m365: true,
+      hint: "Entra ID > App registrations > your app > Overview." },
+    { key: "smtp_oauth_token_url", label: "Token address (advanced)", placeholder: "Empty = Microsoft's (login.microsoftonline.com)", m365: true,
+      hint: "Only for a national cloud, e.g. https://login.microsoftonline.us/<tenant>/oauth2/v2.0/token." },
+    { key: "smtp_oauth_scope", label: "Scope (advanced)", placeholder: "Empty = https://outlook.office365.com/.default", m365: true,
+      hint: "Only for a national cloud, e.g. https://outlook.office365.us/.default." },
     { key: "smtp_from", label: "Sender of the emails", placeholder: "Chalklands PACS <pacs@example.com>", hint: "The address the invitations come from. Your mail server must allow the portal to send as this address." },
     { key: "email_footer", label: "Text at the end of every email", type: "textarea", wide: true, hint: "Optional: the practice's address, phone number, opening hours..." },
   ],
@@ -4316,8 +4327,42 @@ function buildSettingsView() {
         testMailButton.disabled = false;
       }
     });
-    const emailFields = SETTINGS_FIELDS.email.map(field);
-    emailFields.splice(4, 0, smtpPasswordField);
+    // Microsoft 365: the client secret is write-only too.
+    const oauthSecret = h("input", { type: "password", autocomplete: "new-password", placeholder: s.smtp_oauth_client_secret_set ? "A secret is saved. Leave empty to keep it." : "No secret saved" });
+    const oauthSecretField = h("div", { class: "setting" },
+      h("label", null, "Client secret (its Value)", oauthSecret),
+      h("p", { class: "hint" }, "Entra ID > App registrations > your app > Certificates & secrets. Secrets expire: put the new one here before the old one ends."));
+    const emailNodes = {};
+    for (const def of SETTINGS_FIELDS.email) emailNodes[def.key] = field(def);
+    const emailFields = [];
+    for (const def of SETTINGS_FIELDS.email) {
+      emailFields.push(emailNodes[def.key]);
+      if (def.key === "smtp_username") emailFields.push(smtpPasswordField);
+      if (def.key === "smtp_oauth_client_id") emailFields.push(oauthSecretField);
+    }
+    // Show what the chosen sign-in needs; choosing Microsoft 365 fills in its mail server.
+    const smtpAuth = inputs.smtp_auth;
+    const smtpUserLabel = emailNodes.smtp_username.querySelector("label").firstChild;
+    const smtpUserHint = emailNodes.smtp_username.querySelector(".hint");
+    const showSignIn = () => {
+      const m365 = smtpAuth.value === "microsoft365";
+      for (const def of SETTINGS_FIELDS.email) if (def.m365) emailNodes[def.key].hidden = !m365;
+      oauthSecretField.hidden = !m365;
+      smtpPasswordField.hidden = m365;
+      smtpUserLabel.textContent = t(m365 ? "Mailbox the portal sends from" : "User name on the mail server");
+      if (smtpUserHint) smtpUserHint.textContent = t(m365
+        ? "A Microsoft 365 mailbox (a shared mailbox is fine), e.g. pacs@example.com. Use the same address as the sender below."
+        : "Empty when the server accepts the portal without signing in (a relay on your network).");
+    };
+    smtpAuth.addEventListener("change", () => {
+      if (smtpAuth.value === "microsoft365" && !inputs.smtp_host.value.trim()) {
+        inputs.smtp_host.value = "smtp.office365.com";
+        inputs.smtp_port.value = 587;
+        inputs.smtp_security.value = "starttls";
+      }
+      showSignIn();
+    });
+    showSignIn();
     const testMailField = h("div", { class: "setting wide" },
       h("span", { class: "field-label" }, "Send a test email to (uses the saved settings: save first)"),
       h("div", { class: "inline-field" }, testTo, testMailButton), testMailBox);
@@ -4408,6 +4453,7 @@ function buildSettingsView() {
         body.ohif_modes = ohifModesEditor.get();
         body.forward_rules = forwardEditor.get();
         if (smtpPassword.value) body.smtp_password = smtpPassword.value;
+        if (oauthSecret.value) body.smtp_oauth_client_secret = oauthSecret.value;
         if (clearSmtpPassword.checked) body.clear_smtp_password = true;
         if (withoutAccount()) {
           // No account: no user name and no stored password (the server enforces this too).

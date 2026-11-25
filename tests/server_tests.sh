@@ -311,6 +311,23 @@ ok "a mail server needs a sender (400)" "$(put $A '{"smtp_host":"127.0.0.1"}' | 
 ok "signing in to it without encryption is refused (400)" "$(put $A '{"smtp_host":"127.0.0.1","smtp_port":18025,"smtp_security":"none","smtp_from":"Demo PACS <pacs@example.com>","smtp_username":"mailer","smtp_password":"MailPass123"}' | tail -1)" "400"
 put $A '{"smtp_host":"127.0.0.1","smtp_port":18025,"smtp_security":"starttls","smtp_from":"Demo PACS <pacs@example.com>","smtp_username":"mailer","smtp_password":"MailPass123"}' > /dev/null
 ok "the mail server password is never sent back" "$(body $F $A /api/admin/settings | py "('smtp_password' in d['settings'], d['settings']['smtp_password_set'])")" "(False, True)"
+echo "== email through Microsoft 365 (OAuth 2.0, client credentials)"
+TOKEN_URL=http://127.0.0.1:18042/__mock/oauth/token
+M365='{"smtp_auth":"microsoft365","smtp_username":"pacs@example.com","smtp_oauth_tenant":"contoso.onmicrosoft.com","smtp_oauth_client_id":"11111111-2222-3333-4444-555555555555","smtp_oauth_token_url":"'$TOKEN_URL'"'
+ok "Microsoft 365 needs a client secret (400)" "$(put $A "$M365}" | tail -1)" "400"
+ok "...and a mailbox as user name (400)" "$(put $A "${M365/pacs@example.com/pacs},\"smtp_oauth_client_secret\":\"x\"}" | tail -1)" "400"
+ok "...and encryption (400)" "$(put $A "$M365,\"smtp_oauth_client_secret\":\"x\",\"smtp_security\":\"none\"}" | tail -1)" "400"
+ok "saved with a wrong secret" "$(put $A "$M365,\"smtp_oauth_client_secret\":\"wrong-secret\"}" | tail -1)" "200"
+ok "the client secret is never sent back" "$(body $F $A /api/admin/settings | py "('smtp_oauth_client_secret' in d['settings'], d['settings']['smtp_oauth_client_secret_set'])")" "(False, True)"
+has "a wrong secret: the test email says what to fix" "$(body $F $A /api/admin/email/test -X POST -H "$J" -d '{"to":"admin@example.org"}' | py "d['message']")" "Value, not its Secret ID"
+put $A '{"smtp_oauth_client_secret":"good-secret"}' > /dev/null
+OUT=$(body $F $A /api/admin/email/test -X POST -H "$J" -d '{"to":"admin@example.org"}' | py "d['message']")
+has "the right secret: the token is accepted, the mail server is next (the fake one has no TLS)" "$OUT" "The mail server (127.0.0.1:18025)"
+body $F $A /api/admin/email/test -X POST -H "$J" -d '{"to":"admin@example.org"}' > /dev/null
+REQS=$(curl -s -X POST http://127.0.0.1:18042/__mock/oauth/requests)
+ok "the token request: client credentials, for Exchange Online" "$(echo "$REQS" | py "(d[-1]['grant_type'], d[-1]['client_id'], d[-1]['scope'])")" "('client_credentials', '11111111-2222-3333-4444-555555555555', 'https://outlook.office365.com/.default')"
+ok "...and the token is reused for the next email (one request for two emails)" "$(echo "$REQS" | py "len(d)")" "2"
+put $A '{"smtp_auth":"password","smtp_username":"mailer"}' > /dev/null
 # The fake mail server has no encryption: from here on it is used as a relay without sign-in.
 put $A '{"smtp_security":"none","smtp_username":"","email_footer":"1 High Street"}' > /dev/null
 ok "now the Share window offers email" "$(body $F $SH /api/me | py "d['features']['share']['email']")" "True"

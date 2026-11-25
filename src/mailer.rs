@@ -9,15 +9,23 @@
 //!   is to give it by another channel, a phone call or a text message).
 //! * Addresses are checked here before anything is created or changed, so a typo never leaves a
 //!   half-done invitation.
+//!
+//! ## Signing in to the mail server
+//! * **Password**: a user name and password (or nothing, for a relay that needs no sign-in).
+//! * **Microsoft 365 (OAuth 2.0)**: Microsoft 365 no longer accepts passwords for SMTP. An app
+//!   registered in Microsoft Entra ID gets a token with its client secret (client credentials
+//!   flow, no person signs in) and signs in as the mailbox with `AUTH XOAUTH2`. Tokens are kept in
+//!   memory until shortly before they expire (about an hour).
 
-use crate::settings::{Language, Settings, SmtpSecurity};
+use crate::settings::{Language, Settings, SmtpAuth, SmtpSecurity, MICROSOFT_SMTP_SCOPE, MICROSOFT_TOKEN_URL};
 use lettre::message::header::ContentType;
 use lettre::message::Mailbox;
-use lettre::transport::smtp::authentication::Credentials;
+use lettre::transport::smtp::authentication::{Credentials, Mechanism};
 use lettre::{Message, SmtpTransport, Transport};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// At most this many recipients per invitation.
 pub const MAX_RECIPIENTS: usize = 10;
@@ -112,7 +120,13 @@ pub async fn send(settings: &Settings, to: Vec<Mailbox>, subject: &str, body: &s
     .map_err(|e| format!("The mail server address is not valid: {e}"))?
     .port(settings.smtp_port as u16)
     .timeout(Some(Duration::from_secs(20)));
-    let transport = if settings.smtp_username.is_empty() {
+    let microsoft = settings.smtp_auth == SmtpAuth::Microsoft365;
+    let transport = if microsoft {
+        let token = oauth_token(settings).await?;
+        transport
+            .credentials(Credentials::new(settings.smtp_username.clone(), token))
+            .authentication(vec![Mechanism::Xoauth2])
+    } else if settings.smtp_username.is_empty() {
         transport
     } else {
         transport.credentials(Credentials::new(settings.smtp_username.clone(), settings.smtp_password.0.clone()))
@@ -120,14 +134,160 @@ pub async fn send(settings: &Settings, to: Vec<Mailbox>, subject: &str, body: &s
     .build();
 
     let server = format!("{host}:{}", settings.smtp_port);
+    let mailbox = settings.smtp_username.clone();
     tokio::task::spawn_blocking(move || transport.send(&message))
         .await
         .map_err(|e| format!("The email could not be sent: {e}"))?
         .map(|_| ())
         .map_err(|e| {
             tracing::warn!("email through {server} failed: {e}");
-            format!("The mail server ({server}) did not accept the email: {e}")
+            let error = e.to_string();
+            if microsoft {
+                // A refused sign-in may be a token Microsoft no longer accepts: get a new one next time.
+                if error.contains("535") || error.contains("5.7.") {
+                    forget_oauth_token();
+                }
+                if let Some(advice) = microsoft_smtp_advice(&error, &mailbox) {
+                    return advice;
+                }
+            }
+            format!("The mail server ({server}) did not accept the email: {error}")
         })
+}
+
+// ------------------------------------------------------------ Microsoft 365 (OAuth 2.0)
+
+/// The token in use: for which app (a hash of tenant, address, client, secret and scope), and until when.
+struct CachedToken {
+    key: [u8; 32],
+    token: String,
+    renew_at: Instant,
+}
+
+fn token_cache() -> &'static Mutex<Option<CachedToken>> {
+    static CACHE: OnceLock<Mutex<Option<CachedToken>>> = OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+fn forget_oauth_token() {
+    *token_cache().lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder().timeout(Duration::from_secs(20)).build().unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
+/// The token address and scope of the settings (Microsoft's own unless others are set).
+pub fn token_endpoint(settings: &Settings) -> (String, String) {
+    let url = if settings.smtp_oauth_token_url.is_empty() {
+        MICROSOFT_TOKEN_URL.replace("{tenant}", &settings.smtp_oauth_tenant)
+    } else {
+        settings.smtp_oauth_token_url.clone()
+    };
+    let scope =
+        if settings.smtp_oauth_scope.is_empty() { MICROSOFT_SMTP_SCOPE.to_string() } else { settings.smtp_oauth_scope.clone() };
+    (url, scope)
+}
+
+/// An access token for the mail server: the one kept in memory, or a new one from Microsoft Entra ID
+/// (client credentials: the app's client ID and secret, no person signs in).
+async fn oauth_token(settings: &Settings) -> Result<String, String> {
+    let (url, scope) = token_endpoint(settings);
+    let key: [u8; 32] = Sha256::new()
+        .chain_update(url.as_bytes())
+        .chain_update([0])
+        .chain_update(settings.smtp_oauth_client_id.as_bytes())
+        .chain_update([0])
+        .chain_update(settings.smtp_oauth_client_secret.0.as_bytes())
+        .chain_update([0])
+        .chain_update(scope.as_bytes())
+        .finalize()
+        .into();
+    if let Some(cached) = token_cache().lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        if cached.key == key && Instant::now() < cached.renew_at {
+            return Ok(cached.token.clone());
+        }
+    }
+    let form = [
+        ("grant_type", "client_credentials"),
+        ("client_id", settings.smtp_oauth_client_id.as_str()),
+        ("client_secret", settings.smtp_oauth_client_secret.0.as_str()),
+        ("scope", scope.as_str()),
+    ];
+    let answer = http_client().post(&url).form(&form).send().await.map_err(|e| {
+        tracing::warn!("Microsoft 365 token request to {url} failed: {e}");
+        format!("The portal could not reach Microsoft to sign in to the mail server ({url}): {e}")
+    })?;
+    let status = answer.status();
+    let body: serde_json::Value = answer.json().await.unwrap_or_default();
+    let token = body.get("access_token").and_then(|t| t.as_str()).filter(|t| !t.is_empty());
+    let Some(token) = token.filter(|_| status.is_success()) else {
+        let description = body.get("error_description").and_then(|d| d.as_str()).unwrap_or_default();
+        let error = body.get("error").and_then(|d| d.as_str()).unwrap_or_default();
+        tracing::warn!("Microsoft 365 refused the token ({status}): {error} {description}");
+        return Err(microsoft_token_advice(status.as_u16(), error, description));
+    };
+    // Renewed 5 minutes before it expires (tokens usually last an hour).
+    let lifetime = body.get("expires_in").and_then(|v| v.as_u64().or_else(|| v.as_str()?.parse().ok())).unwrap_or(3600);
+    let renew_at = Instant::now() + Duration::from_secs(lifetime.saturating_sub(300).max(60));
+    *token_cache().lock().unwrap_or_else(|e| e.into_inner()) =
+        Some(CachedToken { key, token: token.to_string(), renew_at });
+    Ok(token.to_string())
+}
+
+/// What to do when Microsoft Entra ID refuses to give a token (its AADSTS codes).
+fn microsoft_token_advice(status: u16, error: &str, description: &str) -> String {
+    let first_line = description.lines().next().unwrap_or_default().trim();
+    let has = |code: &str| description.contains(code);
+    if has("AADSTS700016") {
+        "Microsoft 365 does not know this application in this tenant: check the Application (client) ID and the \
+         Directory (tenant) ID (Entra ID > App registrations > your app > Overview)"
+            .into()
+    } else if has("AADSTS7000215") {
+        "The client secret is not correct: copy the secret's Value, not its Secret ID (Entra ID > App registrations \
+         > your app > Certificates & secrets)"
+            .into()
+    } else if has("AADSTS7000222") {
+        "The client secret has expired: create a new one (Entra ID > App registrations > your app > Certificates & \
+         secrets) and enter it in Settings > Email"
+            .into()
+    } else if has("AADSTS90002") || has("AADSTS900023") || has("AADSTS90013") {
+        "Microsoft 365 does not know this tenant: check the Directory (tenant) ID (Entra ID > Overview)".into()
+    } else if has("AADSTS500011") || has("AADSTS70011") {
+        "Microsoft 365 does not accept the scope: leave the scope empty to use Exchange Online's".into()
+    } else if !first_line.is_empty() {
+        format!("Microsoft 365 refused to sign the portal in to the mail server: {first_line}")
+    } else {
+        format!("Microsoft 365 refused to sign the portal in to the mail server (HTTP {status} {error})")
+    }
+}
+
+/// What to do when Exchange Online refuses the sign-in or the sender (None = say what it said).
+fn microsoft_smtp_advice(error: &str, mailbox: &str) -> Option<String> {
+    if error.contains("5.7.139") {
+        Some(format!(
+            "Microsoft 365 has SMTP sign-in (SMTP AUTH) switched off for {mailbox} or the whole organisation: switch on \
+             \"Authenticated SMTP\" for this mailbox (Microsoft 365 admin center > Users > the mailbox > Mail > Manage \
+             email apps)"
+        ))
+    } else if error.contains("535") || error.contains("5.7.3") {
+        Some(format!(
+            "Microsoft 365 refused the sign-in as {mailbox}. Check that the app has the SMTP.SendAsApp permission \
+             (Office 365 Exchange Online) with admin consent, that its service principal is registered in Exchange \
+             Online with access to this mailbox (New-ServicePrincipal and Add-MailboxPermission, see the README), and \
+             that SMTP sign-in is switched on for the mailbox"
+        ))
+    } else if error.contains("5.2.252") || error.contains("SendAsDenied") || error.contains("5.7.60") {
+        Some(format!(
+            "Microsoft 365 does not let {mailbox} send as the sender of Settings > Email: use that mailbox's own address \
+             as the sender, or give it \"Send As\" permission on the other address"
+        ))
+    } else {
+        None
+    }
 }
 
 /// "2 days 5 hours 20 minutes" (the parts that are not zero).
@@ -511,6 +671,44 @@ pub fn test_email(portal: &str, admin: &str, lang: Language) -> (String, String)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn microsoft_errors_become_advice() {
+        assert!(microsoft_token_advice(401, "invalid_client", "AADSTS7000215: Invalid client secret provided.\r\nTrace ID: x")
+            .contains("Value, not its Secret ID"));
+        assert!(microsoft_token_advice(401, "invalid_client", "AADSTS7000222: The provided client secret keys are expired.")
+            .contains("expired"));
+        assert!(microsoft_token_advice(400, "unauthorized_client", "AADSTS700016: Application with identifier 'x' was not found")
+            .contains("Application (client) ID"));
+        assert!(microsoft_token_advice(400, "invalid_request", "AADSTS90002: Tenant 'x' not found.").contains("tenant"));
+        assert!(microsoft_token_advice(400, "other", "AADSTS1: Something\r\nTrace ID: y").ends_with("AADSTS1: Something"));
+        assert!(microsoft_token_advice(503, "", "").contains("HTTP 503"));
+        let mailbox = "pacs@example.com";
+        assert!(microsoft_smtp_advice("permanent error (535): 5.7.3 Authentication unsuccessful", mailbox)
+            .unwrap()
+            .contains("SMTP.SendAsApp"));
+        assert!(microsoft_smtp_advice("permanent error (535): 5.7.139 Authentication unsuccessful, SmtpClientAuthentication is disabled", mailbox)
+            .unwrap()
+            .contains("Authenticated SMTP"));
+        assert!(microsoft_smtp_advice("permanent error (554): 5.2.252 SendAsDenied", mailbox).unwrap().contains("Send As"));
+        assert!(microsoft_smtp_advice("connection refused", mailbox).is_none());
+    }
+
+    #[test]
+    fn microsoft_token_address() {
+        let mut s = Settings::defaults();
+        s.smtp_oauth_tenant = "contoso.onmicrosoft.com".into();
+        assert_eq!(
+            token_endpoint(&s),
+            (
+                "https://login.microsoftonline.com/contoso.onmicrosoft.com/oauth2/v2.0/token".to_string(),
+                "https://outlook.office365.com/.default".to_string()
+            )
+        );
+        s.smtp_oauth_token_url = "https://login.microsoftonline.us/t/oauth2/v2.0/token".into();
+        s.smtp_oauth_scope = "https://outlook.office365.us/.default".into();
+        assert_eq!(token_endpoint(&s).1, "https://outlook.office365.us/.default");
+    }
 
     #[test]
     fn recipients_are_checked() {

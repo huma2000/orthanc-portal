@@ -171,6 +171,24 @@ pub enum SmtpSecurity {
     None,
 }
 
+/// How the portal signs in to the mail server (Settings > Email).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SmtpAuth {
+    /// A user name and password (or none at all, for a relay that needs no sign-in).
+    #[default]
+    Password,
+    /// Microsoft 365 / Exchange Online with OAuth 2.0 (XOAUTH2): an app registered in Microsoft
+    /// Entra ID signs in as a mailbox, with a token it gets from its client secret. Microsoft 365
+    /// no longer accepts a plain password for SMTP.
+    Microsoft365,
+}
+
+/// The token address of Microsoft Entra ID for a tenant (when no other one is set).
+pub const MICROSOFT_TOKEN_URL: &str = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token";
+/// What the token is for: sending mail through Exchange Online (SMTP.SendAsApp).
+pub const MICROSOFT_SMTP_SCOPE: &str = "https://outlook.office365.com/.default";
+
 /// Light / dark colours of the portal.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -532,6 +550,24 @@ pub struct Settings {
     /// Its password. Never sent to the browser (see [`Settings::to_view`]).
     #[serde(default)]
     pub smtp_password: Secret,
+    /// Password, or Microsoft 365 OAuth (then `smtp_username` is the mailbox it signs in as).
+    #[serde(default)]
+    pub smtp_auth: SmtpAuth,
+    /// Microsoft 365: Directory (tenant) ID, or the tenant's domain (contoso.onmicrosoft.com).
+    #[serde(default)]
+    pub smtp_oauth_tenant: String,
+    /// Microsoft 365: Application (client) ID of the app registration.
+    #[serde(default)]
+    pub smtp_oauth_client_id: String,
+    /// Microsoft 365: a client secret of that app (its Value). Never sent to the browser.
+    #[serde(default)]
+    pub smtp_oauth_client_secret: Secret,
+    /// Advanced: another token address (national clouds...). Empty = Microsoft's, for the tenant.
+    #[serde(default)]
+    pub smtp_oauth_token_url: String,
+    /// Advanced: another scope. Empty = Exchange Online's ([`MICROSOFT_SMTP_SCOPE`]).
+    #[serde(default)]
+    pub smtp_oauth_scope: String,
     /// Sender of the emails, e.g. `Chalklands PACS <pacs@chalklands.example>`.
     #[serde(default)]
     pub smtp_from: String,
@@ -886,6 +922,12 @@ impl Settings {
             smtp_security: SmtpSecurity::Starttls,
             smtp_username: String::new(),
             smtp_password: Secret::default(),
+            smtp_auth: SmtpAuth::Password,
+            smtp_oauth_tenant: String::new(),
+            smtp_oauth_client_id: String::new(),
+            smtp_oauth_client_secret: Secret::default(),
+            smtp_oauth_token_url: String::new(),
+            smtp_oauth_scope: String::new(),
             smtp_from: String::new(),
             email_footer: String::new(),
             public_base_url: String::new(),
@@ -1090,9 +1132,14 @@ impl Settings {
         self.smtp_from = self.smtp_from.trim().to_string();
         self.email_footer = self.email_footer.trim().to_string();
         // No account on the mail server means no password.
-        if self.smtp_username.is_empty() {
+        if self.smtp_username.is_empty() && self.smtp_auth == SmtpAuth::Password {
             self.smtp_password = Secret::default();
         }
+        self.smtp_oauth_tenant = self.smtp_oauth_tenant.trim().to_string();
+        self.smtp_oauth_client_id = self.smtp_oauth_client_id.trim().to_string();
+        self.smtp_oauth_client_secret.0 = self.smtp_oauth_client_secret.0.trim().to_string();
+        self.smtp_oauth_token_url = self.smtp_oauth_token_url.trim().to_string();
+        self.smtp_oauth_scope = self.smtp_oauth_scope.trim().to_string();
         for button in &mut self.modality_buttons {
             button.label = button.label.trim().to_string();
             button.title = button.title.trim().to_string();
@@ -1241,6 +1288,9 @@ impl Settings {
         }
         if has_control(&self.smtp_username) || self.smtp_username.len() > 256 || self.smtp_password.0.len() > 256 {
             return bad("The mail server user name or password is not valid".into());
+        }
+        if self.smtp_auth == SmtpAuth::Microsoft365 && !self.smtp_host.is_empty() {
+            self.validate_microsoft365()?;
         }
         // Signing in over an unencrypted connection would send the password in clear on the network.
         if !self.smtp_username.is_empty() && self.smtp_security == SmtpSecurity::None {
@@ -1556,9 +1606,9 @@ impl Settings {
                 "clear_orthanc_password" => clear_password = value.as_bool().unwrap_or(false),
                 "clear_smtp_password" => clear_smtp_password = value.as_bool().unwrap_or(false),
                 // Read-only information the form echoes back: ignore it.
-                "orthanc_password_set" | "smtp_password_set" => {}
+                "orthanc_password_set" | "smtp_password_set" | "smtp_oauth_client_secret_set" => {}
                 // Write-only secrets: empty = keep the saved one.
-                "orthanc_password" | "smtp_password" => {
+                "orthanc_password" | "smtp_password" | "smtp_oauth_client_secret" => {
                     if value.as_str().map(|p| !p.is_empty()).unwrap_or(false) {
                         obj.insert(key.clone(), value.clone());
                     }
@@ -1592,8 +1642,45 @@ impl Settings {
             obj.insert("orthanc_password_set".into(), json!(!self.orthanc_password.0.is_empty()));
             obj.remove("smtp_password");
             obj.insert("smtp_password_set".into(), json!(!self.smtp_password.0.is_empty()));
+            obj.remove("smtp_oauth_client_secret");
+            obj.insert("smtp_oauth_client_secret_set".into(), json!(!self.smtp_oauth_client_secret.0.is_empty()));
         }
         value
+    }
+
+    /// The Microsoft 365 (OAuth) sign-in of Settings > Email is complete and makes sense.
+    fn validate_microsoft365(&self) -> Result<(), AppError> {
+        let bad = |m: &str| Err(AppError::BadRequest(m.into()));
+        let has_control = |s: &str| s.chars().any(|c| c.is_control());
+        if self.smtp_security == SmtpSecurity::None {
+            return bad("Microsoft 365 needs encryption: choose STARTTLS (smtp.office365.com, port 587)");
+        }
+        if self.smtp_username.parse::<lettre::Address>().is_err() {
+            return bad("With Microsoft 365, the user name is the mailbox the portal sends from, e.g. pacs@example.com");
+        }
+        let id_like = |v: &str, extra: &[char]| {
+            !v.is_empty() && v.len() <= 128 && v.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || extra.contains(&c))
+        };
+        if !id_like(&self.smtp_oauth_tenant, &['.']) {
+            return bad("Enter the Directory (tenant) ID of Microsoft 365 (Entra ID > Overview), or its domain, e.g. contoso.onmicrosoft.com");
+        }
+        if !id_like(&self.smtp_oauth_client_id, &[]) {
+            return bad("Enter the Application (client) ID of the app registered in Microsoft Entra ID");
+        }
+        if self.smtp_oauth_client_secret.0.is_empty() || self.smtp_oauth_client_secret.0.len() > 512 {
+            return bad("Enter a client secret of the app (Entra ID > App registrations > Certificates & secrets: its Value)");
+        }
+        if !self.smtp_oauth_token_url.is_empty() {
+            let url = self.smtp_oauth_token_url.as_str();
+            let local = url.starts_with("http://127.0.0.1:") || url.starts_with("http://localhost:");
+            if url.len() > 500 || has_control(url) || url.contains(' ') || !(url.starts_with("https://") || local) {
+                return bad("The token address must start with https://");
+            }
+        }
+        if self.smtp_oauth_scope.len() > 200 || has_control(&self.smtp_oauth_scope) {
+            return bad("The scope is not valid");
+        }
+        Ok(())
     }
 
     /// Can the portal send emails? (A mail server and a sender are set.)
@@ -1770,6 +1857,41 @@ mod tests {
         assert!(mail("none", "").is_ok(), "a relay without sign-in");
         assert!(mail("starttls", "mailer").is_ok());
         assert!(mail("tls", "mailer").is_ok());
+    }
+
+    /// Microsoft 365: complete, encrypted, and the client secret is never shown.
+    #[test]
+    fn microsoft_365_sign_in() {
+        let base = Settings::defaults();
+        let m365 = |extra: Value| {
+            let mut patch = json!({
+                "smtp_host": "smtp.office365.com", "smtp_port": 587, "smtp_security": "starttls",
+                "smtp_from": "PACS <pacs@example.com>", "smtp_auth": "microsoft365", "smtp_username": "pacs@example.com",
+                "smtp_oauth_tenant": "contoso.onmicrosoft.com", "smtp_oauth_client_id": "11111111-2222-3333-4444-555555555555",
+                "smtp_oauth_client_secret": "s3cr3t~value"
+            });
+            for (k, v) in extra.as_object().unwrap() {
+                patch[k] = v.clone();
+            }
+            base.with_patch(&patch)
+        };
+        let ok = m365(json!({})).unwrap();
+        assert_eq!(ok.smtp_auth, SmtpAuth::Microsoft365);
+        let view = ok.to_view();
+        assert!(view.get("smtp_oauth_client_secret").is_none());
+        assert_eq!(view["smtp_oauth_client_secret_set"], json!(true));
+        // An empty secret in a later save keeps the saved one.
+        assert_eq!(ok.with_patch(&json!({ "smtp_oauth_client_secret": "" })).unwrap().smtp_oauth_client_secret.0, "s3cr3t~value");
+        assert!(m365(json!({ "smtp_security": "none" })).is_err(), "no encryption");
+        assert!(m365(json!({ "smtp_username": "pacs" })).is_err(), "the user name is a mailbox");
+        assert!(m365(json!({ "smtp_oauth_tenant": "" })).is_err());
+        assert!(m365(json!({ "smtp_oauth_tenant": "bad tenant/x" })).is_err());
+        assert!(m365(json!({ "smtp_oauth_client_id": "" })).is_err());
+        assert!(m365(json!({ "smtp_oauth_client_secret": "" })).is_err(), "nothing saved yet");
+        assert!(m365(json!({ "smtp_oauth_token_url": "http://login.example.com/token" })).is_err(), "https only");
+        assert!(m365(json!({ "smtp_oauth_token_url": "https://login.microsoftonline.us/x/oauth2/v2.0/token" })).is_ok());
+        // Email switched off: nothing is asked for.
+        assert!(m365(json!({ "smtp_host": "", "smtp_oauth_client_id": "" })).is_ok());
     }
 
     /// Colours of modality buttons and labels: `#rrggbb`, tidied, and "Default" (empty) forgets a label's.
