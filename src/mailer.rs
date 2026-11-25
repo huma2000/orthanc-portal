@@ -187,8 +187,11 @@ pub fn token_endpoint(settings: &Settings) -> (String, String) {
     } else {
         settings.smtp_oauth_token_url.clone()
     };
-    let scope =
-        if settings.smtp_oauth_scope.is_empty() { MICROSOFT_SMTP_SCOPE.to_string() } else { settings.smtp_oauth_scope.clone() };
+    let scope = if settings.smtp_oauth_scope.is_empty() {
+        MICROSOFT_SMTP_SCOPE.to_string()
+    } else {
+        settings.smtp_oauth_scope.clone()
+    };
     (url, scope)
 }
 
@@ -674,23 +677,42 @@ mod tests {
 
     #[test]
     fn microsoft_errors_become_advice() {
-        assert!(microsoft_token_advice(401, "invalid_client", "AADSTS7000215: Invalid client secret provided.\r\nTrace ID: x")
-            .contains("Value, not its Secret ID"));
-        assert!(microsoft_token_advice(401, "invalid_client", "AADSTS7000222: The provided client secret keys are expired.")
-            .contains("expired"));
-        assert!(microsoft_token_advice(400, "unauthorized_client", "AADSTS700016: Application with identifier 'x' was not found")
-            .contains("Application (client) ID"));
+        assert!(microsoft_token_advice(
+            401,
+            "invalid_client",
+            "AADSTS7000215: Invalid client secret provided.\r\nTrace ID: x"
+        )
+        .contains("Value, not its Secret ID"));
+        assert!(microsoft_token_advice(
+            401,
+            "invalid_client",
+            "AADSTS7000222: The provided client secret keys are expired."
+        )
+        .contains("expired"));
+        assert!(microsoft_token_advice(
+            400,
+            "unauthorized_client",
+            "AADSTS700016: Application with identifier 'x' was not found"
+        )
+        .contains("Application (client) ID"));
         assert!(microsoft_token_advice(400, "invalid_request", "AADSTS90002: Tenant 'x' not found.").contains("tenant"));
-        assert!(microsoft_token_advice(400, "other", "AADSTS1: Something\r\nTrace ID: y").ends_with("AADSTS1: Something"));
+        assert!(
+            microsoft_token_advice(400, "other", "AADSTS1: Something\r\nTrace ID: y").ends_with("AADSTS1: Something")
+        );
         assert!(microsoft_token_advice(503, "", "").contains("HTTP 503"));
         let mailbox = "pacs@example.com";
         assert!(microsoft_smtp_advice("permanent error (535): 5.7.3 Authentication unsuccessful", mailbox)
             .unwrap()
             .contains("SMTP.SendAsApp"));
-        assert!(microsoft_smtp_advice("permanent error (535): 5.7.139 Authentication unsuccessful, SmtpClientAuthentication is disabled", mailbox)
+        assert!(microsoft_smtp_advice(
+            "permanent error (535): 5.7.139 Authentication unsuccessful, SmtpClientAuthentication is disabled",
+            mailbox
+        )
+        .unwrap()
+        .contains("Authenticated SMTP"));
+        assert!(microsoft_smtp_advice("permanent error (554): 5.2.252 SendAsDenied", mailbox)
             .unwrap()
-            .contains("Authenticated SMTP"));
-        assert!(microsoft_smtp_advice("permanent error (554): 5.2.252 SendAsDenied", mailbox).unwrap().contains("Send As"));
+            .contains("Send As"));
         assert!(microsoft_smtp_advice("connection refused", mailbox).is_none());
     }
 

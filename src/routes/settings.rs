@@ -194,7 +194,8 @@ pub async fn update_settings(
                 ),
             );
             let (label, count, users) = (&role.label, names.len(), names.join(", "));
-            messages.push(format!("The new permissions of the role \"{label}\" were given to {count} user(s): {users}."));
+            messages
+                .push(format!("The new permissions of the role \"{label}\" were given to {count} user(s): {users}."));
         }
     }
 
@@ -561,10 +562,14 @@ mod tests {
         let new = with_role(&old, "viewer", &VIEWER_PLUS);
         let users = [
             user(1, "administrator", &Permission::ALL),
-            user(2, "viewer", &VIEWER),         // stored role
-            user(3, "", &VIEWER),               // older account: found by its permissions
-            user(4, "", &[Permission::Read]),   // custom: untouched
-            user(5, "exporter", &[Permission::Read, Permission::Visualize, Permission::Download, Permission::Send, Permission::Share]),
+            user(2, "viewer", &VIEWER),       // stored role
+            user(3, "", &VIEWER),             // older account: found by its permissions
+            user(4, "", &[Permission::Read]), // custom: untouched
+            user(
+                5,
+                "exporter",
+                &[Permission::Read, Permission::Visualize, Permission::Download, Permission::Send, Permission::Share],
+            ),
         ];
         let updates = role_updates(&old, &new, &users, 1).unwrap();
         let ids: Vec<i64> = updates.iter().map(|u| u.user_id).collect();

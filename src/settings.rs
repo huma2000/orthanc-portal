@@ -1656,10 +1656,14 @@ impl Settings {
             return bad("Microsoft 365 needs encryption: choose STARTTLS (smtp.office365.com, port 587)");
         }
         if self.smtp_username.parse::<lettre::Address>().is_err() {
-            return bad("With Microsoft 365, the user name is the mailbox the portal sends from, e.g. pacs@example.com");
+            return bad(
+                "With Microsoft 365, the user name is the mailbox the portal sends from, e.g. pacs@example.com",
+            );
         }
         let id_like = |v: &str, extra: &[char]| {
-            !v.is_empty() && v.len() <= 128 && v.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || extra.contains(&c))
+            !v.is_empty()
+                && v.len() <= 128
+                && v.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || extra.contains(&c))
         };
         if !id_like(&self.smtp_oauth_tenant, &['.']) {
             return bad("Enter the Directory (tenant) ID of Microsoft 365 (Entra ID > Overview), or its domain, e.g. contoso.onmicrosoft.com");
@@ -1668,7 +1672,9 @@ impl Settings {
             return bad("Enter the Application (client) ID of the app registered in Microsoft Entra ID");
         }
         if self.smtp_oauth_client_secret.0.is_empty() || self.smtp_oauth_client_secret.0.len() > 512 {
-            return bad("Enter a client secret of the app (Entra ID > App registrations > Certificates & secrets: its Value)");
+            return bad(
+                "Enter a client secret of the app (Entra ID > App registrations > Certificates & secrets: its Value)",
+            );
         }
         if !self.smtp_oauth_token_url.is_empty() {
             let url = self.smtp_oauth_token_url.as_str();
@@ -1881,7 +1887,10 @@ mod tests {
         assert!(view.get("smtp_oauth_client_secret").is_none());
         assert_eq!(view["smtp_oauth_client_secret_set"], json!(true));
         // An empty secret in a later save keeps the saved one.
-        assert_eq!(ok.with_patch(&json!({ "smtp_oauth_client_secret": "" })).unwrap().smtp_oauth_client_secret.0, "s3cr3t~value");
+        assert_eq!(
+            ok.with_patch(&json!({ "smtp_oauth_client_secret": "" })).unwrap().smtp_oauth_client_secret.0,
+            "s3cr3t~value"
+        );
         assert!(m365(json!({ "smtp_security": "none" })).is_err(), "no encryption");
         assert!(m365(json!({ "smtp_username": "pacs" })).is_err(), "the user name is a mailbox");
         assert!(m365(json!({ "smtp_oauth_tenant": "" })).is_err());
