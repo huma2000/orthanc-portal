@@ -2620,14 +2620,23 @@ async function copyText(text) {
   try {
     if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); return true; }
   } catch { /* use the fallback */ }
-  const area = h("textarea", null, text);
+  // While a modal <dialog> is open, everything outside it is inert and cannot be selected,
+  // so the helper textarea must go inside that dialog (the share window, for example).
+  const returnFocus = document.activeElement;
+  const host = returnFocus?.closest?.("dialog[open]") || document.querySelector("dialog[open]") || document.body;
+  const area = h("textarea", { readonly: true }, text);
   area.style.position = "fixed";
+  area.style.top = "0";
+  area.style.left = "0";
   area.style.opacity = "0";
-  document.body.append(area);
+  host.append(area);
+  area.focus();
   area.select();
+  area.setSelectionRange(0, text.length);
   let copied = false;
   try { copied = document.execCommand("copy"); } catch { copied = false; }
   area.remove();
+  returnFocus?.focus?.();
   return copied;
 }
 
