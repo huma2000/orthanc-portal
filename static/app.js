@@ -2692,10 +2692,11 @@ function buildDurationInput(totalMinutes, maxHours, legend) {
 }
 
 /**
- * "Send the invitation by email" of the Share windows: off by default. `.value` is null, or the
- * `email` object the server expects. `canIncludePassword()` says whether the portal has the password.
+ * "Send the invitation by email" of the Share windows. Unticked, unless `newLink` and an administrator
+ * chose to tick it by default (Settings > Share links). `.value` is null, or the `email` object the
+ * server expects. `canIncludePassword()` says whether the portal has the password.
  */
-function buildEmailOptions(canIncludePassword) {
+function buildEmailOptions(canIncludePassword, newLink = false) {
   const feature = state.user.features.share;
   if (!feature.email) {
     return {
@@ -2704,6 +2705,7 @@ function buildEmailOptions(canIncludePassword) {
     };
   }
   const send = h("input", { type: "checkbox" });
+  send.checked = newLink && !!feature.email_default;
   const to = h("input", { type: "text", placeholder: "name@example.com (several: separate them with commas)", autocomplete: "off", "aria-label": "Email addresses" });
   const message = h("textarea", { rows: 3, maxlength: 1000, placeholder: "Optional message, e.g. Here are the images we discussed on the phone." });
   const withPassword = h("input", { type: "checkbox" });
@@ -2778,7 +2780,7 @@ function openShareDialog(studyOrList, how = null) {
     const error = h("div", { class: "form-error", role: "alert", hidden: true });
     const duration = buildDurationInput(feature.default_hours * 60, feature.max_hours, "The link works for");
     const downloads = h("input", { type: "number", min: 0, max: feature.max_downloads, value: feature.default_downloads, required: true });
-    const emailOptions = buildEmailOptions(() => true);
+    const emailOptions = buildEmailOptions(() => true, true);
     const note = h("input", { maxlength: 120, placeholder: "For your own records, e.g. Dr. Smith, second opinion", autocomplete: "off" });
     const submit = h("button", { class: "btn primary", type: "submit" }, "Create link and password");
     // Less common options: an anonymized copy, tell me when it is used.
@@ -3301,7 +3303,7 @@ function openUploadLinkDialog(reload) {
   const label = h("input", { value: feature.label || "", maxlength: 64, placeholder: "received", autocomplete: "off" });
   const note = h("input", { maxlength: 120, placeholder: "For your own records, e.g. Mrs Doe, previous MRI from St Mary's", autocomplete: "off" });
   const notify = h("input", { type: "checkbox", disabled: !state.user.email || !feature.notify });
-  const emailOptions = buildEmailOptions(() => true);
+  const emailOptions = buildEmailOptions(() => true, true);
   const submit = h("button", { class: "btn primary", type: "submit" }, "Create link and password");
   dialog.replaceChildren(h("form", {
     class: "dialog-form",
@@ -3739,6 +3741,8 @@ const SETTINGS_FIELDS = {
       hint: "In the Share window and the Shares list, to print on a handout. A QR code never contains the password." },
     { key: "share_notify", label: "Offer \"Email me when the link is opened or downloaded\"", type: "checkbox", wide: true,
       hint: "Also \"Email me when files arrive\" of upload links. Needs the mail server below and an email address on the person's account (My account, or Users). The emails name the link, never the patient. Switching it off also stops the notices already asked for." },
+    { key: "share_email_default", label: "Tick \"Send the invitation by email\" by default", type: "checkbox", wide: true,
+      hint: "In the windows that create a share or upload link. Staff then type the address, or untick it to give the link by hand. Needs the mail server below; editing an existing link never emails unless ticked." },
   ],
   security: [
     { key: "two_factor", label: "Two-step sign-in (a code from a phone app after the password)", type: "select", wide: true,

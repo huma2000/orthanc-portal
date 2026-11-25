@@ -983,6 +983,8 @@
   "Send study": "Enviar estudio",
   "Send study to a DICOM destination": "Enviar el estudio a un destino DICOM",
   "Send the invitation by email": "Enviar la invitación por correo electrónico",
+  "Tick \"Send the invitation by email\" by default": "Marcar «Enviar la invitación por correo electrónico» por defecto",
+  "In the windows that create a share or upload link. Staff then type the address, or untick it to give the link by hand. Needs the mail server below; editing an existing link never emails unless ticked.": "En las ventanas que crean un enlace compartido o de envío. El personal escribe entonces la dirección, o la desmarca para entregar el enlace a mano. Necesita el servidor de correo de abajo; al editar un enlace existente nunca se envía correo salvo que se marque.",
   "Send the studies that arrive on to another system automatically, for example every CT from the scanner to the reporting workstation, or be told by email, for example when a CT from a given centre or a study labelled urgent arrives. A rule matches when every condition filled in holds; empty conditions match everything. The transfers appear on the Transfers page as \"auto: <rule>\".": "Reenvíe automáticamente a otro sistema los estudios que llegan, por ejemplo cada TC del escáner a la estación de informes, o reciba un aviso por correo, por ejemplo cuando llega una TC de un centro concreto o un estudio con la etiqueta urgente. Una regla se cumple cuando se cumplen todas las condiciones rellenadas; las condiciones vacías lo aceptan todo. Los envíos aparecen en la página Transferencias como «auto: <regla>».",
   "Send to": "Enviar a",
   "Send to a DICOM node": "Enviar a un nodo DICOM",

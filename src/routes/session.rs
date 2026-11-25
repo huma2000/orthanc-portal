@@ -37,6 +37,8 @@ pub struct ShareFeature {
     max_downloads: u64,
     /// A mail server is set up: the Share windows offer to send the invitation by email.
     email: bool,
+    /// "Send the invitation by email" starts ticked when a new link is created.
+    email_default: bool,
     /// "Share an anonymized copy" is offered.
     anonymize: bool,
     /// "Email me when the link is opened or downloaded" is offered (mail server + an address on the account).
@@ -184,6 +186,7 @@ async fn me_response(state: &AppState, user: User) -> Me {
         default_downloads: settings.share_default_downloads,
         max_downloads: settings.share_max_downloads,
         email: settings.email_configured(),
+        email_default: settings.email_configured() && settings.share_email_default,
         anonymize: settings.share_anonymize,
         notify: settings.share_notify && settings.email_configured(),
         patient: settings.multi_study_shares && settings.share_patient,

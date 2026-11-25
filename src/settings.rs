@@ -443,6 +443,10 @@ pub struct Settings {
     /// and an email address on the account).
     #[serde(default = "default_true")]
     pub share_notify: bool,
+    /// "Send the invitation by email" starts ticked in the windows that create a link (share and
+    /// upload links). Only matters when a mail server is set up. Off by default.
+    #[serde(default)]
+    pub share_email_default: bool,
     /// The Share window offers "every study of this patient, in one link" (also needs `multi_study_shares`).
     #[serde(default = "default_true")]
     pub share_patient: bool,
@@ -856,6 +860,7 @@ impl Settings {
             share_keep_passwords: true,
             share_anonymize: true,
             share_notify: true,
+            share_email_default: false,
             share_patient: true,
             share_label: true,
             share_qr: true,
