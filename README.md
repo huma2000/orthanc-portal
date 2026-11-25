@@ -938,6 +938,10 @@ Cloudflare provides HTTPS.
 1. Cloudflare dashboard, **Zero Trust**, **Networks**, **Tunnels**: create a tunnel (type *Cloudflared*).
 2. Copy its **token** into `TUNNEL_TOKEN` (options A and B, Docker Compose), or follow
    `deploy/cloudflared-config.yml` for a locally-managed tunnel running on the host (option C).
+   The token is a long string (about 180 characters or more) that starts with `eyJ`: it is the part after
+   `--token` in the install command the dashboard shows (tunnel > *Edit* > install connector), or the
+   output of `cloudflared tunnel token <tunnel-name>`. It is **not** the tunnel ID (a UUID such as
+   `1a2b3c4d-...`); with the ID, cloudflared stops with *"Provided Tunnel token is not valid"*.
 3. Add a **public hostname** (e.g. `pacs.example.com`) with service **HTTP** pointing to the **internet
    port**: `portal:8081` (`localhost:8081` when cloudflared runs on the host). **Not 8080.**
 4. In the portal, **Settings > Share links**, type that address (`https://pacs.example.com`) as the public
