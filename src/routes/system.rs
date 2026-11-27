@@ -17,6 +17,7 @@ use crate::auth::AuthUser;
 use crate::db::User;
 use crate::error::{AppError, AppResult};
 use crate::permissions::Permission;
+use crate::servers::Chosen;
 use crate::state::AppState;
 use crate::util::feature;
 use axum::extract::{Path, Query, State};
@@ -35,10 +36,14 @@ fn system_on(state: &AppState) -> AppResult<()> {
     feature(state.settings.get().system_page, "The System page is switched off")
 }
 
-pub async fn overview(State(state): State<AppState>, AuthUser(user): AuthUser) -> AppResult<Json<Value>> {
+pub async fn overview(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    chosen: Chosen,
+) -> AppResult<Json<Value>> {
     admin(&user)?;
     system_on(&state)?;
-    let orthanc = &state.orthanc;
+    let orthanc = &state.orthancs.chosen(&user, &chosen)?;
     let (system, statistics, plugins, log_level) = tokio::join!(
         orthanc.get_json("/system"),
         orthanc.get_json("/statistics"),
@@ -95,6 +100,7 @@ pub struct LogLevel {
 pub async fn set_log_level(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
+    chosen: Chosen,
     Json(req): Json<LogLevel>,
 ) -> AppResult<Json<Value>> {
     admin(&user)?;
@@ -102,15 +108,15 @@ pub async fn set_log_level(
     if !matches!(req.level.as_str(), "default" | "verbose" | "trace") {
         return Err(AppError::BadRequest("The log level is default, verbose or trace".into()));
     }
-    state.orthanc.put_text("/tools/log-level", &req.level).await?;
+    state.orthancs.chosen(&user, &chosen)?.put_text("/tools/log-level", &req.level).await?;
     state.db.audit(&user.username, "orthanc_log_level", &req.level);
     Ok(Json(json!({ "level": req.level })))
 }
 
-pub async fn metrics(State(state): State<AppState>, AuthUser(user): AuthUser) -> AppResult<Response> {
+pub async fn metrics(State(state): State<AppState>, AuthUser(user): AuthUser, chosen: Chosen) -> AppResult<Response> {
     admin(&user)?;
     system_on(&state)?;
-    let text = state.orthanc.get_text("/tools/metrics-prometheus").await?;
+    let text = state.orthancs.chosen(&user, &chosen)?.get_text("/tools/metrics-prometheus").await?;
     Ok(([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], text).into_response())
 }
 
@@ -138,6 +144,7 @@ pub fn is_readable_path(path: &str) -> bool {
 pub async fn raw(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
+    chosen: Chosen,
     Query(q): Query<RawQuery>,
 ) -> AppResult<Response> {
     admin(&user)?;
@@ -146,7 +153,7 @@ pub async fn raw(
     if !is_readable_path(&q.path) {
         return Err(AppError::BadRequest("Give an address such as /patients or /tools/labels (no files)".into()));
     }
-    let text = state.orthanc.get_text(&q.path).await?;
+    let text = state.orthancs.chosen(&user, &chosen)?.get_text(&q.path).await?;
     let text: String = text.chars().take(2_000_000).collect();
     state.db.audit(&user.username, "orthanc_api_read", &q.path);
     Ok(([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], text).into_response())
@@ -158,10 +165,14 @@ fn jobs_on(state: &AppState) -> AppResult<()> {
     feature(state.settings.get().jobs_page, "The Jobs page is switched off")
 }
 
-pub async fn list_jobs(State(state): State<AppState>, AuthUser(user): AuthUser) -> AppResult<Json<Value>> {
+pub async fn list_jobs(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+    chosen: Chosen,
+) -> AppResult<Json<Value>> {
     admin(&user)?;
     jobs_on(&state)?;
-    let jobs = state.orthanc.get_json("/jobs?expand").await?;
+    let jobs = state.orthancs.chosen(&user, &chosen)?.get_json("/jobs?expand").await?;
     let mut items: Vec<Value> = jobs
         .as_array()
         .map(|list| {
@@ -183,6 +194,7 @@ pub async fn list_jobs(State(state): State<AppState>, AuthUser(user): AuthUser) 
 pub async fn job_action(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
+    chosen: Chosen,
     Path((id, action)): Path<(String, String)>,
 ) -> AppResult<Json<Value>> {
     admin(&user)?;
@@ -193,7 +205,7 @@ pub async fn job_action(
     if !matches!(action.as_str(), "cancel" | "pause" | "resume" | "resubmit") {
         return Err(AppError::BadRequest("The action is cancel, pause, resume or resubmit".into()));
     }
-    state.orthanc.post_json(&format!("/jobs/{id}/{action}"), &json!({})).await?;
+    state.orthancs.chosen(&user, &chosen)?.post_json(&format!("/jobs/{id}/{action}"), &json!({})).await?;
     state.db.audit(&user.username, &format!("job_{action}"), &id);
     Ok(Json(json!({ "ok": true })))
 }
@@ -284,11 +296,12 @@ pub struct LogQuery {
 pub async fn orthanc_log(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
+    chosen: Chosen,
     Query(q): Query<LogQuery>,
 ) -> AppResult<Json<Value>> {
     admin(&user)?;
     system_on(&state)?;
-    let dir = state.settings.get().orthanc_log_dir.clone();
+    let dir = log_dir_of(&state, &user, &chosen)?;
     if dir.is_empty() {
         return Ok(Json(json!({ "configured": false })));
     }
@@ -316,11 +329,12 @@ pub async fn orthanc_log(
 pub async fn orthanc_log_download(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
+    chosen: Chosen,
     Query(q): Query<LogQuery>,
 ) -> AppResult<Response> {
     admin(&user)?;
     system_on(&state)?;
-    let dir = state.settings.get().orthanc_log_dir.clone();
+    let dir = log_dir_of(&state, &user, &chosen)?;
     if dir.is_empty() {
         return Err(AppError::NotFound);
     }
@@ -344,6 +358,19 @@ pub async fn orthanc_log_download(
         bytes,
     )
         .into_response())
+}
+
+/// The log folder of the chosen server (checked like the server itself).
+fn log_dir_of(state: &AppState, user: &crate::db::User, chosen: &Chosen) -> AppResult<String> {
+    state.orthancs.chosen(user, chosen)?;
+    Ok(state
+        .settings
+        .get()
+        .servers()
+        .into_iter()
+        .find(|s| s.key == chosen.key())
+        .map(|s| s.log_dir)
+        .unwrap_or_default())
 }
 
 #[cfg(test)]

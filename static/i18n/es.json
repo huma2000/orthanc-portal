@@ -1458,7 +1458,9 @@
   "The default server (above) is always first: plain study IDs are its own. The order here is the order of the searches and badges, and decides which copy a study on several servers opens. Who may use which server is chosen in Users and in Security & roles. Changes apply when you save.": "El servidor principal (arriba) va siempre primero: los identificadores sin prefijo son suyos. El orden de aquí es el de las búsquedas y las insignias, y decide qué copia abre un estudio que está en varios servidores. Quién puede usar cada servidor se elige en Usuarios y en Seguridad y roles. Los cambios se aplican al guardar.",
   "Name of this server (shown when there are several)": "Nombre de este servidor (se muestra cuando hay varios)",
   "Other Orthanc servers": "Otros servidores Orthanc",
-  "More Orthanc servers this portal searches and uses, besides the default one above.": "Más servidores Orthanc que este portal busca y usa, además del principal de arriba."
+  "More Orthanc servers this portal searches and uses, besides the default one above.": "Más servidores Orthanc que este portal busca y usa, además del principal de arriba.",
+  "Searches show the other servers only.": "Las búsquedas muestran solo los demás servidores.",
+  "Search from and retrieve into": "Buscar desde y traer a"
  },
  "messages": {
   "A label can have 1 to 64 letters, digits, '-' or '_' (no spaces or accents)": "Una etiqueta puede tener de 1 a 64 letras, cifras, «-» o «_» (sin espacios ni tildes)",

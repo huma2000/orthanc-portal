@@ -444,6 +444,14 @@ ok "...and copied to the default server by the other rule" "$(( $(cat "$WORK/upl
 ok "...both shown as automatic transfers" "$(body $F $A /api/transfers | py "sorted({t['username'] for t in d[:2]})")" "['auto: Archive out', 'auto: Archive to main']"
 ok "...the Settings screen says when each server was read" "$(body $F $A /api/admin/settings | py "'archive' in d['forward']['checks']")" "True"
 put $A '{"forward_enabled":false,"forward_rules":[]}' > /dev/null
+# The pages that show one server at a time: ?server= (the default server without it).
+asked() { grep -c "\"path\": \"$1" "$WORK/m2/auth.log"; }
+put $A '{"jobs_page":true,"system_page":true,"stats_page":true,"query_retrieve":true,"worklists_enabled":true}' > /dev/null
+N0=$(asked /system); J0=$(asked /jobs); M0=$(asked /modalities); W0=$(asked /worklists); Q0=$(asked /dicom-web/servers); T0=$(asked /tools/count-resources)
+ok "System, Jobs, DICOM nodes, worklists, query / retrieve and Statistics of the archive ask the archive" "$(code $F $A GET "/api/admin/system?server=archive")/$(code $F $A GET "/api/admin/jobs?server=archive")/$(code $F $A GET "/api/admin/nodes?server=archive")/$(code $F $A GET "/api/worklists?server=archive")/$(code $F $A GET "/api/retrieve/sources?server=archive")/$(code $F $A GET "/api/admin/stats?server=archive&refresh=true")" "200/200/200/200/200/200"
+ok "...every one of them reached it" "$(( $(asked /system) > N0 ))$(( $(asked /jobs) > J0 ))$(( $(asked /modalities) > M0 ))$(( $(asked /worklists) > W0 ))$(( $(asked /dicom-web/servers) > Q0 ))$(( $(asked /tools/count-resources) > T0 ))" "111111"
+ok "...an unknown server: 404" "$(code $F $A GET "/api/admin/system?server=nowhere")/$(code $F $A GET "/api/admin/jobs?server=nowhere")" "404/404"
+put $A '{"query_retrieve":false,"worklists_enabled":false}' > /dev/null
 # Uploads into a chosen server.
 U0=$(cat "$WORK/m2/upload.log" 2>/dev/null | wc -l)
 ok "a staff upload into the archive" "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Cookie: portal_session=$A" -H "$H" -H "Content-Type: application/dicom" --data-binary @small.dcm "$F/api/upload?server=archive")/$(( $(cat "$WORK/m2/upload.log" | wc -l) - U0 ))" "200/1"

@@ -14,7 +14,9 @@
 use crate::auth::AuthUser;
 use crate::db::User;
 use crate::error::{AppError, AppResult};
+use crate::orthanc::OrthancClient;
 use crate::permissions::Permission;
+use crate::servers::Chosen;
 use crate::state::AppState;
 use crate::util::feature;
 use axum::extract::{Path, State};
@@ -22,11 +24,11 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-fn allowed(state: &AppState, user: &User) -> AppResult<()> {
+/// The checks of every request, and the server whose worklists are shown (`?server=`).
+fn allowed(state: &AppState, user: &User, chosen: &Chosen) -> AppResult<OrthancClient> {
     user.require_or_admin(Permission::Worklists)?;
     feature(state.settings.get().worklists_enabled, "Worklists are switched off")?;
-    // The worklists of the default server (a choice comes in multi-server phase 4).
-    state.orthancs.default_for(user).map(|_| ())
+    state.orthancs.chosen(user, chosen)
 }
 
 fn check_id(id: &str) -> AppResult<()> {
@@ -61,9 +63,9 @@ fn simplify(id: &str, item: &Value) -> Value {
     })
 }
 
-pub async fn list(State(state): State<AppState>, AuthUser(user): AuthUser) -> AppResult<Json<Value>> {
-    allowed(&state, &user)?;
-    let answer = state.orthanc.get_json("/worklists/?format=Simplify").await?;
+pub async fn list(State(state): State<AppState>, AuthUser(user): AuthUser, chosen: Chosen) -> AppResult<Json<Value>> {
+    let orthanc = allowed(&state, &user, &chosen)?;
+    let answer = orthanc.get_json("/worklists/?format=Simplify").await?;
     let mut items: Vec<Value> = match &answer {
         Value::Array(list) => list.iter().map(|w| simplify(w["ID"].as_str().unwrap_or(""), w)).collect(),
         Value::Object(map) => map.iter().map(|(id, w)| simplify(id, w)).collect(),
@@ -148,18 +150,19 @@ fn tags(f: &WorklistForm) -> AppResult<Value> {
     }))
 }
 
-async fn create_one(state: &AppState, form: &WorklistForm) -> AppResult<String> {
-    let answer = state.orthanc.post_json("/worklists/create", &json!({ "Tags": tags(form)? })).await?;
+async fn create_one(orthanc: &OrthancClient, form: &WorklistForm) -> AppResult<String> {
+    let answer = orthanc.post_json("/worklists/create", &json!({ "Tags": tags(form)? })).await?;
     Ok(answer["ID"].as_str().unwrap_or("").to_string())
 }
 
 pub async fn create(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
+    chosen: Chosen,
     Json(form): Json<WorklistForm>,
 ) -> AppResult<Json<Value>> {
-    allowed(&state, &user)?;
-    let id = create_one(&state, &form).await?;
+    let orthanc = allowed(&state, &user, &chosen)?;
+    let id = create_one(&orthanc, &form).await?;
     state.db.audit(&user.username, "worklist_created", &format!("{id} ({} {})", form.patient_id, form.modality));
     Ok(Json(json!({ "id": id })))
 }
@@ -167,15 +170,16 @@ pub async fn create(
 pub async fn update(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
+    chosen: Chosen,
     Path(id): Path<String>,
     Json(form): Json<WorklistForm>,
 ) -> AppResult<Json<Value>> {
-    allowed(&state, &user)?;
+    let orthanc = allowed(&state, &user, &chosen)?;
     check_id(&id)?;
     tags(&form)?; // checked BEFORE the old one is deleted
-    state.orthanc.get_json(&format!("/worklists/{id}")).await?;
-    let new_id = create_one(&state, &form).await?;
-    state.orthanc.delete(&format!("/worklists/{id}")).await?;
+    orthanc.get_json(&format!("/worklists/{id}")).await?;
+    let new_id = create_one(&orthanc, &form).await?;
+    orthanc.delete(&format!("/worklists/{id}")).await?;
     state.db.audit(
         &user.username,
         "worklist_changed",
@@ -187,11 +191,12 @@ pub async fn update(
 pub async fn delete(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
+    chosen: Chosen,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
-    allowed(&state, &user)?;
+    let orthanc = allowed(&state, &user, &chosen)?;
     check_id(&id)?;
-    state.orthanc.delete(&format!("/worklists/{id}")).await?;
+    orthanc.delete(&format!("/worklists/{id}")).await?;
     state.db.audit(&user.username, "worklist_deleted", &id);
     Ok(Json(json!({ "deleted": id })))
 }

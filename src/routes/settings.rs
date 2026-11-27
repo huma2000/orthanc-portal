@@ -26,6 +26,7 @@ use crate::db::User;
 use crate::error::{AppError, AppResult};
 use crate::orthanc::{Diagnosis, OrthancClient};
 use crate::permissions::{Permission, PermissionSet};
+use crate::servers::Chosen;
 use crate::settings::{default_modality_buttons, default_roles, Settings};
 use crate::state::AppState;
 use crate::util::now_unix;
@@ -366,16 +367,21 @@ fn valid_alias(alias: &str) -> bool {
     (1..=64).contains(&alias.len()) && alias.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
 }
 
-pub async fn list_nodes(State(state): State<AppState>, AuthUser(admin): AuthUser) -> AppResult<Json<Vec<NodeView>>> {
+pub async fn list_nodes(
+    State(state): State<AppState>,
+    AuthUser(admin): AuthUser,
+    chosen: Chosen,
+) -> AppResult<Json<Vec<NodeView>>> {
     admin.require(Permission::Admin)?;
     let descriptions = state.db.node_descriptions()?;
     let mut nodes: Vec<NodeView> = state
-        .orthanc
+        .orthancs
+        .chosen(&admin, &chosen)?
         .modalities_raw()
         .await?
         .iter()
         .map(|(id, cfg)| NodeView {
-            description: descriptions.get(id.as_str()).cloned().unwrap_or_default(),
+            description: descriptions.get(&crate::servers::compound(chosen.key(), id)).cloned().unwrap_or_default(),
             ..NodeView::from_orthanc(id, cfg)
         })
         .collect();
@@ -407,6 +413,7 @@ pub struct NodeInput {
 pub async fn put_node(
     State(state): State<AppState>,
     AuthUser(admin): AuthUser,
+    chosen: Chosen,
     Path(alias): Path<String>,
     Json(input): Json<NodeInput>,
 ) -> AppResult<Json<Value>> {
@@ -432,7 +439,7 @@ pub async fn put_node(
 
     // Start from the node's current configuration so settings this screen does not
     // show (AllowFind, AllowMove, TLS...) are preserved when editing.
-    let existing = state.orthanc.modalities_raw().await?;
+    let existing = state.orthancs.chosen(&admin, &chosen)?.modalities_raw().await?;
     let mut config: Map<String, Value> = match existing.get(&alias) {
         Some(Value::Object(current)) => current.clone(),
         _ => Map::new(),
@@ -447,8 +454,8 @@ pub async fn put_node(
     if description.chars().count() > 80 {
         return bad("The description can have at most 80 characters");
     }
-    state.orthanc.put_modality(&alias, &Value::Object(config)).await?;
-    state.db.set_node_description(&alias, &description)?;
+    state.orthancs.chosen(&admin, &chosen)?.put_modality(&alias, &Value::Object(config)).await?;
+    state.db.set_node_description(&crate::servers::compound(chosen.key(), &alias), &description)?;
     state.db.audit(&admin.username, "dicom_node_saved", &format!("{alias} = {aet}@{host}:{}", input.port));
     Ok(Json(json!({ "ok": true })))
 }
@@ -456,14 +463,15 @@ pub async fn put_node(
 pub async fn delete_node(
     State(state): State<AppState>,
     AuthUser(admin): AuthUser,
+    chosen: Chosen,
     Path(alias): Path<String>,
 ) -> AppResult<Json<Value>> {
     admin.require(Permission::Admin)?;
     if !valid_alias(&alias) {
         return Err(AppError::BadRequest("Invalid name".into()));
     }
-    state.orthanc.delete_modality(&alias).await?;
-    state.db.set_node_description(&alias, "")?;
+    state.orthancs.chosen(&admin, &chosen)?.delete_modality(&alias).await?;
+    state.db.set_node_description(&crate::servers::compound(chosen.key(), &alias), "")?;
     state.db.audit(&admin.username, "dicom_node_deleted", &alias);
     Ok(Json(json!({ "ok": true })))
 }
@@ -472,13 +480,14 @@ pub async fn delete_node(
 pub async fn echo_node(
     State(state): State<AppState>,
     AuthUser(admin): AuthUser,
+    chosen: Chosen,
     Path(alias): Path<String>,
 ) -> AppResult<Json<Value>> {
     admin.require(Permission::Admin)?;
     if !valid_alias(&alias) {
         return Err(AppError::BadRequest("Invalid name".into()));
     }
-    state.orthanc.echo_modality(&alias).await?;
+    state.orthancs.chosen(&admin, &chosen)?.echo_modality(&alias).await?;
     Ok(Json(json!({ "ok": true })))
 }
 

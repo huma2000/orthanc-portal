@@ -3971,9 +3971,46 @@ function paintOrthancBanner() {
   slot.hidden = !state.orthancProblem;
   if (state.orthancProblem) {
     slot.append(
-      h("span", null, `Orthanc: ${translateMessage(state.orthancProblem)} `),
+      h("span", null, `${state.orthancProblem.split("\n").map((line) => {
+        const [server, ...message] = line.split("\t");
+        return `${server}: ${translateMessage(message.join("\t"))}`;
+      }).join(" · ")} ${severalServers() ? lookup("Searches show the other servers only.") : ""} `),
       h("button", { class: "btn small", type: "button", onclick: () => openSettings("orthanc") }, "Open settings"));
   }
+}
+
+/* ---- Pages that show one Orthanc server at a time (Jobs, System, DICOM nodes, worklists, query /
+   retrieve, Statistics): with several servers, a choice at the top, remembered per page. ---- */
+
+const pageServerKey = (page) => `portal-page-server-${page}-${state.user.id}`;
+/** The server a page shows: this browser's choice for it, else the default server (or the first one). */
+function pageServer(page) {
+  let saved = null;
+  try { saved = localStorage.getItem(pageServerKey(page)); } catch { /* not kept */ }
+  if (saved && serverInfo(saved)) return saved;
+  return serverInfo("main") || !orthancServers().length ? "main" : orthancServers()[0].key;
+}
+/** An API address of such a page, for its chosen server. */
+function onServer(page, path) {
+  if (!severalServers()) return path;
+  return `${path}${path.includes("?") ? "&" : "?"}server=${encodeURIComponent(pageServer(page))}`;
+}
+/** "Server: (Main) (Archive)": buttons up to four servers, a list beyond. Choosing one redraws the page. */
+function pageServerPicker(page, label = "Server") {
+  if (!severalServers()) return null;
+  const current = pageServer(page);
+  const pick = (key) => {
+    if (key === current) return;
+    try { localStorage.setItem(pageServerKey(page), key); } catch { /* not kept */ }
+    renderApp();
+  };
+  const servers = orthancServers();
+  const control = servers.length <= 4
+    ? h("div", { class: "mod-picker server-picker" }, servers.map((x) => tint(h("button", {
+      type: "button", class: "chip-toggle", "aria-pressed": String(x.key === current), onclick: () => pick(x.key),
+    }, x.label), x.color)))
+    : h("select", { onchange: (e) => pick(e.target.value) }, servers.map((x) => h("option", { value: x.key, selected: x.key === current }, x.label)));
+  return h("div", { class: "page-server" }, h("span", { class: "field-label" }, lookup(label)), control);
 }
 
 /** Tests the saved Orthanc connection (at most once a minute) and updates the notice. */
@@ -3982,8 +4019,12 @@ async function refreshOrthancStatus(force = false) {
   if (!force && Date.now() - state.orthancCheckedAt < 60000) return;
   state.orthancCheckedAt = Date.now();
   try {
-    const result = await api("POST", "/api/admin/orthanc/test", {});
-    state.orthancProblem = result.ok ? "" : result.message;
+    // Every server (the default one with its saved connection, the others by their key).
+    const servers = severalServers() ? orthancServers() : [{ key: "main", label: "Orthanc" }];
+    const results = await Promise.all(servers.map((x) =>
+      api("POST", "/api/admin/orthanc/test", x.key === "main" ? {} : { server: x.key }).then((r) => [x, r])));
+    // One line per server that does not answer: "name<TAB>message".
+    state.orthancProblem = results.filter(([, r]) => !r.ok).map(([x, r]) => `${x.label}\t${r.message}`).join("\n");
   } catch { /* keep the previous state */ }
   paintOrthancBanner();
 }
@@ -4944,7 +4985,7 @@ function buildNodesView() {
   async function load() {
     container.replaceChildren(h("div", { class: "loading" }, "Loading..."));
     try {
-      const nodes = await api("GET", "/api/admin/nodes");
+      const nodes = await api("GET", onServer("nodes", "/api/admin/nodes"));
       container.replaceChildren(nodes.length ? renderTable(nodes) : h("div", { class: "empty" }, "No DICOM node yet. Add the remote PACS or workstation you want to send studies to."));
     } catch (e) {
       container.replaceChildren(h("div", { class: "empty" }, e.message));
@@ -4968,7 +5009,7 @@ function buildNodesView() {
             onclick: async (event) => {
               const button = event.currentTarget;
               button.disabled = true;
-              try { await api("POST", `/api/admin/nodes/${encodeURIComponent(n.id)}/echo`); toast(t("{node} answered the DICOM ping.", { node: n.id })); } catch (e) { toastError(e); }
+              try { await api("POST", onServer("nodes", `/api/admin/nodes/${encodeURIComponent(n.id)}/echo`)); toast(t("{node} answered the DICOM ping.", { node: n.id })); } catch (e) { toastError(e); }
               button.disabled = false;
             },
           }, "Test"),
@@ -4977,7 +5018,7 @@ function buildNodesView() {
             class: "btn small danger", type: "button",
             onclick: async () => {
               if (!confirm(t('Delete the DICOM node "{node}"?', { node: n.id }))) return;
-              try { await api("DELETE", `/api/admin/nodes/${encodeURIComponent(n.id)}`); toast("Node deleted."); load(); } catch (e) { toastError(e); }
+              try { await api("DELETE", onServer("nodes", `/api/admin/nodes/${encodeURIComponent(n.id)}`)); toast("Node deleted."); load(); } catch (e) { toastError(e); }
             },
           }, "Delete"))))))));
   }
@@ -4986,6 +5027,7 @@ function buildNodesView() {
   return h("div", { class: "view" },
     h("div", { class: "page-head" }, h("h2", null, "DICOM nodes"),
       h("button", { class: "btn primary", type: "button", onclick: () => openNodeDialog(null, load) }, "Add node")),
+    pageServerPicker("nodes"),
     h("p", { class: "muted" }, "Remote DICOM systems (a PACS, a workstation...) that users with the send permission can send studies to. They are stored in Orthanc itself; they survive an Orthanc restart only if Orthanc runs with DicomModalitiesInDatabase enabled."),
     container);
 }
@@ -5007,7 +5049,7 @@ function openNodeDialog(node, reload) {
       event.preventDefault();
       error.hidden = true;
       try {
-        await api("PUT", `/api/admin/nodes/${encodeURIComponent(isNew ? name.value.trim() : node.id)}`, {
+        await api("PUT", onServer("nodes", `/api/admin/nodes/${encodeURIComponent(isNew ? name.value.trim() : node.id)}`), {
           aet: aet.value, host: host.value, port: Number(port.value), description: description.value,
           allow_store: allowStore.checked, allow_echo: allowEcho.checked,
         });
@@ -5515,7 +5557,7 @@ function seriesManageMenu(series, study) {
 function buildRetrieveView() {
   const results = h("section", { class: "panel" }, h("div", { class: "empty" }, "Choose a system and search: its studies appear here, and you can bring them into this archive."));
   const source = h("select", { name: "source", "aria-label": "System" }, h("option", { value: "" }, "Loading..."));
-  api("GET", "/api/retrieve/sources").then((list) => {
+  api("GET", onServer("retrieve", "/api/retrieve/sources")).then((list) => {
     source.replaceChildren(...(list.length ? list.map((n) => h("option", { value: n.id },
       [n.description || n.id, n.kind === "dicomweb" ? " (DICOMweb)" : n.aet ? ` ${t("({aet} at {address})", { aet: n.aet, address: `${n.host}:${n.port}` })}` : ""].join(""))) : [h("option", { value: "" }, "No other system is set up in Orthanc")]));
   }).catch(toastError);
@@ -5528,7 +5570,7 @@ function buildRetrieveView() {
       form.querySelectorAll("input").forEach((i) => { if (i.value.trim()) body[i.name] = i.value.trim(); });
       results.replaceChildren(h("div", { class: "loading" }, "Asking the other system..."));
       try {
-        const r = await api("POST", "/api/retrieve/query", body);
+        const r = await api("POST", onServer("retrieve", "/api/retrieve/query"), body);
         results.replaceChildren(r.answers.length ? renderAnswers(r.answers, body.source) : h("div", { class: "empty" }, "Nothing found there."));
       } catch (e) { results.replaceChildren(h("div", { class: "empty" }, e.message)); }
     },
@@ -5555,7 +5597,7 @@ function buildRetrieveView() {
             onclick: async (event) => {
               event.currentTarget.disabled = true;
               try {
-                await api("POST", "/api/retrieve/retrieve", { source: sourceId, study_uid: a.study_uid, label });
+                await api("POST", onServer("retrieve", "/api/retrieve/retrieve"), { source: sourceId, study_uid: a.study_uid, label });
                 toast("Retrieving. Follow it on the Transfers page; the study then appears in the lists.", "info", 7000);
               } catch (e) { toastError(e); event.currentTarget.disabled = false; }
             },
@@ -5568,7 +5610,8 @@ function buildRetrieveView() {
       }))));
   }
 
-  return h("div", { class: "view" }, h("div", { class: "page-head" }, h("h1", null, "Retrieve from another system")), form, results);
+  return h("div", { class: "view" }, h("div", { class: "page-head" }, h("h1", null, "Retrieve from another system")),
+    pageServerPicker("retrieve", "Search from and retrieve into"), form, results);
 }
 
 /* ---- Worklists ---- */
@@ -5577,7 +5620,7 @@ function buildWorklistsView() {
   const container = h("section", { class: "panel" }, h("div", { class: "loading" }, "Loading..."));
   async function load() {
     try {
-      const list = await api("GET", "/api/worklists");
+      const list = await api("GET", onServer("worklists", "/api/worklists"));
       container.replaceChildren(list.length ? h("div", { class: "table-wrap" }, h("table", { class: "data" },
         h("thead", null, h("tr", null, ["Date", "Time", "Patient", "Patient ID", "Modality", "Description", "Station", "Accession", ""].map((t) => h("th", null, t)))),
         h("tbody", null, list.map((w) => h("tr", null,
@@ -5589,7 +5632,7 @@ function buildWorklistsView() {
             actionButton("button", "revoke", "Delete", "Delete this worklist", {
               class: "btn small danger", type: "button",
               onclick: () => formDialog("Delete this worklist?", `${formatName(w.patient_name)}, ${w.modality} ${formatDicomDate(w.date)}`, null, "Delete", async () => {
-                await api("DELETE", `/api/worklists/${encodeURIComponent(w.id)}`); toast("Worklist deleted."); load();
+                await api("DELETE", onServer("worklists", `/api/worklists/${encodeURIComponent(w.id)}`)); toast("Worklist deleted."); load();
               }, true),
             })))))))) : h("div", { class: "empty" }, "No worklist. Add the examinations the scanners should see."));
     } catch (e) { container.replaceChildren(h("div", { class: "empty" }, e.message)); }
@@ -5601,7 +5644,7 @@ function buildWorklistsView() {
         actionButton("button", "refresh", "Refresh", "Refresh the list", { class: "btn", type: "button", onclick: load }),
         h("button", { class: "btn primary", type: "button", onclick: () => openWorklistDialog(null, load) }, "Add a worklist"))),
     h("p", { class: "muted" }, "The examinations the scanners find when they ask the archive for their worklist (DICOM Modality Worklist). Needs Orthanc's worklists plugin with its REST API."),
-    container);
+    pageServerPicker("worklists"), container);
 }
 
 function openWorklistDialog(w, reload) {
@@ -5619,7 +5662,7 @@ function openWorklistDialog(w, reload) {
     }
     body.modality = (body.modality || "").toUpperCase();
     body.sex = (body.sex || "").toUpperCase();
-    await api(w ? "PUT" : "POST", w ? `/api/worklists/${encodeURIComponent(w.id)}` : "/api/worklists", body);
+    await api(w ? "PUT" : "POST", onServer("worklists", w ? `/api/worklists/${encodeURIComponent(w.id)}` : "/api/worklists"), body);
     toast(w ? "Worklist changed." : "Worklist added.");
     reload();
   });
@@ -5659,7 +5702,7 @@ function buildOrthancLogPanel() {
     const params = new URLSearchParams({ lines: lineCount.value });
     if (file) params.set("file", file);
     let r;
-    try { r = await api("GET", `/api/admin/system/log?${params}`); } catch (e) {
+    try { r = await api("GET", onServer("system", `/api/admin/system/log?${params}`)); } catch (e) {
       panel.replaceChildren(h("h2", null, "Orthanc log"), h("p", { class: "form-error" }, e.message));
       return;
     }
@@ -5680,7 +5723,7 @@ function buildOrthancLogPanel() {
       ? "{n} lines (the end of the file) of {file}, {size}, last written {date}. Every read is recorded in the audit log: the log can contain patient names and IDs."
       : "{n} lines of {file}, {size}, last written {date}. Every read is recorded in the audit log: the log can contain patient names and IDs.",
     { n: r.lines.length, file: r.file, size: formatBytes(r.size), date: formatTimestamp(r.modified) });
-    download.href = `/api/admin/system/log/download?file=${encodeURIComponent(r.file)}`;
+    download.href = onServer("system", `/api/admin/system/log/download?file=${encodeURIComponent(r.file)}`);
     if (!panel.contains(box)) {
       panel.replaceChildren(h("h2", null, "Orthanc log"),
         h("div", { class: "actions log-controls" }, fileSelect, lineCount, level, search,
@@ -5702,10 +5745,10 @@ function buildJobsView() {
   const container = h("section", { class: "panel" }, h("div", { class: "loading" }, "Loading..."));
   async function load() {
     try {
-      const jobs = await api("GET", "/api/admin/jobs");
+      const jobs = await api("GET", onServer("jobs", "/api/admin/jobs"));
       const act = (j, action, label) => h("button", {
         class: "btn small", type: "button",
-        onclick: async () => { try { await api("POST", `/api/admin/jobs/${j.id}/${action}`); toast(`${lookup(label)}: ${j.type}`); load(); } catch (e) { toastError(e); } },
+        onclick: async () => { try { await api("POST", onServer("jobs", `/api/admin/jobs/${j.id}/${action}`)); toast(`${lookup(label)}: ${j.type}`); load(); } catch (e) { toastError(e); } },
       }, label);
       container.replaceChildren(jobs.length ? h("div", { class: "table-wrap" }, h("table", { class: "data" },
         h("thead", null, h("tr", null, ["Created", "Type", "State", "Progress", "Run time", "Details", ""].map((t) => h("th", null, t)))),
@@ -5723,6 +5766,7 @@ function buildJobsView() {
   load();
   return h("div", { class: "view" },
     h("div", { class: "page-head" }, h("h2", null, "Jobs"), actionButton("button", "refresh", "Refresh", "Refresh the list", { class: "btn", type: "button", onclick: load })),
+    pageServerPicker("jobs"),
     h("p", { class: "muted" }, "Everything Orthanc does in the background: sending, retrieving, modifying, anonymizing, archives... Orthanc keeps the recent ones only."),
     container);
 }
@@ -5749,14 +5793,14 @@ function buildSystemView() {
   const container = h("div", null, h("section", { class: "panel" }, h("div", { class: "loading" }, "Loading...")));
   async function load() {
     let info;
-    try { info = await api("GET", "/api/admin/system"); } catch (e) { container.replaceChildren(h("section", { class: "panel empty" }, e.message)); return; }
+    try { info = await api("GET", onServer("system", "/api/admin/system")); } catch (e) { container.replaceChildren(h("section", { class: "panel empty" }, e.message)); return; }
     const s = info.system || {};
     const st = info.statistics || {};
     const row = (label, value) => (value === null || value === undefined || value === "" ? null : [h("dt", null, label), h("dd", null, String(value))]);
     const mb = (v) => (v == null ? null : formatBytes(Number(v) * 1024 * 1024));
     const level = h("select", { "aria-label": "Log level" }, ["default", "verbose", "trace"].map((l) => h("option", { value: l, selected: l === info.log_level }, l)));
     level.addEventListener("change", async () => {
-      try { await api("PUT", "/api/admin/system/log-level", { level: level.value }); toast(t("Orthanc's log level is now {level}.", { level: level.value })); } catch (e) { toastError(e); }
+      try { await api("PUT", onServer("system", "/api/admin/system/log-level"), { level: level.value }); toast(t("Orthanc's log level is now {level}.", { level: level.value })); } catch (e) { toastError(e); }
     });
     const metrics = h("pre", { class: "raw-box", hidden: true });
     const panels = [
@@ -5782,7 +5826,7 @@ function buildSystemView() {
         h("button", {
           class: "btn small", type: "button",
           onclick: async () => {
-            try { const r = await fetch("/api/admin/system/metrics", { credentials: "same-origin" }); metrics.textContent = r.ok ? await r.text() : translateMessage((await r.json()).error); } catch (e) { metrics.textContent = e.message; }
+            try { const r = await fetch(onServer("system", "/api/admin/system/metrics"), { credentials: "same-origin" }); metrics.textContent = r.ok ? await r.text() : translateMessage((await r.json()).error); } catch (e) { metrics.textContent = e.message; }
             metrics.hidden = false;
           },
         }, "Show the metrics"), metrics),
@@ -5811,6 +5855,7 @@ function buildSystemView() {
   load();
   return h("div", { class: "view" },
     h("div", { class: "page-head" }, h("h2", null, "System"), actionButton("button", "refresh", "Refresh", "Refresh", { class: "btn", type: "button", onclick: load })),
+    pageServerPicker("system"),
     container);
 }
 
@@ -5977,7 +6022,7 @@ function buildStatsView() {
   const container = h("div", { class: "view" }, h("div", { class: "panel loading" }, "Counting..."));
   async function load(refresh = false) {
     try {
-      const d = await api("GET", `/api/admin/stats${refresh ? "?refresh=true" : ""}`);
+      const d = await api("GET", onServer("stats", `/api/admin/stats${refresh ? "?refresh=true" : ""}`));
       container.replaceChildren(...render(d));
     } catch (e) {
       container.replaceChildren(h("div", { class: "panel empty" }, e.message));
@@ -6029,6 +6074,7 @@ function buildStatsView() {
   return h("div", { class: "view" },
     h("div", { class: "page-head" }, h("h2", null, "Statistics"),
       actionButton("button", "refresh", "Count again", "Count again (otherwise the numbers are kept for 10 minutes)", { class: "btn", type: "button", onclick: () => load(true) })),
+    pageServerPicker("stats"),
     container);
 }
 

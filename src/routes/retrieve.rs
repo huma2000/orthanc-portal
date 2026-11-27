@@ -14,7 +14,9 @@ use crate::auth::AuthUser;
 use crate::db::User;
 use crate::error::{AppError, AppResult};
 use crate::models::ModalityNode;
+use crate::orthanc::OrthancClient;
 use crate::permissions::Permission;
+use crate::servers::Chosen;
 use crate::state::AppState;
 use crate::util::feature;
 use crate::util::{contains_pattern, dicom_date, is_valid_dicom_uid, non_empty};
@@ -24,17 +26,17 @@ use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
-fn allowed(state: &AppState, user: &User) -> AppResult<()> {
+/// The checks of every request, and the server that queries and retrieves (`?server=`: the
+/// studies are retrieved into it, from the systems configured in ITS Orthanc).
+fn allowed(state: &AppState, user: &User, chosen: &Chosen) -> AppResult<OrthancClient> {
     user.require_or_admin(Permission::Retrieve)?;
     feature(state.settings.get().query_retrieve, "Query / retrieve is switched off")?;
-    // Studies are retrieved into the default server (a choice comes in multi-server phase 4).
-    state.orthancs.default_for(user).map(|_| ())
+    state.orthancs.chosen(user, chosen)
 }
 
 /// DICOM nodes that answer C-FIND, and the DICOMweb servers of Orthanc.
-async fn sources(state: &AppState) -> AppResult<Vec<ModalityNode>> {
-    let mut nodes: Vec<ModalityNode> = state
-        .orthanc
+async fn sources(state: &AppState, orthanc: &OrthancClient) -> AppResult<Vec<ModalityNode>> {
+    let mut nodes: Vec<ModalityNode> = orthanc
         .modalities_raw()
         .await?
         .iter()
@@ -42,7 +44,7 @@ async fn sources(state: &AppState) -> AppResult<Vec<ModalityNode>> {
         .map(|(id, cfg)| if cfg.is_null() { ModalityNode::bare(id) } else { ModalityNode::from_orthanc(id, cfg) })
         .collect();
     nodes.sort_by(|a, b| a.id.cmp(&b.id));
-    let servers = state.orthanc.named_targets("/dicom-web/servers").await;
+    let servers = orthanc.named_targets("/dicom-web/servers").await;
     nodes.extend(servers.iter().map(|(name, cfg)| crate::routes::send::named_target("dicomweb", name, cfg)));
     let descriptions = state.db.node_descriptions()?;
     for node in &mut nodes {
@@ -54,13 +56,19 @@ async fn sources(state: &AppState) -> AppResult<Vec<ModalityNode>> {
 pub async fn list_sources(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
+    chosen: Chosen,
 ) -> AppResult<Json<Vec<ModalityNode>>> {
-    allowed(&state, &user)?;
-    Ok(Json(sources(&state).await?))
+    let orthanc = allowed(&state, &user, &chosen)?;
+    let orthanc = &orthanc;
+    Ok(Json(sources(&state, orthanc).await?))
 }
 
-async fn find_source(state: &AppState, id: &str) -> AppResult<ModalityNode> {
-    sources(state).await?.into_iter().find(|n| n.id == id).ok_or_else(|| AppError::BadRequest("Unknown system".into()))
+async fn find_source(state: &AppState, orthanc: &OrthancClient, id: &str) -> AppResult<ModalityNode> {
+    sources(state, orthanc)
+        .await?
+        .into_iter()
+        .find(|n| n.id == id)
+        .ok_or_else(|| AppError::BadRequest("Unknown system".into()))
 }
 
 /// The name of a source in Orthanc's REST paths (an alias, or `dicomweb:<name>` without its prefix).
@@ -144,7 +152,7 @@ fn answer(values: [&str; 8]) -> Value {
 }
 
 /// C-FIND through Orthanc: `POST /modalities/{alias}/query`, then the answers.
-async fn dicom_query(state: &AppState, node: &ModalityNode, c: &Criteria) -> AppResult<Vec<Value>> {
+async fn dicom_query(orthanc: &OrthancClient, node: &ModalityNode, c: &Criteria) -> AppResult<Vec<Value>> {
     let mut q = Map::new();
     let put = |q: &mut Map<String, Value>, key: &str, v: &Option<String>| {
         q.insert(key.into(), json!(v.clone().unwrap_or_default()));
@@ -158,15 +166,14 @@ async fn dicom_query(state: &AppState, node: &ModalityNode, c: &Criteria) -> App
     for key in ["StudyInstanceUID", "PatientBirthDate", "NumberOfStudyRelatedInstances"] {
         q.insert(key.into(), json!(""));
     }
-    let started = state
-        .orthanc
+    let started = orthanc
         .post_json(&format!("/modalities/{}/query", path_name(node)), &json!({ "Level": "Study", "Query": q }))
         .await?;
     let query_id = started["ID"].as_str().unwrap_or("");
     if query_id.is_empty() || !query_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return Err(AppError::Upstream("Orthanc did not return the query".into()));
     }
-    let answers = state.orthanc.get_json(&format!("/queries/{query_id}/answers?expand&simplify")).await?;
+    let answers = orthanc.get_json(&format!("/queries/{query_id}/answers?expand&simplify")).await?;
     let text = |a: &Value, k: &str| a[k].as_str().unwrap_or("").to_string();
     Ok(answers
         .as_array()
@@ -206,7 +213,7 @@ fn dicom_json(item: &Value, tag: &str) -> String {
 }
 
 /// QIDO-RS through Orthanc's DICOMweb client: `POST /dicom-web/servers/{name}/get`.
-async fn dicomweb_query(state: &AppState, node: &ModalityNode, c: &Criteria) -> AppResult<Vec<Value>> {
+async fn dicomweb_query(orthanc: &OrthancClient, node: &ModalityNode, c: &Criteria) -> AppResult<Vec<Value>> {
     let enc = |v: &str| utf8_percent_encode(v, NON_ALPHANUMERIC).to_string();
     let mut uri = String::from("/studies?limit=200&includefield=00081030&includefield=00080061&includefield=00201208");
     for (key, value) in [
@@ -222,7 +229,7 @@ async fn dicomweb_query(state: &AppState, node: &ModalityNode, c: &Criteria) -> 
         }
     }
     let found =
-        state.orthanc.post_json(&format!("/dicom-web/servers/{}/get", path_name(node)), &json!({ "Uri": uri })).await?;
+        orthanc.post_json(&format!("/dicom-web/servers/{}/get", path_name(node)), &json!({ "Uri": uri })).await?;
     Ok(found
         .as_array()
         .map(|list| {
@@ -247,15 +254,17 @@ async fn dicomweb_query(state: &AppState, node: &ModalityNode, c: &Criteria) -> 
 pub async fn query(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
+    chosen: Chosen,
     Json(req): Json<QueryRequest>,
 ) -> AppResult<Json<Value>> {
-    allowed(&state, &user)?;
+    let orthanc = allowed(&state, &user, &chosen)?;
+    let orthanc = &orthanc;
     let c = criteria(&req)?;
-    let node = find_source(&state, &req.source).await?;
+    let node = find_source(&state, orthanc, &req.source).await?;
     let mut answers = if node.kind == "dicomweb" {
-        dicomweb_query(&state, &node, &c).await?
+        dicomweb_query(orthanc, &node, &c).await?
     } else {
-        dicom_query(&state, &node, &c).await?
+        dicom_query(orthanc, &node, &c).await?
     };
     answers.retain(|a| a["study_uid"].as_str().is_some_and(is_valid_dicom_uid));
     answers.truncate(200);
@@ -263,8 +272,7 @@ pub async fn query(
     // Which of them are already here? One search with the list of UIDs ("any of").
     let uids: Vec<&str> = answers.iter().filter_map(|a| a["study_uid"].as_str()).collect();
     if !uids.is_empty() {
-        let here = state
-            .orthanc
+        let here = orthanc
             .find(&json!({ "Level": "Study", "Query": { "StudyInstanceUID": uids.join("\\") }, "Expand": true, "Limit": 1000 }))
             .await
             .unwrap_or_default();
@@ -293,13 +301,15 @@ pub struct RetrieveRequest {
 pub async fn retrieve(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
+    chosen: Chosen,
     Json(req): Json<RetrieveRequest>,
 ) -> AppResult<Json<Value>> {
-    allowed(&state, &user)?;
+    let orthanc = allowed(&state, &user, &chosen)?;
+    let orthanc = &orthanc;
     if !is_valid_dicom_uid(&req.study_uid) {
         return Err(AppError::BadRequest("Invalid StudyInstanceUID".into()));
     }
-    let node = find_source(&state, &req.source).await?;
+    let node = find_source(&state, orthanc, &req.source).await?;
     let (path, body) = if node.kind == "dicomweb" {
         (
             format!("/dicom-web/servers/{}/retrieve", path_name(&node)),
@@ -311,11 +321,13 @@ pub async fn retrieve(
             json!({ "Level": "Study", "Resources": [{ "StudyInstanceUID": req.study_uid }], "Synchronous": false }),
         )
     };
-    let answer = state.orthanc.post_json(&path, &body).await?;
+    let answer = orthanc.post_json(&path, &body).await?;
     let label: String = req.label.chars().filter(|c| !c.is_control()).take(160).collect();
     let label = if label.trim().is_empty() { req.study_uid.clone() } else { label };
     // A job id when Orthanc runs it in the background; some versions answer only when it is done.
     let job = answer["ID"].as_str().unwrap_or("").to_string();
+    // A job of another server is written `key:job`: the Transfers list follows it there.
+    let job = if job.is_empty() { job } else { crate::servers::compound(chosen.key(), &job) };
     let transfer = state.db.add_transfer(&user.username, &req.study_uid, &label, &node.id, &job, "retrieve")?;
     if job.is_empty() {
         let _ = state.db.set_transfer_final(transfer, "Success", None, "{}");

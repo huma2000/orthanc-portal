@@ -306,13 +306,20 @@ pub async fn list_transfers(
                 };
             }
             // A study sent from another server: its job runs there (the transfer stores `key:id`).
-            let server = match t.direction.as_str() {
-                "retrieve" => crate::settings::MAIN_SERVER.to_string(),
-                _ => ResourceRef::try_parse(&t.study_id)
-                    .map_or_else(|| crate::settings::MAIN_SERVER.to_string(), |r| r.server),
+            // A retrieve into another server stores its job as `key:job`.
+            let (server, job_id) = match t.direction.as_str() {
+                "retrieve" => match t.job_id.split_once(':') {
+                    Some((key, job)) => (key.to_string(), job.to_string()),
+                    None => (crate::settings::MAIN_SERVER.to_string(), t.job_id.clone()),
+                },
+                _ => (
+                    ResourceRef::try_parse(&t.study_id)
+                        .map_or_else(|| crate::settings::MAIN_SERVER.to_string(), |r| r.server),
+                    t.job_id.clone(),
+                ),
             };
             let job = match state.orthancs.stored(&server) {
-                Ok(orthanc) => orthanc.get_job(&t.job_id).await,
+                Ok(orthanc) => orthanc.get_job(&job_id).await,
                 Err(_) => Err(AppError::Upstream("its Orthanc server is not available".into())),
             };
             let (job_state, progress, error, (instances, failed, runtime)) = match job {

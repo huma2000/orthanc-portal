@@ -100,6 +100,39 @@ pub fn compound(server: &str, id: &str) -> String {
     }
 }
 
+/// `?server=key` of a request to a page that shows one server at a time (Jobs, System, Orthanc
+/// log, DICOM nodes, worklists, query / retrieve, Statistics): empty = the default server. Read
+/// from the query string whatever else it holds; checked by [`OrthancPool::chosen`].
+pub struct Chosen(pub String);
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for Chosen {
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut axum::http::request::Parts, _: &S) -> Result<Self, AppError> {
+        let key = parts
+            .uri
+            .query()
+            .unwrap_or_default()
+            .split('&')
+            .filter_map(|pair| pair.split_once('='))
+            .find(|(name, _)| *name == "server")
+            .map(|(_, value)| value.to_string())
+            .unwrap_or_default();
+        Ok(Chosen(key))
+    }
+}
+
+impl Chosen {
+    /// The key, `main` when none was given.
+    pub fn key(&self) -> &str {
+        if self.0.is_empty() {
+            MAIN_SERVER
+        } else {
+            &self.0
+        }
+    }
+}
+
 /// One server the pool can reach.
 #[derive(Clone)]
 struct Member {
@@ -258,6 +291,16 @@ impl OrthancPool {
             )));
         }
         self.stored(MAIN_SERVER)
+    }
+
+    /// The server a page shows (`?server=`): the default one when none is given (refused with an
+    /// explanation to an account that may not use it), otherwise one this person may use (404).
+    pub fn chosen(&self, user: &User, chosen: &Chosen) -> Result<OrthancClient, AppError> {
+        if chosen.key() == MAIN_SERVER {
+            self.default_for(user)
+        } else {
+            self.get(user, chosen.key())
+        }
     }
 
     /// The servers this person may use that are switched on, in the configured order (the

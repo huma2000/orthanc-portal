@@ -16,7 +16,9 @@
 
 use crate::auth::AuthUser;
 use crate::error::AppResult;
+use crate::orthanc::OrthancClient;
 use crate::permissions::Permission;
+use crate::servers::Chosen;
 use crate::state::AppState;
 use crate::util::{civil_from_days, days_from_civil, feature, now_unix};
 use axum::extract::{Query, State};
@@ -24,12 +26,14 @@ use axum::Json;
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 const CACHE_SECS: i64 = 600;
 const MONTHS: usize = 12;
 
-static CACHE: Mutex<Option<(i64, Value)>> = Mutex::new(None);
+/// The last answer of each server (by key) and when it was computed.
+static CACHE: Mutex<BTreeMap<String, (i64, Value)>> = Mutex::new(BTreeMap::new());
 
 /// The last `MONTHS` months, oldest first: (year, month).
 pub fn last_months(now: i64) -> Vec<(i64, u32)> {
@@ -64,24 +68,28 @@ pub struct StatsQuery {
 pub async fn overview(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
+    chosen: Chosen,
     Query(q): Query<StatsQuery>,
 ) -> AppResult<Json<Value>> {
     user.require(Permission::Admin)?;
     feature(state.settings.get().stats_page, "The Statistics page is switched off")?;
+    // The studies counted are those of the chosen server (`?server=`; the default one without it).
+    let orthanc = state.orthancs.chosen(&user, &chosen)?;
+    let key = chosen.key().to_string();
     let now = now_unix();
     if !q.refresh {
-        if let Some((at, value)) = CACHE.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        if let Some((at, value)) = CACHE.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
             if now - at < CACHE_SECS {
                 return Ok(Json(value.clone()));
             }
         }
     }
-    let value = compute(&state, now).await?;
-    *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((now, value.clone()));
+    let value = compute(&state, &orthanc, now).await?;
+    CACHE.lock().unwrap_or_else(|e| e.into_inner()).insert(key, (now, value.clone()));
     Ok(Json(value))
 }
 
-async fn compute(state: &AppState, now: i64) -> AppResult<Value> {
+async fn compute(state: &AppState, orthanc: &OrthancClient, now: i64) -> AppResult<Value> {
     let settings = state.settings.get();
     let months = last_months(now);
     let keys: Vec<String> = months.iter().map(|(y, m)| format!("{y:04}-{m:02}")).collect();
@@ -101,7 +109,6 @@ async fn compute(state: &AppState, now: i64) -> AppResult<Value> {
             questions.push((i, Some(b), json!({ "StudyDate": range, "ModalitiesInStudy": codes.join("\\") })));
         }
     }
-    let orthanc = &state.orthanc;
     let answers: Vec<(usize, Option<usize>, Option<u64>)> = futures_util::stream::iter(questions)
         .map(|(i, b, query)| async move {
             let body = json!({ "Level": "Study", "Query": query });

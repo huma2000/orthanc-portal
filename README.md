@@ -558,8 +558,8 @@ never read them. It is checked by the server on every request, like the permissi
   own gets the role's).
 * A server a role still uses cannot be removed (the save says which one). A removed server leaves the lists of
   the accounts that had it; an account limited to some servers stays limited, it never becomes "all".
-* Pages that only work with the default server for now (upload, upload links, query / retrieve, worklists)
-  are refused, with an explanation, to an account that may not use it. Share links keep working whoever made
+* A page that shows one server at a time opens on the default server; an account that may not use it is
+  refused there with an explanation, and chooses one of its own servers. Share links keep working whoever made
   them: a link is tied to its server when it is made.
 
 **Adding a permission** (e.g. `delete`): add a variant in `src/permissions.rs` (`ALL`, `as_str`,
@@ -1113,9 +1113,8 @@ Users* and *Security & roles* choose who may use which server. `POST /api/admin/
 
 **IDs and several Orthanc servers.** `{id}` is Orthanc's own ID of a study, series, image or job. Besides the
 default Orthanc (the *Orthanc connection* settings, key `main`), the portal can reach other Orthanc servers, set
-in the `orthanc_servers` setting. *Being built*: searching, viewing, downloads, labels, edits, links,
-sending, copies, uploads and auto-forward work with every server; query / retrieve, worklists and the admin
-pages still use the default server:
+in the `orthanc_servers` setting. Everything works with every server: searching, viewing, downloads,
+labels, edits, links, sending, copies, uploads, auto-forward, and the pages that show one server at a time:
 
 ```json
 "orthanc_servers": [
@@ -1165,6 +1164,11 @@ removes it), and must be typed again when its address moves to another server.
   destinations (they need the same name in each Orthanc's configuration); the target `server:<key>` copies it
   to that other Orthanc server instead. The email names the server ("Stored on"), and a study is announced
   once per server. A server a rule uses cannot be removed.
+* **Pages that show one server at a time** (Jobs, System and the Orthanc log, DICOM nodes, worklists, query /
+  retrieve, Statistics) have a server choice at the top (remembered per page by the browser). Their API takes
+  `?server=key` (the default server without it); query / retrieve searches the systems of that server's
+  Orthanc and retrieves into it, and each server's log folder is its own. The "Orthanc is not reachable"
+  notice of administrators names the server that does not answer.
 * **`GET /api/me`** lists the servers the account may use (`orthanc_servers`: key, label, colour); the page
   shows its server controls only with two or more. Users (`/api/admin/users`) and roles have `servers`:
   `null` = every server, or a list of keys (at least one).
