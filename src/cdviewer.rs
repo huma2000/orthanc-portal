@@ -48,8 +48,9 @@ const PACKAGE_URL: &str =
 const PACKAGE_SHA256: &str = "65df004c895f221e54a36fd4b8444b9b3be51c452bd9fa39ea5f99ff4d1f85f6";
 /// A package bigger than this is refused while downloading.
 const MAX_PACKAGE_BYTES: u64 = 300 * 1024 * 1024;
-/// Weasis' control port on the CD (the installed Weasis uses 17179): the CD's command never goes
-/// to a Weasis already running on the computer.
+/// The `gosh.port` of the CD's Weasis (the installed Weasis uses 17179). Weasis does not listen on
+/// it as a command shell; a value of its own keeps the CD's copy from sharing anything with an
+/// installed Weasis (which, with its own profile and its own install folder, is kept apart anyway).
 const CD_CONTROL_PORT: u32 = 17189;
 /// The Weasis profile of the CD: its preferences stay apart from an installed Weasis.
 const CD_PROFILE: &str = "portal-cd";
@@ -128,6 +129,19 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// [`package_ready`] off the request threads: the first check of a file copied by hand reads all
+/// of it (about 66 MB).
+pub async fn package_ready_off_thread(state: &AppState) -> bool {
+    let state = state.clone();
+    tokio::task::spawn_blocking(move || package_ready(&state)).await.unwrap_or(false)
+}
+
+/// [`status`] off the request threads (see [`package_ready_off_thread`]).
+pub async fn status_off_thread(state: &AppState) -> Value {
+    let state = state.clone();
+    tokio::task::spawn_blocking(move || status(&state)).await.unwrap_or_default()
+}
+
 /// What Settings > Features shows: present (and checked), size, a download under way, an error.
 pub fn status(state: &AppState) -> Value {
     let path = package_path(state);
@@ -164,7 +178,7 @@ pub fn start_download(state: &AppState) {
     }
     let state = state.clone();
     tokio::spawn(async move {
-        let outcome = if package_ready(&state) { Ok(()) } else { download(&state).await };
+        let outcome = if package_ready_off_thread(&state).await { Ok(()) } else { download(&state).await };
         update(|d| {
             d.running = false;
             d.error = outcome.err();
@@ -233,12 +247,17 @@ async fn download(state: &AppState) -> Result<(), String> {
     Ok(())
 }
 
-/// At start-up: when the CD viewer is Weasis, "download it automatically" is on and it is missing.
+/// At start-up: when the CD viewer is Weasis, "download it automatically" is on and it is missing
+/// (checked in the background: the start is never held up by reading the file).
 pub fn download_if_wanted(state: &AppState) {
     let settings = state.settings.get();
-    if settings.cd_export && settings.cd_viewer == "weasis" && settings.cd_weasis_autodownload && !package_ready(state)
-    {
-        start_download(state);
+    if settings.cd_export && settings.cd_viewer == "weasis" && settings.cd_weasis_autodownload {
+        let state = state.clone();
+        tokio::spawn(async move {
+            if !package_ready_off_thread(&state).await {
+                start_download(&state);
+            }
+        });
     }
 }
 

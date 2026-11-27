@@ -246,7 +246,7 @@ pub async fn update_settings(
 /// `GET /api/admin/cd-viewer`: Weasis for patient CDs: present, downloading, its size, an error.
 pub async fn cd_viewer_status(State(state): State<AppState>, AuthUser(admin): AuthUser) -> AppResult<Json<Value>> {
     admin.require(Permission::Admin)?;
-    Ok(Json(crate::cdviewer::status(&state)))
+    Ok(Json(crate::cdviewer::status_off_thread(&state).await))
 }
 
 /// `POST /api/admin/cd-viewer/download`: downloads it now (in the background); the answer is the status.
@@ -254,7 +254,7 @@ pub async fn cd_viewer_download(State(state): State<AppState>, AuthUser(admin): 
     admin.require(Permission::Admin)?;
     crate::cdviewer::start_download(&state);
     state.db.audit(&admin.username, "cd_viewer_download", crate::cdviewer::PACKAGE_NAME);
-    Ok(Json(crate::cdviewer::status(&state)))
+    Ok(Json(crate::cdviewer::status_off_thread(&state).await))
 }
 
 // ------------------------------------------------------------- new versions

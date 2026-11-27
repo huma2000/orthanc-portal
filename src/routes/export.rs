@@ -114,7 +114,7 @@ pub async fn cd_export(
 
     // 2. The final ZIP: Orthanc's entries as they are, the page for the patient, the viewer.
     let viewer = match settings.cd_viewer.as_str() {
-        "weasis" if crate::cdviewer::package_ready(&state) => Viewer::Weasis {
+        "weasis" if crate::cdviewer::package_ready_off_thread(&state).await => Viewer::Weasis {
             package: crate::cdviewer::package_path(&state),
             cd: crate::cdviewer::CdBranding {
                 name: crate::cdviewer::viewer_name(&state),
@@ -271,7 +271,13 @@ fn add_weasis(
         if name == "viewer/app/Weasis.cfg" {
             drop(entry);
             let mut text = String::new();
-            archive.by_index(i).map_err(|e| e.to_string())?.read_to_string(&mut text).map_err(|e| e.to_string())?;
+            // A launcher configuration is a few hundred bytes: at most 1 MB is read.
+            archive
+                .by_index(i)
+                .map_err(|e| e.to_string())?
+                .take(1024 * 1024)
+                .read_to_string(&mut text)
+                .map_err(|e| e.to_string())?;
             original_cfg = Some(text);
             continue;
         }
@@ -281,7 +287,7 @@ fn add_weasis(
     let original_cfg = original_cfg.ok_or("the package has no viewer/app/Weasis.cfg")?;
     let small = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
     let splash_name = cd.splash.as_ref().map(|(_, ext)| format!("portal-splash.{ext}"));
-    let mut files: Vec<(String, Vec<u8>)> = vec![
+    let files: [(String, Vec<u8>); 4] = [
         (
             "viewer/app/Weasis.cfg".into(),
             crate::cdviewer::weasis_cfg(&original_cfg, splash_name.as_deref()).into_bytes(),
@@ -290,12 +296,15 @@ fn add_weasis(
         ("Autorun.inf".into(), crate::cdviewer::autorun_inf(&cd.name).into_bytes()),
         ("RUN.bat".into(), crate::cdviewer::run_bat().into_bytes()),
     ];
-    if let (Some((data, _)), Some(file)) = (&cd.splash, &splash_name) {
-        files.push((format!("viewer/app/resources/images/{file}"), data.clone()));
-    }
     for (name, data) in files {
         writer.start_file(name, small).map_err(|e| e.to_string())?;
         writer.write_all(&data).map_err(|e| e.to_string())?;
+        added += 1;
+    }
+    // The splash image, written from the settings' copy (not copied again).
+    if let (Some((data, _)), Some(file)) = (&cd.splash, &splash_name) {
+        writer.start_file(format!("viewer/app/resources/images/{file}"), small).map_err(|e| e.to_string())?;
+        writer.write_all(data).map_err(|e| e.to_string())?;
         added += 1;
     }
     Ok(added)
