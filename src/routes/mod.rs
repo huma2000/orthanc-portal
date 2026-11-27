@@ -57,6 +57,7 @@ pub mod account;
 pub mod admin;
 pub mod backup;
 pub mod branding;
+pub mod copy;
 pub mod download;
 pub mod export;
 pub mod files;
@@ -219,6 +220,7 @@ fn staff_router(state: AppState) -> Router {
         // --- send to remote DICOM nodes ---
         .route("/modalities", get(send::list_modalities))
         .route("/studies/{id}/send", post(send::send_study))
+        .route("/studies/{id}/copy", post(copy::copy_study))
         .route("/send", post(send::send_many))
         .route("/transfers", get(send::list_transfers))
         // --- invitation links for people outside ---

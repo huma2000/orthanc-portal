@@ -1880,6 +1880,9 @@ function studyActions(study, onLabels = () => {}, onCopy = null) {
       : null,
     canEditLabels() ? actionButton("button", "tag", "Labels", "Labels: put labels on this study or take them off", { class: "btn small", type: "button", onclick: () => openLabelsDialog(study, onLabels) }) : null,
     can("send") ? actionButton("button", "send", "Send to...", "Send to a DICOM node", { class: "btn small", type: "button", onclick: () => openSendDialog(study) }) : null,
+    can("send") && severalServers()
+      ? actionButton("button", "servers", "Copy to server...", "Copy this study to another Orthanc server", { class: "btn small", type: "button", onclick: () => openCopyDialog(study) })
+      : null,
     can("share") ? actionButton("button", "share", "Share...", "Share with somebody outside (link + password)", { class: "btn small", type: "button", onclick: () => openShareDialog(study) }) : null,
     can("download") ? downloadMenu("studies", study.id) : null,
     can("visualize") && opts().instances && study.modalities.includes("DOC")
@@ -2101,6 +2104,49 @@ async function openSendDialog(studyOrList) {
       h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Cancel"),
       submit)));
 
+  dialog.addEventListener("close", () => dialog.remove());
+  document.body.append(dialog);
+  dialog.showModal();
+}
+
+/**
+ * "Copy to server...": copies a study to another Orthanc server (the portal copies it image by
+ * image; the Transfers page shows the progress). Optionally deletes it from its server afterwards.
+ */
+function openCopyDialog(study) {
+  const others = orthancServers().filter((x) => x.key !== (study.server || "main") && !(study.servers || []).includes(x.key));
+  if (!others.length) { toast("This study is already on every other server.", "info", 6000); return; }
+  const error = h("div", { class: "form-error", role: "alert", hidden: true });
+  const target = h("select", null, others.map((x) => h("option", { value: x.key }, x.label)));
+  const remove = h("input", { type: "checkbox" });
+  const submit = h("button", { class: "btn primary", type: "submit" }, "Copy");
+  const dialog = h("dialog", null, h("form", {
+    onsubmit: async (event) => {
+      event.preventDefault();
+      error.hidden = true;
+      if (remove.checked && !confirm(t("Delete the study from {server} once it is copied?", { server: serverName(study.server || "main") }))) return;
+      submit.disabled = true;
+      try {
+        const r = await api("POST", `/api/studies/${study.id}/copy`, { server: target.value, delete_original: remove.checked });
+        dialog.close();
+        toast(t("Copying {n} images to {server}: the Transfers page shows the progress.", { n: r.images, server: serverName(target.value) }), "info", 8000);
+      } catch (e) {
+        error.textContent = translateMessage(e.message);
+        error.hidden = false;
+        submit.disabled = false;
+      }
+    },
+  },
+    h("h2", null, "Copy to another server"),
+    h("p", null, h("b", null, formatName(study.patient_name)), " ", formatDicomDate(study.study_date), study.study_description ? `, ${study.study_description}` : "",
+      " ", h("span", { class: "muted" }, t("(on {server})", { server: serverName(study.server || "main") }))),
+    error,
+    h("label", null, "Copy to", target),
+    opts().delete ? h("label", { class: "check" }, remove, t("Then delete it from {server} (only when every image was copied)", { server: serverName(study.server || "main") })) : null,
+    h("p", { class: "muted" }, "The portal copies every image from one server to the other. Images the other server already has are kept as they are."),
+    h("div", { class: "dialog-actions" },
+      h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Cancel"),
+      submit)));
   dialog.addEventListener("close", () => dialog.remove());
   document.body.append(dialog);
   dialog.showModal();
@@ -2544,6 +2590,8 @@ function buildTransfersView() {
       if (ran) parts.push(ran);
       if (r.runtime && r.progress > 0 && r.progress < 100) parts.push(t("about {time} left", { time: formatDuration((r.runtime * (100 - r.progress)) / r.progress) }));
       detail = parts.join(" · ") || (retrieved ? "Retrieving" : "Sending");
+    } else if (r.state === "Success" && r.direction === "copy") {
+      detail = t("{n} images copied in {time}", { n: images || 0, time: ran || t("a moment") });
     } else if (r.state === "Success") {
       detail = images
         ? t(retrieved ? "{n} images retrieved in {time}" : "{n} images sent in {time}", { n: images, time: ran || t("a moment") })
@@ -2573,7 +2621,7 @@ function buildTransfersView() {
             : null),
         r.direction === "retrieve"
           ? h("td", null, h("span", { class: "chip" }, "from"), " ", destinationCell(r.target).firstChild || r.target)
-          : destinationCell(r.target),
+          : r.direction === "copy" ? h("td", null, serverBadge(r.target)) : destinationCell(r.target),
         h("td", null, r.username),
         progressCell(r),
         h("td", null, h("span", { class: `chip state-${r.state.toLowerCase()}` }, r.state)))))));

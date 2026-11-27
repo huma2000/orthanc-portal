@@ -1142,6 +1142,11 @@ removes it), and must be typed again when its address moves to another server.
 * **Sending.** Each server sends its own studies, to its own destinations (DICOM nodes, peers and DICOMweb
   servers are set in each Orthanc's configuration): `GET /api/modalities?server=key`. Studies sent together
   (`POST /api/send`) must be on one server. The Transfers list follows each job on its server.
+* **Copy to another server.** `POST /api/studies/{id}/copy` `{ "server": "archive", "delete_original": false }`
+  (permission `send`, both servers among the account's). The portal copies the study image by image, from
+  one Orthanc to the other, so the servers need no peer configuration. The copy is a transfer (direction
+  `copy`) with its progress. *Delete the original* needs the `delete` permission and deleting switched on,
+  and happens only when every image was copied. The study's menu offers it as **Copy to server...**.
 * **`GET /api/me`** lists the servers the account may use (`orthanc_servers`: key, label, colour); the page
   shows its server controls only with two or more. Users (`/api/admin/users`) and roles have `servers`:
   `null` = every server, or a list of keys (at least one).

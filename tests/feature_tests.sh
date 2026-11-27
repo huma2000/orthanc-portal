@@ -416,6 +416,14 @@ ok "sending it: that server sends it" "$(code $F $A POST /api/studies/$AID/send 
 J2=$(grep -c "/jobs/" "$WORK/m2/auth.log")
 ok "...and the transfer is followed there" "$(body $F $A /api/transfers | py "len(d) > 0")/$(( $(grep -c "/jobs/" "$WORK/m2/auth.log") > J2 ))" "True/1"
 ok "sending studies of two servers at once is refused (400)" "$(code $F $A POST /api/send -H "$J" -d "{\"target\":\"ris\",\"studies\":[\"$SID\",\"$AID\"]}")" "400"
+# Copy to another server: the portal reads each image from one and stores it on the other.
+U0=$(cat "$WORK/m2/upload.log" 2>/dev/null | wc -l)
+ok "copying a study to the archive" "$(body $F $A /api/studies/$SID/copy -X POST -H "$J" -d '{"server":"archive"}' | py "d['images']")" "8"
+for i in 1 2 3 4 5 6 7 8 9 10; do [ "$(body $F $A /api/transfers | py "[t['state'] for t in d if t['direction'] == 'copy'][0]")" = "Success" ] && break; sleep 0.3; done
+ok "...every image went there, and the transfer says so" "$(( $(cat "$WORK/m2/upload.log" | wc -l) - U0 ))/$(body $F $A /api/transfers | py "[(t['state'], t['instances'], t['target']) for t in d if t['direction'] == 'copy'][0]")" "8/('Success', 8, 'archive')"
+ok "...not to the server it is on (400)" "$(code $F $A POST /api/studies/$SID/copy -H "$J" -d '{"server":"main"}')" "400"
+ok "...nor to an unknown one (404)" "$(code $F $A POST /api/studies/$SID/copy -H "$J" -d '{"server":"nowhere"}')" "404"
+ok "...deleting the original needs deleting switched on (403)" "$(code $F $A POST /api/studies/$SID/copy -H "$J" -d '{"server":"archive","delete_original":true}')" "403"
 ok "recently viewed remembers the server" "$(post $F $A /api/recent/$AID "{\"uid\":\"$UID_\"}" | py "d['ok']")/$(body $F $A /api/recent | py "d[0]['id']")" "True/$AID"
 # A link to that server's study: the guest's page, download and viewer use that server.
 L2=$(body $F $A /api/studies/$AID/share -X POST -H "$J" -d '{"downloads":1}')
@@ -455,6 +463,7 @@ ok "...it searches the archive only" "$(body $F $AR /api/studies | py "(d['serve
 ok "...the default server cannot be searched (400, like an unknown one)" "$(code $F $AR GET "/api/studies?servers=main")" "400"
 ok "...a study of the default server does not exist for it (404)" "$(code $F $AR GET /api/studies/$SID/series)/$(code $F $AR GET /api/studies/$SID/download)/$(code $F $AR GET /api/studies/$SID/thumbnail)" "404/404/404"
 ok "...the same study on the archive does" "$(code $F $AR GET /api/studies/$AID/series)" "200"
+ok "...it cannot copy to the default server (404)" "$(code $F $AR POST /api/studies/$AID/copy -H "$J" -d '{"server":"main"}')" "404"
 ok "...it cannot share or send the default server's study (404)" "$(code $F $AR POST /api/studies/$SID/send -H "$J" -d '{"target":"ris"}')" "404"
 ok "...bulk sending refuses the default server's studies (404)" "$(code $F $AR POST /api/send -H "$J" -d "{\"target\":\"ris\",\"studies\":[\"$SID\"]}")" "404"
 has "...uploading (into the default server) is refused" "$(body $F $AR /api/upload -X POST -H "Content-Type: application/dicom" --data-binary "DICM")" "cannot use the Orthanc server"

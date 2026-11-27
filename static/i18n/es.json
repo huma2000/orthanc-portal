@@ -1422,7 +1422,19 @@
   "Stored on {servers}: choose which copy to work with": "Almacenado en {servers}: elija con qué copia trabajar",
   "A study stored on several servers counts once in the total.": "Un estudio almacenado en varios servidores cuenta una sola vez en el total.",
   "Destination (of {server})": "Destino (de {server})",
-  "These studies are on several Orthanc servers: send the studies of one server at a time.": "Estos estudios están en varios servidores Orthanc: envíe los estudios de un servidor cada vez."
+  "These studies are on several Orthanc servers: send the studies of one server at a time.": "Estos estudios están en varios servidores Orthanc: envíe los estudios de un servidor cada vez.",
+  "Copy to server...": "Copiar a un servidor...",
+  "Copy this study to another Orthanc server": "Copiar este estudio a otro servidor Orthanc",
+  "This study is already on every other server.": "Este estudio ya está en todos los demás servidores.",
+  "Copy": "Copiar",
+  "Delete the study from {server} once it is copied?": "¿Borrar el estudio de {server} cuando esté copiado?",
+  "Copying {n} images to {server}: the Transfers page shows the progress.": "Copiando {n} imágenes a {server}: la página Transferencias muestra el progreso.",
+  "Copy to another server": "Copiar a otro servidor",
+  "(on {server})": "(en {server})",
+  "Copy to": "Copiar a",
+  "Then delete it from {server} (only when every image was copied)": "Después borrarlo de {server} (solo si se copiaron todas las imágenes)",
+  "The portal copies every image from one server to the other. Images the other server already has are kept as they are.": "El portal copia cada imagen de un servidor al otro. Las imágenes que el otro servidor ya tiene se quedan como están.",
+  "{n} images copied in {time}": "{n} imágenes copiadas en {time}"
  },
  "messages": {
   "A label can have 1 to 64 letters, digits, '-' or '_' (no spaces or accents)": "Una etiqueta puede tener de 1 a 64 letras, cifras, «-» o «_» (sin espacios ni tildes)",
@@ -1716,6 +1728,10 @@
   "Role \"{role}\": there is no Orthanc server '{key}' (a server used by a role can only be removed once the role no longer uses it)": "Rol «{role}»: no existe el servidor Orthanc «{key}» (un servidor que usa un rol solo se puede quitar cuando el rol deja de usarlo)",
   "These studies are on several Orthanc servers: choose the studies of one server at a time": "Estos estudios están en varios servidores Orthanc: elija los estudios de un servidor cada vez",
   "Both studies must be on the same Orthanc server": "Los dos estudios deben estar en el mismo servidor Orthanc",
-  "Sending is only available for the studies of the default Orthanc server for now": "Por ahora solo se pueden enviar los estudios del servidor Orthanc principal"
+  "Sending is only available for the studies of the default Orthanc server for now": "Por ahora solo se pueden enviar los estudios del servidor Orthanc principal",
+  "The study is already on that server": "El estudio ya está en ese servidor",
+  "This study has no images to copy": "Este estudio no tiene imágenes que copiar",
+  "{failed} of {total} images could not be copied: {error}": "{failed} de {total} imágenes no se pudieron copiar: {error}",
+  "Copied, but the original could not be deleted: {error}": "Copiado, pero no se pudo borrar el original: {error}"
  }
 }

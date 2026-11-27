@@ -246,6 +246,45 @@ pub async fn list_transfers(
     let db = &state.db;
     let views = stream::iter(transfers)
         .map(|t| async move {
+            // A copy to another server runs in this portal, not in Orthanc: its progress is here.
+            if t.direction == "copy" && t.final_state.is_none() {
+                return match crate::routes::copy::progress(t.id) {
+                    Some(p) => TransferView {
+                        id: t.id,
+                        study_uid: None,
+                        direction: t.direction.clone(),
+                        ts: t.ts,
+                        username: t.username,
+                        label: t.label,
+                        target: t.target,
+                        state: "Running".into(),
+                        progress: (p.done * 100).checked_div(p.total).unwrap_or(0),
+                        error: None,
+                        instances: Some(p.total),
+                        failed: Some(p.failed),
+                        runtime: Some(p.started.elapsed().as_secs_f64()),
+                    },
+                    None => {
+                        // Interrupted by a restart of the portal.
+                        let _ = db.set_transfer_final(t.id, "Unknown", None, "{}");
+                        TransferView {
+                            id: t.id,
+                            study_uid: None,
+                            direction: t.direction.clone(),
+                            ts: t.ts,
+                            username: t.username,
+                            label: t.label,
+                            target: t.target,
+                            state: "Unknown".into(),
+                            progress: 0,
+                            error: None,
+                            instances: None,
+                            failed: None,
+                            runtime: None,
+                        }
+                    }
+                };
+            }
             if let Some(done) = &t.final_state {
                 let progress = if done == "Success" { 100 } else { 0 };
                 let info: Value =

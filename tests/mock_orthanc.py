@@ -514,6 +514,14 @@ class H(BaseHTTPRequestHandler):
         if extra_get(self, p, self.path.split("?", 1)[1] if "?" in self.path else "") is not None: return
         if p == "/tools/labels": return self._json(all_labels())
         if p == "/studies": return self._json(list(all_studies().keys()))   # every study's ID
+        m = re.match(r"^/studies/([^/]+)/instances$", p)   # every image of a study (copy to another server)
+        if m and m.group(1) in all_studies():
+            series = [all_series()[x] for x in all_studies()[m.group(1)]["Series"] if x in all_series()]
+            return self._json([i for se in series for i in instances_of(se)])
+        m = re.match(r"^/instances/([^/]+)/file$", p)
+        if m:
+            log("file", {"id": m.group(1)})
+            return self._send(b"DICM-file-" + m.group(1).encode(), "application/dicom")
         m = re.match(r"^/studies/([^/]+)/labels$", p)
         if m: return self._json(sorted(LABELS.get(m.group(1), ())))
         if DEMO:

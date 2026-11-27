@@ -818,6 +818,10 @@ async function newLink(admin, body) {
       && switched.querySelector(".server-chip.server-current").textContent === "Archive"
       && switched.querySelectorAll("a[href*='archive:']").length > 0,
       switched && switched.querySelector("a[href*='/ohif/viewer']").getAttribute("href"));
+    // "Copy to server...": here every study is already on both servers, so there is nowhere to copy it.
+    m.click(m.$("tr.study [data-name='Copy to server...']")); await sleep(300);
+    check("a study offers Copy to server (and says when it is on every server already)", !m.$("dialog[open]")
+      && /already on every other server/.test(m.text()));
     m.click(chips().find((b) => b.textContent === "Archive")); await sleep(1500);
     check("unticking a server searches the others only", chips().map((b) => b.getAttribute("aria-pressed")).join() === "false,true,false"
       && m.$$("tr.study").every((tr) => tr.querySelectorAll(".server-chip").length === 1));
