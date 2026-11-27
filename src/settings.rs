@@ -1629,8 +1629,52 @@ impl Settings {
         let mut updated: Settings = serde_json::from_value(base)
             .map_err(|e| AppError::BadRequest(format!("Invalid value in the settings: {e}")))?;
         updated.normalise();
+        self.check_secret_destinations(&updated, patch, clear_password, clear_smtp_password)?;
         updated.validate()?;
         Ok(updated)
+    }
+
+    /// A saved secret is only sent to the server it was entered for: when that server's address
+    /// changes, the secret must be typed again (or removed). Otherwise anyone at an administrator's
+    /// browser could point the address at their own server and receive the saved password, which
+    /// the settings page never shows.
+    fn check_secret_destinations(
+        &self,
+        updated: &Settings,
+        patch: &serde_json::Map<String, Value>,
+        clear_password: bool,
+        clear_smtp_password: bool,
+    ) -> Result<(), AppError> {
+        let given = |key: &str| patch.get(key).and_then(Value::as_str).is_some_and(|s| !s.is_empty());
+        let origin = |url: &str| {
+            reqwest::Url::parse(url).map(|u| u.origin().ascii_serialization()).unwrap_or_else(|_| url.to_lowercase())
+        };
+        let bad = |m: &str| Err(AppError::BadRequest(m.into()));
+        if !self.orthanc_password.0.is_empty()
+            && !updated.orthanc_password.0.is_empty()
+            && !clear_password
+            && !given("orthanc_password")
+            && origin(&self.orthanc_url) != origin(&updated.orthanc_url)
+        {
+            return bad("The Orthanc address changed: enter its password again, or tick \"Remove the saved password\" (a saved password is only sent to the server it was entered for)");
+        }
+        if !self.smtp_password.0.is_empty()
+            && !updated.smtp_password.0.is_empty()
+            && !clear_smtp_password
+            && !given("smtp_password")
+            && !updated.smtp_host.is_empty()
+            && !self.smtp_host.eq_ignore_ascii_case(&updated.smtp_host)
+        {
+            return bad("The mail server changed: enter its password again, or tick \"Remove the saved password\" (a saved password is only sent to the server it was entered for)");
+        }
+        if !self.smtp_oauth_client_secret.0.is_empty()
+            && updated.smtp_auth == SmtpAuth::Microsoft365
+            && !given("smtp_oauth_client_secret")
+            && origin(&crate::mailer::token_endpoint(self).0) != origin(&crate::mailer::token_endpoint(updated).0)
+        {
+            return bad("The token address changed: enter the client secret again (a saved secret is only sent to the server it was entered for)");
+        }
+        Ok(())
     }
 
     /// The settings as sent to the browser: everything except the Orthanc and mail server
@@ -1901,6 +1945,45 @@ mod tests {
         assert!(m365(json!({ "smtp_oauth_token_url": "https://login.microsoftonline.us/x/oauth2/v2.0/token" })).is_ok());
         // Email switched off: nothing is asked for.
         assert!(m365(json!({ "smtp_host": "", "smtp_oauth_client_id": "" })).is_ok());
+    }
+
+    /// A saved secret never follows a changed address to another server without being typed again.
+    #[test]
+    fn secrets_stay_with_their_server() {
+        let saved = Settings::defaults()
+            .with_patch(&json!({
+                "orthanc_url": "http://pacs.local:8042", "orthanc_username": "portal", "orthanc_password": "pw",
+                "smtp_host": "smtp.example.com", "smtp_from": "PACS <pacs@example.com>", "smtp_security": "starttls",
+                "smtp_username": "mailer", "smtp_password": "mailpw"
+            }))
+            .unwrap();
+        // Orthanc: another server needs the password again (or removing it); another path does not.
+        assert!(saved.with_patch(&json!({ "orthanc_url": "http://evil.example:8042" })).is_err());
+        assert!(saved.with_patch(&json!({ "orthanc_url": "http://pacs.local:9999" })).is_err(), "another port");
+        assert!(saved.with_patch(&json!({ "orthanc_url": "http://pacs.local:8042/orthanc" })).is_ok());
+        assert!(saved.with_patch(&json!({ "orthanc_url": "http://evil.example", "orthanc_password": "new" })).is_ok());
+        let cleared =
+            saved.with_patch(&json!({ "orthanc_url": "http://other:8042", "clear_orthanc_password": true })).unwrap();
+        assert_eq!(cleared.orthanc_password.0, "");
+        // Mail server: the same, and switching email off is fine.
+        assert!(saved.with_patch(&json!({ "smtp_host": "evil.example" })).is_err());
+        assert!(saved.with_patch(&json!({ "smtp_host": "SMTP.example.com", "smtp_port": 465 })).is_ok());
+        assert!(saved.with_patch(&json!({ "smtp_host": "evil.example", "smtp_password": "again" })).is_ok());
+        assert!(saved.with_patch(&json!({ "smtp_host": "" })).is_ok());
+        // Microsoft 365: another token server needs the secret again; another tenant does not.
+        let m365 = saved
+            .with_patch(&json!({
+                "smtp_auth": "microsoft365", "smtp_username": "pacs@example.com", "smtp_oauth_tenant": "contoso.com",
+                "smtp_oauth_client_id": "abc-123", "smtp_oauth_client_secret": "s3cret"
+            }))
+            .unwrap();
+        assert!(m365.with_patch(&json!({ "smtp_oauth_token_url": "https://evil.example/token" })).is_err());
+        assert!(m365.with_patch(&json!({ "smtp_oauth_tenant": "fabrikam.com" })).is_ok());
+        assert!(m365
+            .with_patch(
+                &json!({ "smtp_oauth_token_url": "https://evil.example/token", "smtp_oauth_client_secret": "x" })
+            )
+            .is_ok());
     }
 
     /// Colours of modality buttons and labels: `#rrggbb`, tidied, and "Default" (empty) forgets a label's.

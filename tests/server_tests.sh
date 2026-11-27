@@ -311,6 +311,8 @@ ok "a mail server needs a sender (400)" "$(put $A '{"smtp_host":"127.0.0.1"}' | 
 ok "signing in to it without encryption is refused (400)" "$(put $A '{"smtp_host":"127.0.0.1","smtp_port":18025,"smtp_security":"none","smtp_from":"Demo PACS <pacs@example.com>","smtp_username":"mailer","smtp_password":"MailPass123"}' | tail -1)" "400"
 put $A '{"smtp_host":"127.0.0.1","smtp_port":18025,"smtp_security":"starttls","smtp_from":"Demo PACS <pacs@example.com>","smtp_username":"mailer","smtp_password":"MailPass123"}' > /dev/null
 ok "the mail server password is never sent back" "$(body $F $A /api/admin/settings | py "('smtp_password' in d['settings'], d['settings']['smtp_password_set'])")" "(False, True)"
+ok "...nor sent to another mail server without typing it again (400)" "$(put $A '{"smtp_host":"mail.attacker.example"}' | tail -1)" "400"
+ok "...and nothing was saved" "$(body $F $A /api/admin/settings | py "d['settings']['smtp_host']")" "127.0.0.1"
 echo "== email through Microsoft 365 (OAuth 2.0, client credentials)"
 TOKEN_URL=http://127.0.0.1:18042/__mock/oauth/token
 M365='{"smtp_auth":"microsoft365","smtp_username":"pacs@example.com","smtp_oauth_tenant":"contoso.onmicrosoft.com","smtp_oauth_client_id":"11111111-2222-3333-4444-555555555555","smtp_oauth_token_url":"'$TOKEN_URL'"'
@@ -654,9 +656,10 @@ has "new session length used by the next login" "$(curl -s -D - -o /dev/null -H 
 put $A '{"session_hours":12,"max_upload_mb":1}' > /dev/null
 ok "upload limit is live: 2 MB refused" "$(code $F $A POST /api/upload -H 'Content-Type: application/dicom' --data-binary @big.dcm)" "413"
 put $A '{"max_upload_mb":2048}' > /dev/null
-put $A '{"orthanc_url":"http://127.0.0.1:1"}' > /dev/null
+ok "another Orthanc address needs its password typed again (400)" "$(put $A '{"orthanc_url":"http://127.0.0.1:1"}' | tail -1)" "400"
+put $A '{"orthanc_url":"http://127.0.0.1:1","orthanc_password":"s3cr3tpw"}' > /dev/null
 ok "a wrong Orthanc address takes effect at once (502)" "$(code $F $V GET /api/studies)" "502"
-put $A '{"orthanc_url":"http://127.0.0.1:18042"}' > /dev/null
+put $A '{"orthanc_url":"http://127.0.0.1:18042","orthanc_password":"s3cr3tpw"}' > /dev/null
 ok "...and the right one restores service" "$(code $F $V GET /api/studies)" "200"
 T=$(body $F $A /api/admin/orthanc/test -X POST -H "$J" -d '{}')
 ok "Test connection reports version and plugins" "$(echo $T | py "str(d['ok'])+' '+d['version']+' ohif='+str(d['ohif'])")" "True 1.12.10 ohif=True"

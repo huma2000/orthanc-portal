@@ -209,10 +209,19 @@ async fn oauth_token(settings: &Settings) -> Result<String, String> {
         .chain_update(scope.as_bytes())
         .finalize()
         .into();
-    if let Some(cached) = token_cache().lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-        if cached.key == key && Instant::now() < cached.renew_at {
-            return Ok(cached.token.clone());
-        }
+    let cached = || {
+        let cache = token_cache().lock().unwrap_or_else(|e| e.into_inner());
+        cache.as_ref().filter(|c| c.key == key && Instant::now() < c.renew_at).map(|c| c.token.clone())
+    };
+    if let Some(token) = cached() {
+        return Ok(token);
+    }
+    // One request to Microsoft at a time: emails sent together (a rule announcing several studies)
+    // wait for the first one's token instead of each asking for its own.
+    static FETCHING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _one_at_a_time = FETCHING.lock().await;
+    if let Some(token) = cached() {
+        return Ok(token);
     }
     let form = [
         ("grant_type", "client_credentials"),

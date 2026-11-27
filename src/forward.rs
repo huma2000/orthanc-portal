@@ -263,7 +263,11 @@ fn notify(state: &AppState, rule: &ForwardRule, id: &str, study: &StudyFacts) {
     }
     let settings = state.settings.get();
     let base = settings.public_base_url.trim_end_matches('/');
-    let link = (!base.is_empty() && !study.uid.is_empty()).then(|| format!("{base}/?study_uid={}", study.uid));
+    // The UID comes from the file that was sent in: only a real one (digits and dots) goes in the
+    // link, so a crafted file cannot put another address or text into the email.
+    let real_uid =
+        !study.uid.is_empty() && study.uid.len() <= 64 && study.uid.bytes().all(|b| b.is_ascii_digit() || b == b'.');
+    let link = (!base.is_empty() && real_uid).then(|| format!("{base}/?study_uid={}", study.uid));
     let (subject, body) = RuleNotice {
         portal: &settings.portal_name,
         rule: &rule.name,

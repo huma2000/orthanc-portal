@@ -533,7 +533,8 @@ impl Db {
                  study_id TEXT    NOT NULL,
                  ts       INTEGER NOT NULL,
                  PRIMARY KEY (rule, study_id)
-             );",
+             );
+             CREATE INDEX IF NOT EXISTS rule_notices_ts ON rule_notices (ts);",
         )?;
         add_missing_columns(
             &conn,
@@ -1095,7 +1096,6 @@ impl Db {
 
     // --------------------------------------------------------- recently viewed
 
-    /// `user` looked at a study: it goes to the top of their list (which keeps [`RECENT_VIEWS_KEPT`]).
     /// Notes that the rule `rule` emailed about `study_id`. `false` when it already had (the study
     /// became stable again after more images): no second email. Forgotten after 90 days.
     pub fn first_rule_notice(&self, rule: &str, study_id: &str, now: i64) -> Result<bool, AppError> {
@@ -1107,6 +1107,7 @@ impl Db {
         Ok(added == 1)
     }
 
+    /// `user` looked at a study: it goes to the top of their list (which keeps [`RECENT_VIEWS_KEPT`]).
     pub fn note_view(&self, user: i64, study_id: &str, study_uid: &str, now: i64) -> Result<(), AppError> {
         let conn = self.lock();
         conn.prepare_cached(

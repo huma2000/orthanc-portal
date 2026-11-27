@@ -1565,6 +1565,7 @@
   "The log level is default, verbose or trace": "El nivel de registro es default, verbose o trace",
   "The login notice can have at most 500 characters": "El aviso de inicio de sesión puede tener como máximo 500 caracteres",
   "The mail server ({server}) did not accept the email: {e}": "El servidor de correo ({server}) no ha aceptado el correo: {e}",
+  "The mail server changed: enter its password again, or tick \"Remove the saved password\" (a saved password is only sent to the server it was entered for)": "El servidor de correo ha cambiado: escriba de nuevo su contraseña o marque «Quitar la contraseña guardada» (una contraseña guardada solo se envía al servidor para el que se escribió)",
   "The mail server address is not valid: {e}": "La dirección del servidor de correo no es válida: {e}",
   "The mail server must be a host name or an IP address, e.g. smtp.example.com": "El servidor de correo debe ser un nombre de equipo o una dirección IP, p. ej. smtp.ejemplo.es",
   "The mail server port must be between 1 and 65535": "El puerto del servidor de correo debe estar entre 1 y 65535",
@@ -1577,6 +1578,7 @@
   "The name of role '{0}' must have 1 to 80 characters": "El nombre del rol «{0}» debe tener de 1 a 80 caracteres",
   "The new session duration applies to the next sign-ins.": "La nueva duración de la sesión se aplica a los próximos inicios de sesión.",
   "The NIfTI export is switched off": "La exportación NIfTI está desactivada",
+  "The Orthanc address changed: enter its password again, or tick \"Remove the saved password\" (a saved password is only sent to the server it was entered for)": "La dirección de Orthanc ha cambiado: escriba de nuevo su contraseña o marque «Quitar la contraseña guardada» (una contraseña guardada solo se envía al servidor para el que se escribió)",
   "The Orthanc address must look like http://orthanc:8042": "La dirección de Orthanc debe tener la forma http://orthanc:8042",
   "The Orthanc address must look like http://orthanc:8042 or https://...": "La dirección de Orthanc debe tener la forma http://orthanc:8042 o https://...",
   "The Orthanc user name or password is not valid": "El usuario o la contraseña de Orthanc no son válidos",
@@ -1671,6 +1673,7 @@
   "The client secret is not correct: copy the secret's Value, not its Secret ID (Entra ID > App registrations > your app > Certificates & secrets)": "El secreto de cliente no es correcto: copie el Valor del secreto, no su Id. de secreto (Entra ID > Registros de aplicaciones > su aplicación > Certificados y secretos)",
   "The portal could not reach Microsoft to sign in to the mail server ({url}): {e}": "El portal no ha podido contactar con Microsoft para iniciar sesión en el servidor de correo ({url}): {e}",
   "The scope is not valid": "El ámbito no es válido",
+  "The token address changed: enter the client secret again (a saved secret is only sent to the server it was entered for)": "La dirección del token ha cambiado: escriba de nuevo el secreto de cliente (un secreto guardado solo se envía al servidor para el que se escribió)",
   "The token address must start with https://": "La dirección del token debe empezar por https://",
   "With Microsoft 365, the user name is the mailbox the portal sends from, e.g. pacs@example.com": "Con Microsoft 365, el usuario es el buzón desde el que envía el portal, p. ej. pacs@example.com"
  }

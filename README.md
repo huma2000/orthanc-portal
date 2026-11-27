@@ -1047,6 +1047,9 @@ Built in:
   served sandboxed. Only administrators on the intranet can change them.
 * Settings are validated before they are saved; the Orthanc password is write-only and masked in logs; a new
   listener address is opened before the old one is released, so a typo cannot take the portal down.
+* A saved password or client secret (Orthanc, mail server, Microsoft 365) stays with the server it was entered
+  for: when that address changes to another server, it must be typed again (or removed), so nobody at an
+  administrator's browser can redirect it to a server of their own.
 * Audit log (logins with IP, uploads, downloads, sends, Weasis launches, user changes, **settings and
   DICOM-node changes**, **links created, opened, failed, downloaded and revoked**).
 
