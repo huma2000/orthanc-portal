@@ -1,6 +1,6 @@
 [package]
 name = "orthanc-portal"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 description = "Web portal (intranet + Cloudflare Tunnel) for an Orthanc PACS with role-based permissions"
 license = "BSD-3-Clause"
