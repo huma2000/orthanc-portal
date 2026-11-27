@@ -124,6 +124,11 @@ async function newLink(admin, body) {
     admin.$$(".subtabs [role=tab]").map((b) => b.textContent).join());
   check("no stray 'null' text on the page (it used to appear under the title)",
     !admin.$$("main *").some((el) => Array.from(el.childNodes).some((n) => n.nodeType === 3 && n.textContent.trim() === "null")));
+  admin.click(subtab("Features")); await until(() => /for the CDs/.test((admin.$(".cd-viewer-panel") || {}).textContent || ""), 6000);
+  check("Features: Weasis for the patient CDs (its download) and the logo of the CD viewer",
+    /Weasis 4\.8\.1 for the CDs/.test(admin.$(".cd-viewer-panel").textContent) && admin.$$(".brand-picker b").some((b) => b.textContent === "Logo of the CD viewer"),
+    (admin.$(".cd-viewer-panel") || {}).textContent);
+  admin.click(subtab("General"));
   check("General shows Branding, Viewers and New versions", visibleSections().join() === "Branding,New versions,Viewers and uploads", visibleSections().join());
   admin.click(subtab("Search & labels"));
   check("Search & labels shows the modality buttons, the lists and search options, and the labels", visibleSections().join() === "Modality buttons,Studies lists and search,Labels", visibleSections().join());

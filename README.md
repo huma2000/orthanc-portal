@@ -66,8 +66,9 @@ the section in brackets has the details.
 * **Upload** files, folders or ZIPs by drag and drop, with progress, speed, time left and an upload history.
 * **Download** a study, a series or several studies as a ZIP, with or without a DICOMDIR; one DICOM file
   *(switch)*; a series as NIfTI *(switch)*; the ZIP name follows a template.
-* **Patient CD / USB export**: images with their DICOMDIR, a page for the patient and an optional portable
-  viewer *(switch)*.
+* **Patient CD / USB export**: images with their DICOMDIR, a page for the patient and **Weasis** (downloaded
+  once, kept compressed, **branded** with the practice's name and logo and **locked** to the CD), another viewer
+  or none *(switch)*.
 * **Send** studies to DICOM nodes, and *(switch)* to Orthanc peers and DICOMweb servers; the **Transfers**
   page follows each one (progress, images, time left, outcome).
 * **Query / retrieve** from other DICOM nodes or DICOMweb servers *(switch)*.
@@ -997,11 +998,40 @@ or `auto_notify_failed` with the mail server's answer).
 
 *Download > Patient CD / USB* (on a study, or on ticked studies; `download` permission, *Settings > Features*): a
 ZIP to unpack onto a CD, DVD or USB stick with Orthanc's DICOMDIR and images (copied as they are), a
-`README.html` for the patient (who, which studies, how to view them; no script) and, when *Folder of a portable
-DICOM viewer* is set, every file of that folder (for example an unpacked **Weasis portable** with its
-`autorun.inf`). The archive is assembled in `<folder of the database>/exports` and deleted once downloaded; at most
-two are prepared at a time. In Docker mount the viewer read-only, e.g. `- ./cd-viewer:/cd-viewer:ro`, and enter
-`/cd-viewer` (or set `CD_VIEWER_DIR` before the first start).
+`README.html` for the patient (who, which studies, how to view them; no script) and the viewer chosen in
+*Settings > Features > Viewer on the patient CDs*. The archive is assembled in `<folder of the database>/exports`
+and deleted once downloaded; at most two are prepared at a time.
+
+**Weasis on the CD (the default viewer).** [Weasis](https://weasis.org) is a free DICOM viewer (EPL-2.0 OR
+Apache-2.0). The portal downloads it once, about 66 MB, from the portal's GitHub (the pre-release
+`weasis-cd-viewer-4.8.1`: the files of the official Weasis 4.8.1 Windows installer, unmodified, with Weasis'
+licences and a notice in `viewer/LICENSES/`), checks its SHA-256, and keeps it **compressed** in
+`<folder of the database>/cd-viewer/` until a CD is made: its entries are copied into each CD as they are.
+*Settings > Features* shows whether it is there, with **Download Weasis now**; *Download Weasis automatically when it
+is missing* (on by default) fetches it at start-up and when a CD is made without it. Without internet, download
+the file on another computer and copy it into that folder (the page shows the address and the folder).
+
+Each CD then has `viewer\` (Weasis), `Autorun.inf` and `RUN.bat` (the patient double-clicks it: Windows ignores
+`Autorun.inf` on USB sticks), and the patient's page says how to start it. Weasis opens the images of that CD
+(several studies on one CD open together) and runs on Windows 10 or later, 64-bit; on other computers any DICOM
+viewer opens the DICOMDIR. Settings:
+
+* **Weasis on the CD opens only that CD** (on by default): the parts of Weasis that send, query / retrieve and
+  write CDs are not loaded at all, import and export are hidden, it keeps its preferences apart from a Weasis
+  already on the computer and uses a control port of its own. Dropping files on its window cannot be blocked.
+* **Name of the viewer on the CDs**: shown in Weasis' window and menus and as the disc's name (default: the
+  portal's name followed by "viewer").
+* **Logo of the CD viewer**: the start screen of Weasis (PNG, JPEG or GIF); without one, the portal's logo when it
+  is in one of those formats, otherwise Weasis' own.
+
+Only configuration files are added to Weasis (`viewer/app/conf/portal-cd.json` and `viewer/app/Weasis.cfg`); no
+program file of Weasis is changed, and its credits stay. Checked with the real Weasis 4.8.1 from an unpacked CD
+with two studies: both opened, the window bore the chosen name, and the send, query / retrieve and CD writer parts
+were not installed.
+
+**Another viewer**: choose *The viewer in a folder of my own* and give the folder: every file of it goes on the CD.
+In Docker mount it read-only, e.g. `- ./cd-viewer:/cd-viewer:ro`, and enter `/cd-viewer` (or set `CD_VIEWER_DIR`
+before the first start).
 
 ### Backups of the portal's database
 
@@ -1312,6 +1342,16 @@ removes it), and must be typed again when its address moves to another server.
 | `GET /branding/custom.css` | none | The custom CSS of Settings > Appearance |
 | `GET /branding/logo`, `GET /branding/favicon` | none | The uploaded logo / website icon (or the built-in mark) |
 | `GET /healthz` | none | Liveness probe |
+
+---
+
+## Licence
+
+Orthanc Portal is under the **BSD 3-Clause License** (see `LICENSE`), copyright Huma2000. The program includes
+Rust crates under permissive licences (MIT, Apache-2.0, BSD, ISC, Zlib, Unicode...): their notices are in
+`THIRD-PARTY-LICENSES.txt`, written by `python tools/third_party_licenses.py` (run it before a release; the
+release zip and the Docker image include it). Weasis, put on patient CDs, keeps its own licence and notice in
+`viewer/LICENSES/` on each CD.
 
 ---
 

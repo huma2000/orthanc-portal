@@ -237,6 +237,7 @@ ok "...and the page says so" "$(curl -s $G/api/upload/$UT/status | py "d['state'
 
 echo "== patient CD / USB export"
 ok "needs the download permission (403)" "$(code $F $V GET "/api/export/cd?studies=$SID")" "403"
+put $A '{"cd_viewer":"none"}' > /dev/null
 curl -s -o cd.zip -H "Cookie: portal_session=$D" "$F/api/export/cd?studies=$SID"
 ok "a ZIP with the DICOMDIR, the images and a page for the patient" "$(python3 -c "import zipfile,sys;print(sorted(zipfile.ZipFile(sys.argv[1]).namelist()))" cd.zip)" "['DICOMDIR', 'IMAGES/IM0', 'README.html']"
 ok "...the images untouched" "$(python3 -c "import zipfile,sys;print(zipfile.ZipFile(sys.argv[1]).read('IMAGES/IM0')==b'DICM-image'*50)" cd.zip)" "True"
@@ -245,10 +246,46 @@ hasnt "...and escapes what comes from DICOM" "$(python3 -c "import zipfile,sys;p
 mkdir -p viewer/bin; printf '[autorun]\nopen=bin/viewer.exe\n' > viewer/autorun.inf; printf 'MZ' > viewer/bin/viewer.exe
 VDIR=$(python3 -c "import os,sys;print(os.path.abspath(sys.argv[1]))" viewer)
 ok "a viewer folder must be a full path (400)" "$(put $A '{"cd_viewer_dir":"viewer"}' | tail -1)" "400"
-put $A "$(python3 -c "import json,sys;print(json.dumps({'cd_viewer_dir':sys.argv[1]}))" "$VDIR")" > /dev/null
+put $A "$(python3 -c "import json,sys;print(json.dumps({'cd_viewer_dir':sys.argv[1],'cd_viewer':'folder'}))" "$VDIR")" > /dev/null
 curl -s -o cd2.zip -H "Cookie: portal_session=$D" "$F/api/export/cd?studies=$SID"
 ok "with a viewer folder: its files are on the disc too" "$(python3 -c "import zipfile,sys;print(sorted(zipfile.ZipFile(sys.argv[1]).namelist()))" cd2.zip)" "['DICOMDIR', 'IMAGES/IM0', 'README.html', 'autorun.inf', 'bin/viewer.exe']"
 ok "...the temporary files are gone" "$(ls $WORK/exports 2>/dev/null | wc -l | tr -d ' ')" "0"
+# Weasis on the CD (the default viewer): downloaded once (a small fake here), set up for each CD.
+put $A '{"cd_viewer":"weasis","cd_weasis_name":"Chalkland viewer"}' > /dev/null
+for i in $(seq 1 20); do [ "$(body $F $A /api/admin/cd-viewer | py "d['ready']")" = "True" ] && break; sleep 0.5; done
+ok "Weasis for the CDs was downloaded at start-up and checked" "$(body $F $A /api/admin/cd-viewer | py "(d['ready'], d['version'])")" "(True, '4.8.1')"
+ok "...only administrators see it (403)" "$(code $F $D GET /api/admin/cd-viewer)/$(code $F $D POST /api/admin/cd-viewer/download)" "403/403"
+curl -s -o cd3.zip -H "Cookie: portal_session=$D" "$F/api/export/cd?studies=$SID"
+cdfile() { python3 -c "import zipfile,sys;print(zipfile.ZipFile(sys.argv[1]).read(sys.argv[2]).decode())" cd3.zip "$1"; }
+ok "the CD has Weasis, its licences, Autorun.inf and RUN.bat" "$(python3 -c "import zipfile,sys;n=zipfile.ZipFile(sys.argv[1]).namelist();print([x in n for x in ['viewer/Weasis.exe','viewer/LICENSES/NOTICE.txt','viewer/runtime/legal/java.base/LICENSE','Autorun.inf','RUN.bat','viewer/app/conf/portal-cd.json']])" cd3.zip)" "[True, True, True, True, True, True]"
+ok "...the CD's own index is never replaced by a file of the package" "$(cdfile DICOMDIR)" "DICM-index"
+has "...Weasis reads the CD's settings" "$(cdfile viewer/app/Weasis.cfg)" "felix.extended.config.properties=file:conf/portal-cd.json"
+has "...with a control port of its own" "$(cdfile viewer/app/Weasis.cfg)" "gosh.port=17189"
+ok "...named as in Settings, and locked to the CD" "$(cdfile viewer/app/conf/portal-cd.json | py "{p['code']: p['value'] for p in d['weasisPreferences']}" | python3 -c "import sys,ast;d=ast.literal_eval(sys.stdin.read());print(d['weasis.name'], d['felix.auto.start.110']=='', d['weasis.import.dicom'], d['weasis.export.dicom'])")" "Chalkland viewer True false false"
+has "...RUN.bat opens the CD's images" "$(cdfile RUN.bat)" "viewer.Weasis.exe"
+has "...and the patient's page says so" "$(cdfile README.html)" "RUN.bat"
+# Several studies on one CD: the viewer opens that CD's index (both studies), and stays locked to it.
+S2=bbbbbbbb-cccccccc-dddddddd-eeeeeeee-ffffffff
+curl -s -o cd4.zip -H "Cookie: portal_session=$D" "$F/api/export/cd?studies=$SID,$S2"
+ok "two studies on one CD: both on the patient's page, with Weasis" "$(python3 -c "
+import zipfile,sys
+z=zipfile.ZipFile(sys.argv[1]); page=z.read('README.html').decode()
+print('CT CHEST' in page, 'MR KNEE' in page, 'viewer/Weasis.exe' in z.namelist(), z.read('DICOMDIR')==b'DICM-index')" cd4.zip)" "True True True True"
+ok "...the viewer opens the CD's own index and is locked to it" "$(python3 -c "
+import zipfile,sys,json
+z=zipfile.ZipFile(sys.argv[1]); p={x['code']:x['value'] for x in json.loads(z.read('viewer/app/conf/portal-cd.json'))['weasisPreferences']}
+print('weasis.portable.dir' in z.read('RUN.bat').decode(), p['felix.auto.start.110']=='', p['weasis.import.dicom'], p['weasis.import.images'])" cd4.zip)" "True True false false"
+put $A '{"cd_weasis_locked":false}' > /dev/null
+curl -s -o cd3.zip -H "Cookie: portal_session=$D" "$F/api/export/cd?studies=$SID"
+hasnt "not locked: everything of Weasis is available" "$(cdfile viewer/app/conf/portal-cd.json)" "felix.auto.start.110"
+put $A '{"cd_weasis_locked":true}' > /dev/null
+# The start screen: the CD logo of Settings (PNG, JPEG or GIF; an SVG is refused).
+printf '\x89PNG\r\n\x1a\n0000IHDR' > cdlogo.png
+ok "a logo for the CD viewer (PNG)" "$(curl -s -o /dev/null -w '%{http_code}' -X PUT -H "Cookie: portal_session=$A" -H "$H" --data-binary @cdlogo.png $F/api/admin/branding/cd_logo)" "200"
+ok "...an SVG is refused (400)" "$(curl -s -o /dev/null -w '%{http_code}' -X PUT -H "Cookie: portal_session=$A" -H "$H" --data-binary '<svg xmlns="http://www.w3.org/2000/svg"/>' $F/api/admin/branding/cd_logo)" "400"
+curl -s -o cd3.zip -H "Cookie: portal_session=$D" "$F/api/export/cd?studies=$SID"
+ok "...shown while Weasis starts" "$(python3 -c "import zipfile,sys;print('viewer/app/resources/images/portal-splash.png' in zipfile.ZipFile(sys.argv[1]).namelist())" cd3.zip)/$(cdfile viewer/app/Weasis.cfg | grep -c 'portal-splash.png')" "True/1"
+curl -s -o /dev/null -X DELETE -H "Cookie: portal_session=$A" -H "$H" $F/api/admin/branding/cd_logo
 ok "switched off: refused (403)" "$(put $A '{"cd_export":false}' > /dev/null; code $F $D GET "/api/export/cd?studies=$SID")" "403"
 put $A '{"cd_export":true}' > /dev/null
 

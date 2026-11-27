@@ -123,6 +123,7 @@ fn common_routes() -> Router<AppState> {
         // --- public branding images (login / invitation pages and the browser tab need them) ---
         .route("/branding/logo", get(branding::logo_image))
         .route("/branding/favicon", get(branding::favicon_image))
+        .route("/branding/cd_logo", get(branding::cd_logo_image))
         .route("/branding/custom.css", get(branding::custom_css))
         // --- read-only proxy for the viewers (Weasis + OHIF) ---
         .route("/dicom-web/{*path}", get(viewer::dicomweb_proxy))
@@ -247,6 +248,8 @@ fn staff_router(state: AppState) -> Router {
         .route("/admin/settings", get(settings::get_settings).put(settings::update_settings))
         .route("/admin/orthanc/test", post(settings::test_orthanc))
         .route("/admin/updates", get(settings::updates))
+        .route("/admin/cd-viewer", get(settings::cd_viewer_status))
+        .route("/admin/cd-viewer/download", post(settings::cd_viewer_download))
         .route("/admin/updates/check", post(settings::check_updates))
         .route("/admin/email/test", post(settings::test_email))
         .route("/admin/nodes", get(settings::list_nodes))

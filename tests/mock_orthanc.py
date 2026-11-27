@@ -509,6 +509,10 @@ class H(BaseHTTPRequestHandler):
 
     def do_GET(self):
         # Stands in for GitHub's latest release (the portal's update check); no Orthanc account.
+        if self.path == "/__mock/cd-viewer.zip":   # the fake Weasis package (tests/fake_cd_viewer.py, written by lib.sh)
+            path = os.path.join(os.environ.get("MOCK_LOG_DIR", "/tmp/portal-tests"), "fake-cd-viewer.zip")
+            if not os.path.exists(path): return self._json({"error": "no package"}, 404)
+            return self._send(open(path, "rb").read(), "application/zip")
         if self.path == "/__mock/github/latest":
             if GITHUB.get("status", 200) != 200: return self._json({"message": "x"}, GITHUB["status"])
             return self._json(GITHUB["release"])

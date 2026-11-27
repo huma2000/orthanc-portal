@@ -6,9 +6,9 @@
 //! ```text
 //! DICOMDIR, IMAGES/...     the images with their DICOMDIR index (made by Orthanc, /tools/create-media)
 //! README.html              a page for the patient: who, which studies, how to look at them
-//! <the viewer's files>     a portable DICOM viewer, when an administrator gave its folder
-//!                          (Settings > Features > Folder of the CD viewer), e.g. Weasis portable
-//!                          with its autorun.inf
+//! viewer/, Autorun.inf,    the viewer (Settings > Features > Viewer on the CD): Weasis, kept
+//! RUN.bat                  compressed by the portal and set up for this CD (see cdviewer.rs), or
+//!                          the files of a folder an administrator gave
 //! ```
 //!
 //! * `GET /api/export/cd?studies=<id>,<id>`  (permission `download`; Settings > Features, on by default)
@@ -113,10 +113,32 @@ pub async fn cd_export(
     }
 
     // 2. The final ZIP: Orthanc's entries as they are, the page for the patient, the viewer.
-    let page = patient_page(&settings.portal_name, &studies, settings.language);
-    let viewer_dir = settings.cd_viewer_dir.clone();
+    let viewer = match settings.cd_viewer.as_str() {
+        "weasis" if crate::cdviewer::package_ready(&state) => Viewer::Weasis {
+            package: crate::cdviewer::package_path(&state),
+            cd: crate::cdviewer::CdBranding {
+                name: crate::cdviewer::viewer_name(&state),
+                locked: settings.cd_weasis_locked,
+                splash: crate::cdviewer::splash_image(&state),
+            },
+        },
+        "weasis" => {
+            // Not downloaded yet: this CD goes without the viewer (and the download starts, if allowed).
+            if settings.cd_weasis_autodownload {
+                crate::cdviewer::start_download(&state);
+            }
+            Viewer::None
+        }
+        "folder" if !settings.cd_viewer_dir.is_empty() => Viewer::Folder(settings.cd_viewer_dir.clone()),
+        _ => Viewer::None,
+    };
+    let weasis_name = match &viewer {
+        Viewer::Weasis { cd, .. } => Some(cd.name.clone()),
+        _ => None,
+    };
+    let page = patient_page(&settings.portal_name, &studies, settings.language, weasis_name.as_deref());
     let (media_path, output_path) = (media.0.clone(), output.0.clone());
-    let viewer_files = tokio::task::spawn_blocking(move || assemble(&media_path, &output_path, &page, &viewer_dir))
+    let viewer_files = tokio::task::spawn_blocking(move || assemble(&media_path, &output_path, &page, viewer))
         .await
         .map_err(|e| AppError::Internal(format!("export task failed: {e}")))??;
     drop(media); // no longer needed
@@ -137,8 +159,20 @@ pub async fn cd_export(
     temp_file_download(output, "application/zip", &file_name).await
 }
 
+/// The viewer put on a CD.
+pub enum Viewer {
+    None,
+    /// The files of a folder (Settings > Features > Folder of the CD viewer).
+    Folder(String),
+    /// Weasis, from the compressed package, set up for this CD.
+    Weasis {
+        package: PathBuf,
+        cd: crate::cdviewer::CdBranding,
+    },
+}
+
 /// Builds the final ZIP (blocking: runs on a worker thread). Returns how many viewer files were added.
-fn assemble(media: &Path, output: &Path, page: &str, viewer_dir: &str) -> AppResult<usize> {
+fn assemble(media: &Path, output: &Path, page: &str, viewer: Viewer) -> AppResult<usize> {
     let fail = |what: &str, e: &dyn std::fmt::Display| AppError::Internal(format!("export: {what}: {e}"));
     let mut archive = zip::ZipArchive::new(std::fs::File::open(media).map_err(|e| fail("open", &e))?)
         .map_err(|e| fail("read", &e))?;
@@ -157,7 +191,11 @@ fn assemble(media: &Path, output: &Path, page: &str, viewer_dir: &str) -> AppRes
     taken.push("README.HTML".into());
 
     let mut added = 0;
-    if !viewer_dir.is_empty() {
+    if let Viewer::Weasis { package, cd } = &viewer {
+        added = add_weasis(&mut writer, &taken, package, cd).map_err(|e| fail("CD viewer", &e))?;
+    }
+    if let Viewer::Folder(viewer_dir) = &viewer {
+        let viewer_dir = viewer_dir.as_str();
         let root = Path::new(viewer_dir);
         if !root.is_dir() {
             return Err(AppError::BadRequest(format!(
@@ -205,6 +243,64 @@ fn assemble(media: &Path, output: &Path, page: &str, viewer_dir: &str) -> AppRes
     Ok(added)
 }
 
+/// Weasis on the CD: the package's entries copied as they are (never unpacked or recompressed),
+/// except `viewer/app/Weasis.cfg`, rewritten for the CD; then the CD's settings, its splash image,
+/// `Autorun.inf` and `RUN.bat`. Returns the number of files added.
+fn add_weasis(
+    writer: &mut zip::ZipWriter<std::fs::File>,
+    taken: &[String],
+    package: &Path,
+    cd: &crate::cdviewer::CdBranding,
+) -> Result<usize, String> {
+    use std::io::Read as _;
+    let mut archive =
+        zip::ZipArchive::new(std::fs::File::open(package).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let mut original_cfg = None;
+    let mut added = 0;
+    for i in 0..archive.len() {
+        let entry = archive.by_index_raw(i).map_err(|e| e.to_string())?;
+        let name = entry.name().map_err(|e| e.to_string())?.to_string();
+        // Only the viewer's own folder, never a name of Orthanc's part or one going elsewhere.
+        if !name.starts_with("viewer/")
+            || name.contains("..")
+            || name.contains('\\')
+            || taken.contains(&name.to_ascii_uppercase())
+        {
+            continue;
+        }
+        if name == "viewer/app/Weasis.cfg" {
+            drop(entry);
+            let mut text = String::new();
+            archive.by_index(i).map_err(|e| e.to_string())?.read_to_string(&mut text).map_err(|e| e.to_string())?;
+            original_cfg = Some(text);
+            continue;
+        }
+        writer.raw_copy_file(entry).map_err(|e| e.to_string())?;
+        added += 1;
+    }
+    let original_cfg = original_cfg.ok_or("the package has no viewer/app/Weasis.cfg")?;
+    let small = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let splash_name = cd.splash.as_ref().map(|(_, ext)| format!("portal-splash.{ext}"));
+    let mut files: Vec<(String, Vec<u8>)> = vec![
+        (
+            "viewer/app/Weasis.cfg".into(),
+            crate::cdviewer::weasis_cfg(&original_cfg, splash_name.as_deref()).into_bytes(),
+        ),
+        ("viewer/app/conf/portal-cd.json".into(), crate::cdviewer::portal_cd_json(cd).into_bytes()),
+        ("Autorun.inf".into(), crate::cdviewer::autorun_inf(&cd.name).into_bytes()),
+        ("RUN.bat".into(), crate::cdviewer::run_bat().into_bytes()),
+    ];
+    if let (Some((data, _)), Some(file)) = (&cd.splash, &splash_name) {
+        files.push((format!("viewer/app/resources/images/{file}"), data.clone()));
+    }
+    for (name, data) in files {
+        writer.start_file(name, small).map_err(|e| e.to_string())?;
+        writer.write_all(&data).map_err(|e| e.to_string())?;
+        added += 1;
+    }
+    Ok(added)
+}
+
 /// Escapes text for HTML.
 fn esc(text: &str) -> String {
     text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
@@ -223,7 +319,7 @@ fn plain_date(raw: &str) -> String {
 }
 
 /// The page for the patient (no script, no external resource: it opens from the disc as it is).
-pub fn patient_page(portal: &str, studies: &[StudySummary], lang: Language) -> String {
+pub fn patient_page(portal: &str, studies: &[StudySummary], lang: Language, weasis: Option<&str>) -> String {
     let (title, intro, how, cols, made) = match lang {
         Language::En => (
             "Your imaging studies",
@@ -269,8 +365,24 @@ pub fn patient_page(portal: &str, studies: &[StudySummary], lang: Language) -> S
          .muted{{color:#556}}</style></head><body>\
          <h1>{title}</h1><p><b>{patient}</b>{pid}</p><p>{intro}</p>\
          <table><thead><tr><th>{c0}</th><th>{c1}</th><th>{c2}</th><th>{c3}</th></tr></thead><tbody>{rows}</tbody></table>\
-         <p>{how}</p><p class=\"muted\">{made} {portal}, {day}.</p></body></html>\n",
+         <p>{how}</p>{viewer}<p class=\"muted\">{made} {portal}, {day}.</p></body></html>\n",
         lang = lang.code(),
+        // Weasis on the CD: how to start it on Windows, and its licence.
+        viewer = match weasis {
+            None => String::new(),
+            Some(name) => match lang {
+                Language::En => format!(
+                    "<p><b>On Windows:</b> double-click <b>RUN.bat</b> on this disc to open the images in the viewer \
+                     ({}, based on Weasis). The viewer is free software: see viewer/LICENSES/NOTICE.txt.</p>",
+                    esc(name)
+                ),
+                Language::Es => format!(
+                    "<p><b>En Windows:</b> haga doble clic en <b>RUN.bat</b> en este disco para abrir las imágenes en \
+                     el visor ({}, basado en Weasis). El visor es software libre: vea viewer/LICENSES/NOTICE.txt.</p>",
+                    esc(name)
+                ),
+            },
+        },
         title = title,
         patient = esc(&patient),
         pid = if patient_id.is_empty() { String::new() } else { format!(" ({})", esc(&patient_id)) },
@@ -297,7 +409,7 @@ mod tests {
             "ID": "a", "MainDicomTags": { "StudyDate": "20240517", "StudyDescription": "CT <script>alert(1)</script>" },
             "PatientMainDicomTags": { "PatientName": "DOE^JOHN", "PatientID": "P-001" },
         }));
-        let page = patient_page("Clinic & Co", &[study], Language::En);
+        let page = patient_page("Clinic & Co", &[study], Language::En, None);
         assert!(page.contains("DOE JOHN") && page.contains("2024-05-17") && page.contains("Clinic &amp; Co"));
         assert!(!page.contains("<script>") && page.contains("&lt;script&gt;"));
     }
@@ -321,7 +433,13 @@ mod tests {
             w.finish().unwrap();
         }
         let out = dir.join("out.zip");
-        let added = assemble(&media, &out, "<html>page</html>", &dir.join("viewer").to_string_lossy()).unwrap();
+        let added = assemble(
+            &media,
+            &out,
+            "<html>page</html>",
+            Viewer::Folder(dir.join("viewer").to_string_lossy().into_owned()),
+        )
+        .unwrap();
         assert_eq!(added, 2, "autorun.inf and bin/viewer.exe, not the second DICOMDIR");
         let mut z = zip::ZipArchive::new(std::fs::File::open(&out).unwrap()).unwrap();
         let mut names: Vec<String> = (0..z.len()).map(|i| z.by_index(i).unwrap().name().unwrap().to_string()).collect();

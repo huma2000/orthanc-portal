@@ -102,6 +102,11 @@ pub async fn favicon_image(State(state): State<AppState>) -> Response {
     image_response(state.branding.get(crate::branding::FAVICON))
 }
 
+/// The logo of the CD viewer's start screen (Settings > Features), for its preview.
+pub async fn cd_logo_image(State(state): State<AppState>) -> Response {
+    image_response(state.branding.get(crate::branding::CD_LOGO))
+}
+
 /// Uploads a new logo or icon. The body is the raw file; its type is detected from
 /// the content, whatever the browser says.
 pub async fn upload_image(

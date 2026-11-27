@@ -1491,7 +1491,33 @@
   "Included in searches when no server is chosen": "Incluido en las búsquedas cuando no se elige servidor",
   "Default server: {name}": "Servidor principal: {name}",
   "Its address, account and name are set in Orthanc connection above. Plain study IDs and older links are its own, so it is always on, always first, and cannot be removed.": "Su dirección, cuenta y nombre se configuran arriba, en Conexión con Orthanc. Los identificadores sin prefijo y los enlaces antiguos son suyos, así que siempre está activo, siempre va primero y no se puede quitar.",
-  "Default colour": "Color predeterminado"
+  "Default colour": "Color predeterminado",
+  "Viewer on the patient CDs": "Visor en los CD del paciente",
+  "Weasis (recommended): downloaded once by the portal, for Windows": "Weasis (recomendado): lo descarga el portal una vez, para Windows",
+  "The viewer in a folder of my own (below)": "El visor de una carpeta propia (abajo)",
+  "No viewer: only the images and the page": "Sin visor: solo las imágenes y la página",
+  "Weasis is a free DICOM viewer (EPL-2.0 or Apache-2.0). The portal downloads it once (about 66 MB), checks it, keeps it compressed and puts it on each CD, set to open that CD's images. It runs on Windows 10 or later (64-bit); on other computers the images can be opened with any DICOM viewer.": "Weasis es un visor DICOM libre (EPL-2.0 o Apache-2.0). El portal lo descarga una vez (unos 66 MB), lo comprueba, lo guarda comprimido y lo pone en cada CD, preparado para abrir las imágenes de ese CD. Funciona en Windows 10 o posterior (64 bits); en otros equipos las imágenes se pueden abrir con cualquier visor DICOM.",
+  "Weasis on the CD opens only that CD": "Weasis en el CD abre solo ese CD",
+  "It cannot import other studies, export, send or query other systems (those parts of Weasis are not loaded), and it keeps its settings apart from a Weasis already on the computer. Dropping files on its window cannot be blocked: it stops casual use for other studies, not a determined user.": "No puede importar otros estudios, exportar, enviar ni consultar otros sistemas (esas partes de Weasis no se cargan), y guarda sus ajustes aparte de un Weasis que ya haya en el equipo. No se puede impedir soltar archivos en su ventana: evita el uso casual con otros estudios, no a un usuario decidido.",
+  "Download Weasis automatically when it is missing": "Descargar Weasis automáticamente si falta",
+  "At start-up, and when a CD is exported without it. Untick it where the portal must not reach the internet, and copy the file into the folder shown below.": "Al arrancar, y cuando se exporta un CD sin él. Desmárquelo donde el portal no deba salir a internet, y copie el archivo en la carpeta indicada abajo.",
+  "Name of the viewer on the CDs": "Nombre del visor en los CD",
+  "Your portal's name + \"viewer\"": "El nombre de su portal + \"viewer\"",
+  "Shown in Weasis' window and menus, and as the name of the disc. Empty = the portal's name followed by \"viewer\".": "Se muestra en la ventana y los menús de Weasis, y como nombre del disco. Vacío = el nombre del portal seguido de \"viewer\".",
+  "Ready": "Listo",
+  "Downloading": "Descargando",
+  "Not downloaded": "Sin descargar",
+  "Weasis {version} is downloaded ({size} MB, checked).": "Weasis {version} está descargado ({size} MB, comprobado).",
+  "{done} of {total} MB": "{done} de {total} MB",
+  "{done} MB": "{done} MB",
+  "The file in the folder below is not the expected one: download it again.": "El archivo de la carpeta de abajo no es el esperado: descárguelo de nuevo.",
+  "Until it is, CDs are made without a viewer.": "Hasta entonces, los CD se hacen sin visor.",
+  "Downloaded": "Descargado",
+  "Download Weasis now": "Descargar Weasis ahora",
+  "Weasis {version} for the CDs": "Weasis {version} para los CD",
+  "Kept in {path}. Without internet, download it on another computer from {url} and copy it there.": "Se guarda en {path}. Sin internet, descárguelo en otro equipo desde {url} y cópielo allí.",
+  "Logo of the CD viewer": "Logotipo del visor del CD",
+  "Shown while Weasis starts from a patient CD. PNG, JPEG or GIF, up to 1 MB; about 400 x 250 pixels looks best. Without one, the portal's logo is used (when it is a PNG, JPEG or GIF), otherwise Weasis' own.": "Se muestra mientras Weasis arranca desde un CD del paciente. PNG, JPEG o GIF, hasta 1 MB; unos 400 x 250 píxeles quedan mejor. Sin él, se usa el logotipo del portal (si es PNG, JPEG o GIF) o, si no, el de Weasis."
  },
  "messages": {
   "A label can have 1 to 64 letters, digits, '-' or '_' (no spaces or accents)": "Una etiqueta puede tener de 1 a 64 letras, cifras, «-» o «_» (sin espacios ni tildes)",
@@ -1824,6 +1850,9 @@
   "Keep the database file and the .env file where they are: users, settings, links and studies are kept.": "Deje el archivo de la base de datos y el archivo .env donde están: los usuarios, ajustes, enlaces y estudios se conservan.",
   "This release has no ready-made program for {os}: build it from the source code.": "Esta versión no trae un programa listo para {os}: compílelo a partir del código fuente.",
   "Once, if there is no copy of the source code on this computer yet:": "Una vez, si todavía no hay una copia del código fuente en este equipo:",
-  "Then run the new program (target/release) instead of {file}.": "Después ejecute el programa nuevo (target/release) en lugar de {file}."
+  "Then run the new program (target/release) instead of {file}.": "Después ejecute el programa nuevo (target/release) en lugar de {file}.",
+  "The viewer on the CD must be weasis, folder or none": "El visor del CD debe ser weasis, folder o none",
+  "The name of the CD viewer can have at most 60 characters": "El nombre del visor del CD puede tener como mucho 60 caracteres",
+  "The logo of the CD viewer must be a PNG, JPEG or GIF image (what its start screen can show)": "El logotipo del visor del CD debe ser una imagen PNG, JPEG o GIF (lo que puede mostrar su pantalla de inicio)"
  }
 }

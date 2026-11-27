@@ -29,6 +29,8 @@ use std::sync::{Arc, RwLock};
 /// The two kinds of branding image.
 pub const LOGO: &str = "logo";
 pub const FAVICON: &str = "favicon";
+/// The logo of Weasis' splash screen on patient CDs (none = the portal's logo).
+pub const CD_LOGO: &str = "cd_logo";
 
 /// Size limits of the uploaded files.
 pub const MAX_LOGO_BYTES: usize = 1024 * 1024; // 1 MB
@@ -40,7 +42,7 @@ pub const DEFAULT_MARK_SVG: &str = include_str!("../static/favicon.svg");
 /// Largest allowed file for a kind, or `None` if the kind does not exist.
 pub fn max_bytes(kind: &str) -> Option<usize> {
     match kind {
-        LOGO => Some(MAX_LOGO_BYTES),
+        LOGO | CD_LOGO => Some(MAX_LOGO_BYTES),
         FAVICON => Some(MAX_FAVICON_BYTES),
         _ => None,
     }
@@ -107,7 +109,8 @@ impl BrandingStore {
             Some(i) => json!({ "url": i.url(FAVICON), "type": i.content_type, "custom": true, "size": i.data.len() }),
             None => json!({ "url": "/favicon.svg", "type": "image/svg+xml", "custom": false, "size": 0 }),
         };
-        json!({ "logo": logo, "favicon": favicon })
+        let cd_logo = self.get(CD_LOGO).map(|i| json!({ "url": i.url(CD_LOGO), "custom": true, "size": i.data.len() }));
+        json!({ "logo": logo, "favicon": favicon, "cd_logo": cd_logo })
     }
 
     /// Validates, saves and publishes a new image. Returns an error message
@@ -121,6 +124,11 @@ impl BrandingStore {
             return Err(AppError::BadRequest(format!("The file is too big: the limit is {} KB", max / 1024)));
         }
         let content_type = detect_image(&data).map_err(AppError::BadRequest)?;
+        if kind == CD_LOGO && !["image/png", "image/jpeg", "image/gif"].contains(&content_type) {
+            return Err(AppError::BadRequest(
+                "The logo of the CD viewer must be a PNG, JPEG or GIF image (what its start screen can show)".into(),
+            ));
+        }
         let version = now_unix();
         db.save_branding(kind, content_type, &data, version)?;
         self.set(kind, BrandImage { content_type, data, version });

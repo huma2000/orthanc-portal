@@ -4009,6 +4009,38 @@ function updateNotice() {
   return notice;
 }
 
+/** Weasis for the patient CDs (Settings > Features): present or not, Download now, its progress. */
+function buildCdViewerPanel() {
+  const box = h("div", { class: "setting wide cd-viewer-panel" }, h("div", { class: "muted" }, "Loading..."));
+  let timer = null;
+  const mb = (n) => (n / 1048576).toFixed(1);
+  async function load() {
+    let st;
+    try { st = await api("GET", "/api/admin/cd-viewer"); } catch (e) { box.replaceChildren(h("div", { class: "form-error" }, e.message)); return; }
+    const line = st.ready
+      ? h("div", null, h("span", { class: "chip status-on" }, "Ready"), " ", t("Weasis {version} is downloaded ({size} MB, checked).", { version: st.version, size: mb(st.size || 0) }))
+      : st.downloading
+        ? h("div", null, h("span", { class: "chip" }, "Downloading"), " ", st.total_bytes
+          ? t("{done} of {total} MB", { done: mb(st.done_bytes), total: mb(st.total_bytes) }) : t("{done} MB", { done: mb(st.done_bytes) }))
+        : h("div", null, h("span", { class: "chip status-off" }, "Not downloaded"), " ", st.wrong_file
+          ? lookup("The file in the folder below is not the expected one: download it again.")
+          : lookup("Until it is, CDs are made without a viewer."));
+    const download = h("button", {
+      class: "btn small", type: "button", disabled: st.downloading || st.ready,
+      onclick: async () => { download.disabled = true; try { await api("POST", "/api/admin/cd-viewer/download"); } catch (e) { toastError(e); } load(); },
+    }, st.ready ? "Downloaded" : "Download Weasis now");
+    // (replaceChildren would write a null as the text "null": the empty parts are left out.)
+    box.replaceChildren(...[h("b", null, t("Weasis {version} for the CDs", { version: st.version })), line,
+      st.error ? h("div", { class: "form-error" }, translateMessage(st.error)) : null,
+      h("div", { class: "filter-actions" }, download),
+      h("p", { class: "hint" }, t("Kept in {path}. Without internet, download it on another computer from {url} and copy it there.", { path: st.path, url: st.url }))].filter(Boolean));
+    clearTimeout(timer);
+    if (st.downloading && box.isConnected) timer = setTimeout(load, 1500);
+  }
+  load();
+  return box;
+}
+
 /** This version, the latest release, when it was checked, and Check now (Settings > General). */
 function buildUpdatePanel() {
   const box = h("div", { class: "setting wide update-panel" }, h("div", { class: "muted" }, "Loading..."));
@@ -4230,6 +4262,15 @@ const SETTINGS_FIELDS = {
     { key: "stats_page", label: "Configuration > Statistics: studies per month and modality, links, transfers, who uploads", type: "checkbox", wide: true },
     { key: "cd_export", label: "Patient CD / USB in the download menus", type: "checkbox", wide: true,
       hint: "A ZIP to copy onto a disc or a USB stick: the images with their DICOMDIR index, a page for the patient and, if you give its folder below, a portable viewer. Needs the download permission." },
+    { key: "cd_viewer", label: "Viewer on the patient CDs", type: "select", wide: true,
+      options: [["weasis", "Weasis (recommended): downloaded once by the portal, for Windows"], ["folder", "The viewer in a folder of my own (below)"], ["none", "No viewer: only the images and the page"]],
+      hint: "Weasis is a free DICOM viewer (EPL-2.0 or Apache-2.0). The portal downloads it once (about 66 MB), checks it, keeps it compressed and puts it on each CD, set to open that CD's images. It runs on Windows 10 or later (64-bit); on other computers the images can be opened with any DICOM viewer." },
+    { key: "cd_weasis_locked", label: "Weasis on the CD opens only that CD", type: "checkbox", wide: true,
+      hint: "It cannot import other studies, export, send or query other systems (those parts of Weasis are not loaded), and it keeps its settings apart from a Weasis already on the computer. Dropping files on its window cannot be blocked: it stops casual use for other studies, not a determined user." },
+    { key: "cd_weasis_autodownload", label: "Download Weasis automatically when it is missing", type: "checkbox", wide: true,
+      hint: "At start-up, and when a CD is exported without it. Untick it where the portal must not reach the internet, and copy the file into the folder shown below." },
+    { key: "cd_weasis_name", label: "Name of the viewer on the CDs", wide: true, placeholder: "Your portal's name + \"viewer\"",
+      hint: "Shown in Weasis' window and menus, and as the name of the disc. Empty = the portal's name followed by \"viewer\"." },
     { key: "cd_viewer_dir", label: "Folder of a portable DICOM viewer for the patient CDs (optional)", wide: true, placeholder: "/data/cd-viewer   or   D:\\CD-Viewer",
       hint: "A full path on the computer (or in the container) running the portal, e.g. an unpacked portable Weasis with its autorun.inf. Its files are copied onto every patient CD. In Docker, mount the folder (see the README)." },
     { key: "upload_links", label: "Upload links: people outside send studies in", type: "checkbox", wide: true,
@@ -4306,9 +4347,11 @@ function buildBrandImagePicker(kind, title, hint, accept) {
 
   /** Draws the current state of this image. */
   function draw() {
-    const current = kind === "logo" ? state.brand.logo : state.brand.favicon;
+    const current = state.brand[kind];
     const custom = !!(current && current.custom);
-    const src = custom ? current.url : "/favicon.svg";
+    // The CD viewer's logo defaults to the portal's own logo.
+    const fallback = kind === "cd_logo" && state.brand.logo && state.brand.logo.custom ? state.brand.logo.url : "/favicon.svg";
+    const src = custom ? current.url : fallback;
     const swatch = (cls) => h("div", { class: `swatch ${cls} ${kind}` }, h("img", { src, alt: "" }));
     node.replaceChildren(
       h("div", { class: "brand-picker-head" }, h("b", null, title), h("span", { class: "chip" }, custom ? "custom" : "default")),
@@ -5032,7 +5075,12 @@ function buildSettingsView() {
       section("formatting", "Language, dates, names and style", "The language of the portal, how dates and patient names are written everywhere (also on the invitation page), and extra style rules.",
         SETTINGS_FIELDS.formatting.map(field)),
       section("features", "Optional features", "Switch on only what your practice needs. Each feature also needs its permission (Security & roles, Users): delete, edit, retrieve, worklists... Administrators may use all of them.",
-        SETTINGS_FIELDS.features.map(field)),
+        SETTINGS_FIELDS.features.map(field),
+        // Weasis on the patient CDs: its download, and the logo of its start screen.
+        buildCdViewerPanel(),
+        buildBrandImagePicker("cd_logo", "Logo of the CD viewer",
+          "Shown while Weasis starts from a patient CD. PNG, JPEG or GIF, up to 1 MB; about 400 x 250 pixels looks best. Without one, the portal's logo is used (when it is a PNG, JPEG or GIF), otherwise Weasis' own.",
+          "image/png,image/jpeg,image/gif")),
       section("moreviewers", "More viewers", "Viewers of Orthanc's plugins, offered in a \"More viewers\" menu next to OHIF, and the OHIF modes. Several ticked studies can be opened together in OHIF and Stone.",
         SETTINGS_FIELDS.moreviewers.map(field),
         h("div", { class: "setting" }, h("span", { class: "field-label" }, "OHIF modes offered"), ohifModesEditor.node)),

@@ -3,6 +3,7 @@ name = "orthanc-portal"
 version = "0.2.2"
 edition = "2021"
 description = "Web portal (intranet + Cloudflare Tunnel) for an Orthanc PACS with role-based permissions"
+license = "BSD-3-Clause"
 
 [dependencies]
 # ---- Web framework -------------------------------------------------------
@@ -54,7 +55,7 @@ sha1 = "0.10"
 sha2 = "0.10"
 # Patient CD / USB export: copies the entries of Orthanc's DICOMDIR archive as they are (no
 # recompression, hence no compression feature) next to a portable viewer.
-zip = { version = "9", default-features = false }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [profile.release]
 # Smaller, faster binary for production.

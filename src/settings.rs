@@ -600,6 +600,19 @@ pub struct Settings {
     /// CD / USB export. Empty = no viewer, only the images and the page for the patient.
     #[serde(default)]
     pub cd_viewer_dir: String,
+    /// The viewer on the CD: `weasis` (Weasis, downloaded once by the portal, see cdviewer.rs),
+    /// `folder` (the files of `cd_viewer_dir`) or `none`.
+    #[serde(default = "default_cd_viewer")]
+    pub cd_viewer: String,
+    /// Weasis on the CD opens only that CD (no import, export, send, query / retrieve).
+    #[serde(default = "default_true")]
+    pub cd_weasis_locked: bool,
+    /// Download Weasis by itself when it is missing (at start-up, and when a CD is exported).
+    #[serde(default = "default_true")]
+    pub cd_weasis_autodownload: bool,
+    /// The name in Weasis' window on the CDs ("" = "<portal name> viewer").
+    #[serde(default)]
+    pub cd_weasis_name: String,
 
     // ---- Backups of the portal's own database (Settings > Backups) ---------------------
     /// Backups at all: automatic ones, "Back up now" and "Download a copy". Off = none of them.
@@ -911,6 +924,10 @@ pub const STUDY_SEARCH_FIELDS: [&str; 13] = [
     "labels",
 ];
 
+fn default_cd_viewer() -> String {
+    "weasis".into()
+}
+
 fn default_study_columns() -> Vec<String> {
     ["patient", "patient_id", "study_date", "description", "modalities", "series", "labels", "server"]
         .map(String::from)
@@ -972,6 +989,18 @@ fn offer_server_column(stored: &mut Value) {
         }
     }
     obj.insert("columns_version".into(), json!(1));
+}
+
+/// Saved settings from before Weasis on the CD: an installation that gave a viewer folder keeps it.
+fn keep_cd_viewer_folder(stored: &mut Value) {
+    let Some(obj) = stored.as_object_mut() else { return };
+    if obj.contains_key("cd_viewer") {
+        return;
+    }
+    let has_folder = obj.get("cd_viewer_dir").and_then(Value::as_str).is_some_and(|d| !d.trim().is_empty());
+    if has_folder {
+        obj.insert("cd_viewer".into(), json!("folder"));
+    }
 }
 
 fn forget_retired_permissions(stored: &mut Value) {
@@ -1043,6 +1072,10 @@ impl Settings {
             forward_rules: Vec::new(),
             cd_export: true,
             cd_viewer_dir: String::new(),
+            cd_viewer: default_cd_viewer(),
+            cd_weasis_locked: true,
+            cd_weasis_autodownload: true,
+            cd_weasis_name: String::new(),
             backup_dir: String::new(),
             backup_interval_hours: default_backup_hours(),
             backup_keep: default_backup_keep(),
@@ -1171,6 +1204,7 @@ impl Settings {
         }
         if let Some(v) = env_opt("CD_VIEWER_DIR") {
             s.cd_viewer_dir = v;
+            s.cd_viewer = "folder".into();
         }
         s.session_hours = env_parse("SESSION_HOURS", s.session_hours)?;
         s.weasis_token_minutes = env_parse("WEASIS_TOKEN_MINUTES", s.weasis_token_minutes)?;
@@ -1212,6 +1246,7 @@ impl Settings {
             let mut stored: Value = serde_json::from_str(&raw)?;
             forget_retired_permissions(&mut stored);
             offer_server_column(&mut stored);
+            keep_cd_viewer_folder(&mut stored);
             let mut base = serde_json::to_value(&seed)?;
             if let (Some(base_obj), Some(stored_obj)) = (base.as_object_mut(), stored.as_object()) {
                 for (k, v) in stored_obj {
@@ -1716,6 +1751,14 @@ impl Settings {
         range("Hours between two backups", self.backup_interval_hours, 1, 24 * 30)?;
         range("Backups to keep", self.backup_keep, 1, 365)?;
         range("Recently viewed studies on the home page", self.recently_viewed_count, 1, 30)?;
+
+        // --- patient CD viewer
+        if !["weasis", "folder", "none"].contains(&self.cd_viewer.as_str()) {
+            return bad("The viewer on the CD must be weasis, folder or none".into());
+        }
+        if self.cd_weasis_name.chars().count() > 60 || has_control(&self.cd_weasis_name) {
+            return bad("The name of the CD viewer can have at most 60 characters".into());
+        }
 
         // --- auto-forward rules
         if self.forward_rules.len() > 50 {
@@ -2265,6 +2308,18 @@ mod tests {
     }
 
     /// Saved settings from before the Server column get it once; hiding it afterwards is kept.
+    /// Weasis is the CD viewer by default; an installation that gave a viewer folder keeps it.
+    #[test]
+    fn the_cd_viewer_folder_is_kept() {
+        assert_eq!(Settings::defaults().cd_viewer, "weasis");
+        let folder = std::env::temp_dir().display().to_string();
+        let with_folder = json!({ "cd_viewer_dir": folder }).to_string();
+        assert_eq!(Settings::merged_with_stored(Settings::defaults(), Some(with_folder)).cd_viewer, "folder");
+        let without = json!({ "cd_export": true }).to_string();
+        assert_eq!(Settings::merged_with_stored(Settings::defaults(), Some(without)).cd_viewer, "weasis");
+        assert!(Settings::defaults().with_patch(&json!({ "cd_viewer": "other" })).is_err());
+    }
+
     #[test]
     fn the_server_column_is_offered_once() {
         let old = json!({ "study_columns": ["patient", "study_date"] }).to_string();

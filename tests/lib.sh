@@ -51,8 +51,11 @@ mock_auth() { curl -s -X POST -d "{\"mode\":\"$1\"}" http://127.0.0.1:18042/__mo
 # portal_start [ENV=value ...]  (first start: environment values seed the settings)
 portal_start() {
   # UPDATE_CHECK_URL: the update check asks the fake Orthanc's stand-in, never GitHub.
+  # CD_VIEWER_*: the Weasis package of patient CDs is a small fake served by the fake Orthanc.
+  local cdv_sha; cdv_sha=$("$PYTHON3" "$TESTS/fake_cd_viewer.py" "$WORK/fake-cd-viewer.zip")
   env ORTHANC_URL=http://127.0.0.1:18042 ORTHANC_USERNAME=orthanc ORTHANC_PASSWORD=s3cr3tpw DATABASE_PATH="$WORK/portal.db" \
       UPDATE_CHECK_URL=http://127.0.0.1:18042/__mock/github/latest \
+      CD_VIEWER_URL=http://127.0.0.1:18042/__mock/cd-viewer.zip CD_VIEWER_SHA256="$cdv_sha" \
       BIND_ADDR=127.0.0.1:18080 REMOTE_BIND_ADDR=127.0.0.1:18081 ADMIN_PASSWORD=SuperSecret123 "$@" "$PORTAL_BIN" >> "$WORK/portal.log" 2>&1 &
   remember portal $!
   sleep 2.5

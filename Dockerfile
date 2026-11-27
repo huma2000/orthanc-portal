@@ -35,6 +35,8 @@ FROM debian:bookworm-slim
 RUN useradd --system --uid 10001 --home /data portal \
  && mkdir -p /data && chown portal /data
 COPY --from=build /src/target/release/orthanc-portal /usr/local/bin/orthanc-portal
+# The portal's licence and the notices of the libraries built into it.
+COPY LICENSE THIRD-PARTY-LICENSES.txt /usr/share/doc/orthanc-portal/
 USER portal
 # The listening addresses always come from these variables (LISTENERS_FROM_ENV), never
 # from Settings: they must match the ports docker-compose publishes. The compose files

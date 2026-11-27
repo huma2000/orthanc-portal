@@ -53,6 +53,7 @@
 
 mod auth;
 mod branding;
+mod cdviewer;
 mod config;
 mod db;
 mod dicom_peek;
@@ -161,6 +162,8 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(forward::run(state.clone()));
     // 5c. New versions on GitHub (Settings > General): once a day, administrators are told.
     tokio::spawn(updates::run(state.clone()));
+    // 5d. Weasis for patient CDs: downloaded once, when it is the CD viewer and it is missing.
+    cdviewer::download_if_wanted(&state);
     // Patient CD exports interrupted by the last stop leave files behind: remove them.
     routes::export::clean_export_dir(&routes::export::export_dir(&state));
 
