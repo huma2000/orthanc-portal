@@ -287,7 +287,8 @@ details.menu .menu-list small { display: block; color: var(--ink-soft); }
 /* ---------- 8. Login ---------- */
 .login-wrap { min-height: 100vh; display: grid; place-items: center; padding: 1rem; }
 .login-card { width: min(380px, 100%); padding: 1.8rem; box-shadow: var(--shadow); display: grid; gap: 1.1rem; }
-.login-card .brand { color: var(--ink); padding: 0; }
+/* Login card: the logo above the portal's name, both centred. */
+.login-card .brand { color: var(--ink); padding: 0; flex-direction: column; justify-content: center; text-align: center; gap: 0.7rem; }
 .login-card form { display: grid; gap: 0.85rem; }
 .form-error { color: var(--danger); background: var(--danger-soft); padding: 0.5rem 0.7rem; border-radius: 6px; }
 
