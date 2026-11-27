@@ -497,6 +497,13 @@ ok "...it cannot copy to the default server (404)" "$(code $F $AR POST /api/stud
 ok "...it cannot share or send the default server's study (404)" "$(code $F $AR POST /api/studies/$SID/send -H "$J" -d '{"target":"ris"}')" "404"
 ok "...bulk sending refuses the default server's studies (404)" "$(code $F $AR POST /api/send -H "$J" -d "{\"target\":\"ris\",\"studies\":[\"$SID\"]}")" "404"
 has "...uploading (into the default server) is refused" "$(body $F $AR /api/upload -X POST -H "Content-Type: application/dicom" --data-binary "DICM")" "cannot use the Orthanc server"
+put $A '{"query_retrieve":true,"worklists_enabled":true,"upload_links":true}' > /dev/null
+mkuser archq LongPassword123 '"read","retrieve","worklists","share","upload"' ',"servers":["archive"]'
+AQ=$(login $F archq LongPassword123)
+has "...query / retrieve, worklists and upload links say they need the default server" "$(body $F $AQ /api/retrieve/sources) $(body $F $AQ /api/worklists) $(body $F $AQ /api/upload-links -X POST -H "$J" -d '{}')" "cannot use the Orthanc server"
+ok "...all refused (403)" "$(code $F $AQ GET /api/retrieve/sources)/$(code $F $AQ GET /api/worklists)/$(code $F $AQ POST /api/upload-links -H "$J" -d '{}')" "403/403/403"
+ok "...an upload link into its own server is allowed" "$(body $F $AQ /api/upload-links -X POST -H "$J" -d '{"server":"archive"}' | py "d['server']")" "archive"
+put $A '{"query_retrieve":false,"worklists_enabled":false,"upload_links":false}' > /dev/null
 ok "...only the archive's counts" "$(body $F $AR /api/stats | py "[s['key'] for s in d['servers']]")" "['archive']"
 M1=$(cat "$WORK/proxy.log" 2>/dev/null | wc -l); M2=$(cat "$WORK/m2/proxy.log" 2>/dev/null | wc -l)
 ok "...its viewer reads the study from the archive, never from the default server" "$(code $F $AR GET "/dicom-web/studies/$UID_/series")/$(( $(cat "$WORK/proxy.log" 2>/dev/null | wc -l) - M1 ))/$(( $(cat "$WORK/m2/proxy.log" 2>/dev/null | wc -l) - M2 ))" "200/0/1"
