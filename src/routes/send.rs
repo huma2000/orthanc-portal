@@ -20,11 +20,12 @@
 use crate::auth::AuthUser;
 use crate::error::{AppError, AppResult};
 use crate::models::{ModalityNode, StudySummary};
+use crate::orthanc::OrthancClient;
 use crate::permissions::Permission;
 use crate::servers::ResourceRef;
 use crate::state::AppState;
 use crate::util::feature;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::Json;
 use futures_util::{stream, StreamExt};
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
@@ -43,10 +44,10 @@ pub fn named_target(kind: &'static str, name: &str, cfg: &Value) -> ModalityNode
     node
 }
 
-/// Every destination the user may send to (DICOM nodes, and peers / DICOMweb servers when switched on).
-pub async fn destinations(state: &AppState) -> AppResult<Vec<ModalityNode>> {
+/// Every destination one Orthanc server can send to (its DICOM nodes, and its peers / DICOMweb
+/// servers when switched on). Each server has its own: they are set in that Orthanc's configuration.
+pub async fn destinations(state: &AppState, orthanc: &OrthancClient) -> AppResult<Vec<ModalityNode>> {
     let settings = state.settings.get();
-    let orthanc = &state.orthanc;
     // The three lists are independent: asked at the same time.
     let peers = async {
         if settings.send_to_peers {
@@ -73,13 +74,23 @@ pub async fn destinations(state: &AppState) -> AppResult<Vec<ModalityNode>> {
     Ok(nodes)
 }
 
-/// Lists the destinations a study can be sent to.
+/// `?server=key`: whose destinations (the default server when absent).
+#[derive(Deserialize)]
+pub struct ServerQuery {
+    #[serde(default)]
+    server: String,
+}
+
+/// Lists the destinations the studies of a server can be sent to.
 pub async fn list_modalities(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
+    Query(q): Query<ServerQuery>,
 ) -> AppResult<Json<Vec<ModalityNode>>> {
     user.require(Permission::Send)?;
-    Ok(Json(destinations(&state).await?))
+    let orthanc =
+        if q.server.is_empty() { state.orthancs.default_for(&user)? } else { state.orthancs.get(&user, &q.server)? };
+    Ok(Json(destinations(&state, &orthanc).await?))
 }
 
 #[derive(Deserialize)]
@@ -98,13 +109,7 @@ pub(crate) async fn start_send(
     id: &str,
 ) -> AppResult<(i64, String)> {
     let study_ref = ResourceRef::parse(id)?;
-    // The DICOM nodes, peers and DICOMweb servers listed are those of the default Orthanc.
-    // Sending from another server needs that server's own (multi-server phase 3).
-    if !study_ref.is_main() {
-        return Err(AppError::BadRequest(
-            "Sending is only available for the studies of the default Orthanc server for now".into(),
-        ));
-    }
+    // The study's own server sends it, to one of ITS destinations (`node` comes from its list).
     let orthanc = match person {
         Some(user) => state.orthancs.of(user, &study_ref)?,
         None => state.orthancs.stored(&study_ref.server)?,
@@ -127,14 +132,19 @@ pub(crate) async fn start_send(
             orthanc.start_job(&path, &json!({ "Resources": [id], "Synchronous": false })).await?
         }
     };
-    let transfer_id = state.db.add_transfer(username, id, &label, &node.id, &job_id, "send")?;
+    // The transfer remembers the study as `key:id`: its job is followed on that server.
+    let transfer_id = state.db.add_transfer(username, &study_ref.compound(), &label, &node.id, &job_id, "send")?;
     state.db.audit(username, "send_study", &format!("{label} -> {} (job {job_id})", node.id));
     Ok((transfer_id, job_id))
 }
 
-/// The destination called `target`, if the user may send there.
-pub(crate) async fn find_destination(state: &AppState, target: &str) -> AppResult<ModalityNode> {
-    destinations(state)
+/// The destination called `target` of one Orthanc server, if the user may send there.
+pub(crate) async fn find_destination(
+    state: &AppState,
+    orthanc: &OrthancClient,
+    target: &str,
+) -> AppResult<ModalityNode> {
+    destinations(state, orthanc)
         .await?
         .into_iter()
         .find(|n| n.id == target)
@@ -148,8 +158,8 @@ pub async fn send_study(
     Json(req): Json<SendRequest>,
 ) -> AppResult<Json<Value>> {
     user.require(Permission::Send)?;
-    let (_, study) = state.orthancs.resolve(&user, &id)?;
-    let node = find_destination(&state, &req.target).await?;
+    let (orthanc, study) = state.orthancs.resolve(&user, &id)?;
+    let node = find_destination(&state, &orthanc, &req.target).await?;
     let (transfer_id, job_id) = start_send(&state, &user.username, Some(&user), &node, &study.compound()).await?;
     Ok(Json(json!({ "transfer_id": transfer_id, "job_id": job_id })))
 }
@@ -174,7 +184,10 @@ pub async fn send_many(
     if req.studies.iter().any(|id| ResourceRef::try_parse(id).is_none()) {
         return Err(AppError::BadRequest("Invalid study id".into()));
     }
-    let node = find_destination(&state, &req.target).await?;
+    // One server sends them all, to one of its destinations.
+    let raw: Vec<&str> = req.studies.iter().map(String::as_str).collect();
+    let (orthanc, _, _) = state.orthancs.resolve_together(&user, &raw)?;
+    let node = find_destination(&state, &orthanc, &req.target).await?;
     let (state, user, node) = (&state, &user, &node);
     let outcomes: Vec<(String, AppResult<(i64, String)>)> = stream::iter(req.studies.clone())
         .map(|id| async move {
@@ -229,7 +242,7 @@ pub async fn list_transfers(
     // time, keeping the order). Once a job has ended its outcome is stored in the
     // database, so the Transfers tab (which refreshes every 3 seconds while a job runs)
     // does not repeat 40 requests for jobs that finished long ago.
-    let orthanc = &state.orthanc;
+    let state = &state;
     let db = &state.db;
     let views = stream::iter(transfers)
         .map(|t| async move {
@@ -253,7 +266,17 @@ pub async fn list_transfers(
                     runtime: info["runtime"].as_f64(),
                 };
             }
-            let (job_state, progress, error, (instances, failed, runtime)) = match orthanc.get_job(&t.job_id).await {
+            // A study sent from another server: its job runs there (the transfer stores `key:id`).
+            let server = match t.direction.as_str() {
+                "retrieve" => crate::settings::MAIN_SERVER.to_string(),
+                _ => ResourceRef::try_parse(&t.study_id)
+                    .map_or_else(|| crate::settings::MAIN_SERVER.to_string(), |r| r.server),
+            };
+            let job = match state.orthancs.stored(&server) {
+                Ok(orthanc) => orthanc.get_job(&t.job_id).await,
+                Err(_) => Err(AppError::Upstream("its Orthanc server is not available".into())),
+            };
+            let (job_state, progress, error, (instances, failed, runtime)) = match job {
                 Ok(job) => {
                     let state = job["State"].as_str().unwrap_or("Unknown").to_string();
                     let error =

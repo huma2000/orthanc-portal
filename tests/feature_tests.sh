@@ -411,7 +411,11 @@ put $A '{"allow_modify":false}' > /dev/null
 ok "an unknown server: 404" "$(code $F $A GET /api/studies/nowhere:$SID/series)" "404"
 ok "a malformed server key: 400" "$(code $F $A GET /api/studies/Archive:$SID/series)" "400"
 ok "one ZIP of studies on two servers is refused (400)" "$(code $F $A GET "/api/download?studies=$SID,$AID")" "400"
-has "sending from another server is not offered yet" "$(body $F $A /api/studies/$AID/send -X POST -H "$J" -d '{"target":"ris"}')" "default Orthanc server"
+ok "that server's own destinations are listed" "$(body $F $A "/api/modalities?server=archive" | py "'ris' in [n['id'] for n in d]")" "True"
+ok "sending it: that server sends it" "$(code $F $A POST /api/studies/$AID/send -H "$J" -d '{"target":"ris"}')/$(tail -1 "$WORK/m2/store.log" | py "d['Resources']")" "200/['$SID']"
+J2=$(grep -c "/jobs/" "$WORK/m2/auth.log")
+ok "...and the transfer is followed there" "$(body $F $A /api/transfers | py "len(d) > 0")/$(( $(grep -c "/jobs/" "$WORK/m2/auth.log") > J2 ))" "True/1"
+ok "sending studies of two servers at once is refused (400)" "$(code $F $A POST /api/send -H "$J" -d "{\"target\":\"ris\",\"studies\":[\"$SID\",\"$AID\"]}")" "400"
 ok "recently viewed remembers the server" "$(post $F $A /api/recent/$AID "{\"uid\":\"$UID_\"}" | py "d['ok']")/$(body $F $A /api/recent | py "d[0]['id']")" "True/$AID"
 # A link to that server's study: the guest's page, download and viewer use that server.
 L2=$(body $F $A /api/studies/$AID/share -X POST -H "$J" -d '{"downloads":1}')
@@ -452,7 +456,7 @@ ok "...the default server cannot be searched (400, like an unknown one)" "$(code
 ok "...a study of the default server does not exist for it (404)" "$(code $F $AR GET /api/studies/$SID/series)/$(code $F $AR GET /api/studies/$SID/download)/$(code $F $AR GET /api/studies/$SID/thumbnail)" "404/404/404"
 ok "...the same study on the archive does" "$(code $F $AR GET /api/studies/$AID/series)" "200"
 ok "...it cannot share or send the default server's study (404)" "$(code $F $AR POST /api/studies/$SID/send -H "$J" -d '{"target":"ris"}')" "404"
-ok "...bulk sending refuses the default server's studies" "$(body $F $AR /api/send -X POST -H "$J" -d "{\"target\":\"ris\",\"studies\":[\"$SID\"]}" | py "(d.get('started'), len(d.get('errors', [])))" 2>/dev/null || echo refused)" "(0, 1)"
+ok "...bulk sending refuses the default server's studies (404)" "$(code $F $AR POST /api/send -H "$J" -d "{\"target\":\"ris\",\"studies\":[\"$SID\"]}")" "404"
 has "...uploading (into the default server) is refused" "$(body $F $AR /api/upload -X POST -H "Content-Type: application/dicom" --data-binary "DICM")" "cannot use the Orthanc server"
 ok "...only the archive's counts" "$(body $F $AR /api/stats | py "[s['key'] for s in d['servers']]")" "['archive']"
 M1=$(cat "$WORK/proxy.log" 2>/dev/null | wc -l); M2=$(cat "$WORK/m2/proxy.log" 2>/dev/null | wc -l)

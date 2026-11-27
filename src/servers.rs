@@ -83,10 +83,6 @@ impl ResourceRef {
     pub fn compound(&self) -> String {
         compound(&self.server, &self.id)
     }
-
-    pub fn is_main(&self) -> bool {
-        self.server == MAIN_SERVER
-    }
 }
 
 impl std::fmt::Display for ResourceRef {

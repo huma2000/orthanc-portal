@@ -79,7 +79,8 @@ pub async fn public_info(State(state): State<AppState>) -> Json<Value> {
 /// Settings + the state of the listeners + factory roles (for "Restore defaults").
 async fn settings_document(state: &AppState) -> Value {
     // The destinations come from Orthanc: asked while the listeners are looked at.
-    let (listeners, destinations) = tokio::join!(state.listeners.status(), crate::routes::send::destinations(state));
+    let (listeners, destinations) =
+        tokio::join!(state.listeners.status(), crate::routes::send::destinations(state, &state.orthanc));
     json!({
         "settings": state.settings.get().to_view(),
         "listeners": listeners,

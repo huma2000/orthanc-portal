@@ -2046,9 +2046,15 @@ function cdExportItem(ids) {
 async function openSendDialog(studyOrList) {
   const studies = [].concat(studyOrList);
   const study = studies[0];
+  // Each Orthanc server sends to its own destinations: the studies must be on one server.
+  const server = study.server || "main";
+  if (studies.some((s) => (s.server || "main") !== server)) {
+    toast("These studies are on several Orthanc servers: send the studies of one server at a time.", "error", 8000);
+    return;
+  }
   let nodes;
   try {
-    nodes = await api("GET", "/api/modalities");
+    nodes = await api("GET", `/api/modalities?server=${encodeURIComponent(server)}`);
   } catch (e) { toastError(e); return; }
   if (!nodes.length) {
     toast("No DICOM destination is configured in Orthanc (DicomModalities).", "error", 8000);
@@ -2089,7 +2095,7 @@ async function openSendDialog(studyOrList) {
       ? h("ul", null, studies.slice(0, 8).map((s) => h("li", null, studyLine(s))), studies.length > 8 ? h("li", null, t("and {n} more", { n: studies.length - 8 })) : null)
       : h("p", null, h("b", null, formatName(study.patient_name)), " ", formatDicomDate(study.study_date), study.study_description ? `, ${study.study_description}` : ""),
     error,
-    h("label", null, "Destination", target),
+    h("label", null, severalServers() ? t("Destination (of {server})", { server: serverName(server) }) : "Destination", target),
     h("p", { class: "muted" }, "Orthanc sends every image to the chosen destination (DICOM C-STORE, or the Orthanc / DICOMweb protocol). Each study is one transfer."),
     h("div", { class: "dialog-actions" },
       h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Cancel"),
