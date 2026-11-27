@@ -4439,7 +4439,7 @@ function buildPickList(what, catalog, chosen, defaults) { // `what`: "columns", 
  * log folder, badge colour, searched by default, switched on, Test, move up / down, Remove. Saved
  * with the rest of the form; `get()` = the `orthanc_servers` setting.
  */
-function buildServersEditor(servers) {
+function buildServersEditor(servers, defaultName = "Main") {
   const MAX = 7;
   let rows = (servers || []).map((x) => ({ ...x, saved: true, password: "", clear: false, anonymous: !x.username }));
   const list = h("div", { class: "servers-editor" });
@@ -4493,7 +4493,9 @@ function buildServersEditor(servers) {
             h("input", { type: "checkbox", checked: row.clear, onchange: (e) => { row.clear = e.target.checked; } }), "Remove the saved password"),
           h("label", null, "Folder of its log files (optional)", input("log_dir", { placeholder: "/var/log/orthanc" })),
           h("div", { class: "setting" }, h("span", { class: "field-label" }, "Badge colour"), colorChoice(row.color, (c) => { row.color = c; }, "Badge colour")),
-          h("label", { class: "check" }, h("input", { type: "checkbox", checked: row.searched_by_default !== false, onchange: (e) => { row.searched_by_default = e.target.checked; } }), "Searched by default")),
+          h("label", { class: "check", title: lookup("Several servers can be included. This does not make it the default server.") },
+            h("input", { type: "checkbox", checked: row.searched_by_default !== false, onchange: (e) => { row.searched_by_default = e.target.checked; } }),
+            "Included in searches when no server is chosen")),
         h("div", { class: "setting wide" }, test, testBox));
     }) : [h("p", { class: "muted" }, "Only the default server above. Add another Orthanc server to search and use several from this portal.")]));
   }
@@ -4506,8 +4508,12 @@ function buildServersEditor(servers) {
       draw();
     },
   }, "Add a server");
+  // The default server first: its connection and its name are the section above; it is always on.
+  const defaultRow = h("div", { class: "server-row server-default" },
+    h("div", null, h("b", null, t("Default server: {name}", { name: defaultName || "Main" }))),
+    h("p", { class: "hint" }, "Its address, account and name are set in Orthanc connection above. Plain study IDs and older links are its own, so it is always on, always first, and cannot be removed."));
   return {
-    node: h("div", { class: "wide" }, list, h("div", { class: "filter-actions" }, add),
+    node: h("div", { class: "wide" }, defaultRow, list, h("div", { class: "filter-actions" }, add),
       h("p", { class: "hint" }, "The default server (above) is always first: plain study IDs are its own. The order here is the order of the searches and badges, and decides which copy a study on several servers opens. Who may use which server is chosen in Users and in Security & roles. Changes apply when you save.")),
     get: () => rows.map((r) => {
       const server = {
@@ -4801,7 +4807,7 @@ function buildSettingsView() {
       }
     });
 
-    const serversEditor = buildServersEditor(s.orthanc_servers);
+    const serversEditor = buildServersEditor(s.orthanc_servers, s.orthanc_label);
     const rolesEditor = buildRolesEditor(s.roles, doc.defaults.roles, doc.permissions,
       [{ key: "main", label: s.orthanc_label || "Main" }, ...(s.orthanc_servers || []).map((x) => ({ key: x.key, label: x.label || x.key }))]);
     const forwardEditor = buildForwardRulesEditor(s.forward_rules || [], doc.destinations || [],
@@ -4978,14 +4984,19 @@ function buildSettingsView() {
           // what was just saved applies right away, without signing in again.
           // A changed role can also change your own permissions (the menu and the buttons follow them).
           let permissionsChanged = false;
+          let serversChanged = false;
           try {
             const me = await api("GET", "/api/me");
             permissionsChanged = [...me.permissions].sort().join(",") !== [...state.user.permissions].sort().join(",");
-            if (permissionsChanged) state.user = me; else state.user.features = me.features;
+            // The Orthanc servers too (a new name, colour or order, a server added or removed):
+            // their buttons and badges are redrawn with them.
+            serversChanged = JSON.stringify(me.orthanc_servers || []) !== JSON.stringify(state.user.orthanc_servers || []);
+            if (permissionsChanged) state.user = me;
+            else { state.user.features = me.features; state.user.orthanc_servers = me.orthanc_servers; }
           } catch { /* keep the old ones */ }
           refreshOrthancStatus(true);
           toast(t("Settings saved."));
-          if (languageChanged || permissionsChanged) { renderApp(); return; } // everything in the new language / menu
+          if (languageChanged || permissionsChanged || serversChanged) { renderApp(); return; } // everything in the new language / menu / server names
           draw(doc.messages || []);
         } catch (e) {
           toastError(e);

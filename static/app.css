@@ -555,6 +555,7 @@ dl.share-details dd { margin: 0; font-weight: 600; }
 .simple-total b { font-weight: 600; }
 /* With several Orthanc servers: "(Main 48,213 · Archive 312,904)" after the total. */
 .servers-editor { display: grid; gap: 0.8rem; }
+.server-default { border-style: dashed; }
 .server-row { display: grid; gap: 0.6rem; padding: 0.8rem; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-alt); }
 .update-notice { margin-bottom: 0.8rem; }
 .update-steps { display: grid; gap: 0.5rem; padding-left: 1.4rem; }

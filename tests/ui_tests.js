@@ -909,14 +909,19 @@ async function newLink(admin, body) {
     m.submit(m.$("form.settings-form")); await sleep(1800);
     const saved = (await (await admin.call("GET", "/api/admin/settings")).json()).settings.orthanc_servers[0];
     check("...a new name is saved, the password kept", saved.label === "Old archive" && saved.password_set === true, JSON.stringify(saved));
+    check("...the list starts with the default server, which cannot be removed", /Default server: Main/.test((m.$(".server-default") || {}).textContent || ""));
+    await m.tab("Studies"); await until(() => m.$(".server-picker"), 6000);
+    check("...the new name is used at once, without signing in again", m.$$(".server-picker .chip-toggle").some((b) => b.textContent === "Old archive"),
+      m.$$(".server-picker .chip-toggle").map((b) => b.textContent).join());
+    await m.tab("Settings"); await sleep(800);
     await admin.call("PUT", "/api/admin/settings", { orthanc_servers: [{ ...saved, label: "Archive" }] });
 
     // Pages that show one server at a time: a choice at the top, remembered.
     m.click(m.$$(".subtabs [role=tab]").find((b) => b.textContent === "Jobs")); await sleep(1200);
     const pagePicker = () => Array.from(m.$$(".page-server .chip-toggle")).map((b) => `${b.textContent}:${b.getAttribute("aria-pressed")}`).join();
-    check("Jobs: a choice of server, the default one first", pagePicker() === "Main:true,Archive:false", pagePicker());
-    m.click(m.$$(".page-server .chip-toggle").find((b) => b.textContent === "Archive")); await sleep(1500);
-    check("...choosing the archive shows its jobs (and is remembered)", pagePicker() === "Main:false,Archive:true", pagePicker());
+    check("Jobs: a choice of server, the default one first", /^Main:true,[^,]+:false$/.test(pagePicker()), pagePicker());
+    m.click(m.$$(".page-server .chip-toggle")[1]); await sleep(1500);
+    check("...choosing the archive shows its jobs (and is remembered)", /^Main:false,[^,]+:true$/.test(pagePicker()), pagePicker());
     m.window.localStorage.clear();
 
     // Roles: a server choice per role.
