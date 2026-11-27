@@ -307,9 +307,14 @@ pub async fn test_orthanc(
         return Err(AppError::BadRequest("The Orthanc address must look like http://orthanc:8042".into()));
     }
     let username = req.username.unwrap_or_else(|| saved.orthanc_username.clone());
+    // The saved password is only tried on the saved address: a typed address gets it only when
+    // it is typed again (otherwise "Test connection" could send it anywhere).
     let password = match req.password.filter(|p| !p.is_empty()) {
         Some(p) => p,
-        None => saved.orthanc_password.0.clone(),
+        None if url.trim_end_matches('/') == saved.orthanc_url.trim_end_matches('/') => {
+            saved.orthanc_password.0.clone()
+        }
+        None => String::new(),
     };
 
     Ok(Json(OrthancClient::for_test(&url, &username, &password)?.diagnose().await))

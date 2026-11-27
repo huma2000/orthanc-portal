@@ -322,7 +322,16 @@ async fn merged_study_search(
                 if !answer.status().is_success() {
                     return Err(AppError::Upstream(format!("HTTP {}", answer.status().as_u16())));
                 }
+                // A study list is small: an answer announcing more than this is refused, and so
+                // is one that turns out bigger.
+                const MAX_ANSWER: u64 = 16 * 1024 * 1024;
+                if answer.content_length().is_some_and(|n| n > MAX_ANSWER) {
+                    return Err(AppError::Upstream("the answer is too big".into()));
+                }
                 let bytes = answer.bytes().await.map_err(|e| AppError::Upstream(e.to_string()))?;
+                if bytes.len() as u64 > MAX_ANSWER {
+                    return Err(AppError::Upstream("the answer is too big".into()));
+                }
                 if bytes.is_empty() {
                     return Ok(Vec::new());
                 }

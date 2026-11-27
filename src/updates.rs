@@ -148,7 +148,18 @@ pub async fn check(state: &AppState) -> Value {
             403 | 429 => return Err("GitHub refused for now (too many questions): it is asked again later".to_string()),
             code => return Err(format!("GitHub answered HTTP {code}")),
         }
-        let body: Value = answer.json().await.map_err(|e| format!("GitHub's answer could not be read: {e}"))?;
+        // A release description is a few kilobytes: a bigger answer is refused (a mirror set
+        // with UPDATE_CHECK_URL could send anything).
+        const MAX_ANSWER: usize = 2 * 1024 * 1024;
+        if answer.content_length().is_some_and(|n| n > MAX_ANSWER as u64) {
+            return Err("GitHub's answer is too big".to_string());
+        }
+        let bytes = answer.bytes().await.map_err(|e| format!("GitHub's answer could not be read: {e}"))?;
+        if bytes.len() > MAX_ANSWER {
+            return Err("GitHub's answer is too big".to_string());
+        }
+        let body: Value =
+            serde_json::from_slice(&bytes).map_err(|e| format!("GitHub's answer could not be read: {e}"))?;
         release_from(&body)
     }
     .await;
@@ -172,15 +183,26 @@ pub async fn check(state: &AppState) -> Value {
     status_json(state)
 }
 
-/// What the System page and the notice show: this version, the latest one, whether it is newer.
-pub fn status_json(state: &AppState) -> Value {
+/// The last answer: from memory, or (after a restart) from the database.
+fn last_status(state: &AppState) -> Status {
     let mut guard = lock();
     if guard.is_none() {
-        // After a restart: the last answer kept in the database.
-        *guard = state.db.get_value(STORE_KEY).ok().flatten().and_then(|s| serde_json::from_str(&s).ok());
+        *guard = Some(
+            state
+                .db
+                .get_value(STORE_KEY)
+                .ok()
+                .flatten()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default(),
+        );
     }
-    let status = guard.clone().unwrap_or_default();
-    drop(guard);
+    guard.clone().unwrap_or_default()
+}
+
+/// What the System page and the notice show: this version, the latest one, whether it is newer.
+pub fn status_json(state: &AppState) -> Value {
+    let status = last_status(state);
     let newer = status.latest.as_ref().is_some_and(|r| is_newer(&r.tag, CURRENT));
     let install = this_install();
     let steps = instructions(&install, status.latest.as_ref());
@@ -198,13 +220,13 @@ pub fn status_json(state: &AppState) -> Value {
 }
 
 /// The newer release, if there is one (for the administrators' notice): `{ version, url }`.
+/// Asked by every administrator's `/api/me`: only the comparison, nothing else is worked out.
 pub fn newer_release(state: &AppState) -> Option<Value> {
-    let status = status_json(state);
-    if status["newer"] != json!(true) || status["enabled"] != json!(true) {
+    if !state.settings.get().update_check {
         return None;
     }
-    let latest = &status["latest"];
-    Some(json!({ "version": latest["tag"], "url": latest["url"], "name": latest["name"] }))
+    let latest = last_status(state).latest?;
+    is_newer(&latest.tag, CURRENT).then(|| json!({ "version": latest.tag, "url": latest.url, "name": latest.name }))
 }
 
 // ------------------------------------------------------------- how to update this installation

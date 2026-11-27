@@ -169,6 +169,9 @@ pub struct OrthancPool {
     routes: Arc<Mutex<Routes>>,
     /// Servers' keys (joined) -> (number of distinct studies, when counted).
     distinct: Arc<Mutex<HashMap<String, (u64, i64)>>>,
+    /// Held while studies are being counted: people asking at the same moment wait for that
+    /// count instead of each listing every study of every server.
+    counting: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl OrthancPool {
@@ -179,6 +182,7 @@ impl OrthancPool {
             members: Arc::new(RwLock::new(Arc::new(Vec::new()))),
             routes: Arc::default(),
             distinct: Arc::default(),
+            counting: Arc::default(),
         };
         pool.rebuild(Some(main), settings)?;
         Ok(pool)
@@ -384,12 +388,24 @@ impl OrthancPool {
     /// `None` when a server could not list its studies.
     pub async fn distinct_studies(&self, servers: &[(ServerInfo, OrthancClient)]) -> Option<u64> {
         let key = servers.iter().map(|(s, _)| s.key.as_str()).collect::<Vec<_>>().join(",");
-        let now = crate::util::now_unix();
-        if let Some((count, at)) = self.distinct.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
-            if now - at < DISTINCT_TTL_SECS {
-                return Some(*count);
-            }
+        let fresh = |key: &str| {
+            let now = crate::util::now_unix();
+            self.distinct
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(key)
+                .filter(|(_, at)| now - at < DISTINCT_TTL_SECS)
+                .map(|(count, _)| *count)
+        };
+        if let Some(count) = fresh(&key) {
+            return Some(count);
         }
+        let _one_at_a_time = self.counting.lock().await;
+        // Counted by somebody else while this request waited.
+        if let Some(count) = fresh(&key) {
+            return Some(count);
+        }
+        let now = crate::util::now_unix();
         let lists = futures_util::future::join_all(servers.iter().map(|(_, client)| async move {
             match tokio::time::timeout(LIST_TIMEOUT, client.get_json("/studies")).await {
                 Ok(Ok(Value::Array(ids))) => Some(ids),
@@ -397,9 +413,15 @@ impl OrthancPool {
             }
         }))
         .await;
-        let mut ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // A 64-bit hash per ID is enough to tell studies apart (and much smaller than the IDs).
+        let mut ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
         for list in lists {
-            ids.extend(list?.into_iter().filter_map(|id| id.as_str().map(str::to_string)));
+            ids.extend(list?.iter().filter_map(Value::as_str).map(|id| {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                id.hash(&mut hasher);
+                hasher.finish()
+            }));
         }
         let count = ids.len() as u64;
         self.distinct.lock().unwrap_or_else(|e| e.into_inner()).insert(key, (count, now));

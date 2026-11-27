@@ -1107,8 +1107,16 @@ Operational advice:
 * Sessions and tokens live in memory: restarting the portal signs everybody out.
 * The audit log grows over time: set *Keep the audit log for (days)* in Settings if your policy allows deleting
   old entries (the default keeps everything).
-* There is no per-study access control for staff: every user with `read` sees every study. Guests see only the
-  study they were invited to.
+* There is no per-study access control for staff: every user with `read` sees every study **of the Orthanc
+  servers their account may use** (section 5). The server check is made on every request: a study of another
+  server answers 404, its searches skip it, and the viewers never read it. Guests see only the study they were
+  invited to, on its server.
+* Saved passwords (Orthanc servers, mail server) never travel to an address typed in a form: a save that moves
+  an address needs the password typed again, and *Test connection* tries a saved password only on its saved
+  address.
+* The update check reads GitHub's public release list over HTTPS and sends nothing about the installation;
+  release links are only shown when they are web addresses, and the answer's size is limited. Switch it off
+  where the portal must not reach the internet.
 * OHIF is third-party code served from the portal's origin; keep Orthanc and its plugins up to date.
 * Medical data is regulated (GDPR/HIPAA...). This tool gives you the controls; policies and risk assessment
   remain your responsibility.

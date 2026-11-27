@@ -33,6 +33,8 @@ use std::time::Instant;
 
 /// Images copied at the same time.
 const PARALLEL_IMAGES: usize = 4;
+/// Copies running at the same time (each reads and writes whole studies).
+const MAX_RUNNING: usize = 4;
 
 /// Where a running copy is: read by the Transfers list.
 #[derive(Clone, Copy)]
@@ -113,6 +115,11 @@ pub async fn start_copy(
             .chars()
             .take(160)
             .collect();
+    if running().len() >= MAX_RUNNING {
+        return Err(AppError::TooManyRequests(format!(
+            "{MAX_RUNNING} copies are running already: try again when one has finished (Transfers)"
+        )));
+    }
     let job = format!("copy-{}", &crate::sharing::new_token()[..16]);
     let transfer_id = state.db.add_transfer(username, &study.compound(), &label, target_key, &job, "copy")?;
     let total = images.len() as u64;

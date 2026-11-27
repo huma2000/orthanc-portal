@@ -146,7 +146,7 @@ fn assemble(media: &Path, output: &Path, page: &str, viewer_dir: &str) -> AppRes
     let mut taken: Vec<String> = Vec::with_capacity(archive.len() + 1);
     for i in 0..archive.len() {
         let entry = archive.by_index_raw(i).map_err(|e| fail("entry", &e))?;
-        taken.push(entry.name().to_ascii_uppercase());
+        taken.push(entry.name().map_err(|e| fail("entry name", &e))?.to_ascii_uppercase());
         writer.raw_copy_file(entry).map_err(|e| fail("copy", &e))?;
     }
 
@@ -324,7 +324,7 @@ mod tests {
         let added = assemble(&media, &out, "<html>page</html>", &dir.join("viewer").to_string_lossy()).unwrap();
         assert_eq!(added, 2, "autorun.inf and bin/viewer.exe, not the second DICOMDIR");
         let mut z = zip::ZipArchive::new(std::fs::File::open(&out).unwrap()).unwrap();
-        let mut names: Vec<String> = (0..z.len()).map(|i| z.by_index(i).unwrap().name().to_string()).collect();
+        let mut names: Vec<String> = (0..z.len()).map(|i| z.by_index(i).unwrap().name().unwrap().to_string()).collect();
         names.sort();
         assert_eq!(names, ["DICOMDIR", "IMAGES/IM0", "README.html", "autorun.inf", "bin/viewer.exe"]);
         let mut index = String::new();
