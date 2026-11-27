@@ -553,6 +553,7 @@ dl.share-details dd { margin: 0; font-weight: 600; }
 .simple-total { white-space: nowrap; font-size: 0.95rem; opacity: 0.9; padding-bottom: 0.15rem; }
 .simple-total b { font-weight: 600; }
 /* With several Orthanc servers: "(Main 48,213 · Archive 312,904)" after the total. */
+.upload-server { display: flex; align-items: center; gap: 0.5rem; font-weight: normal; }
 .total-servers { margin-left: 0.35rem; font-size: 0.85em; opacity: 0.85; }
 
 .simple-side {

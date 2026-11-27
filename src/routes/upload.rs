@@ -23,9 +23,17 @@ use axum::Json;
 use percent_encoding::percent_decode_str;
 use serde_json::Value;
 
+/// `?server=key`: the Orthanc server the file goes to (the default one when absent).
+#[derive(serde::Deserialize)]
+pub struct UploadQuery {
+    #[serde(default)]
+    server: String,
+}
+
 pub async fn upload(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
+    axum::extract::Query(q): axum::extract::Query<UploadQuery>,
     headers: HeaderMap,
     body: Body,
 ) -> AppResult<Json<Value>> {
@@ -38,8 +46,9 @@ pub async fn upload(
 
     // Convert axum's request body into a stream reqwest can send as it arrives.
     let stream = body.into_data_stream();
-    // Into the default server (a choice comes in multi-server phase 3).
-    let orthanc = state.orthancs.default_for(&user)?;
+    // Into the chosen server, one the person may use.
+    let orthanc =
+        if q.server.is_empty() { state.orthancs.default_for(&user)? } else { state.orthancs.get(&user, &q.server)? };
     let result = orthanc.upload_instance(reqwest::Body::wrap_stream(stream), content_length).await?;
 
     // Audit: file name (cleaned), outcome and the study it landed in.

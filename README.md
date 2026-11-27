@@ -1105,8 +1105,8 @@ All JSON. State-changing calls need the header `X-Requested-With: portal`.
 **IDs and several Orthanc servers.** `{id}` is Orthanc's own ID of a study, series, image or job. Besides the
 default Orthanc (the *Orthanc connection* settings, key `main`), the portal can reach other Orthanc servers, set
 in the `orthanc_servers` setting. *Being built*: searching, viewing, downloads, labels, edits, links and
-sending work with every server; there is no settings page for the servers yet, and upload, query / retrieve,
-worklists and the admin pages still use the default server:
+sending, copies and uploads work with every server; there is no settings page for the servers yet, and query /
+retrieve, worklists, auto-forward and the admin pages still use the default server:
 
 ```json
 "orthanc_servers": [
@@ -1147,6 +1147,10 @@ removes it), and must be typed again when its address moves to another server.
   one Orthanc to the other, so the servers need no peer configuration. The copy is a transfer (direction
   `copy`) with its progress. *Delete the original* needs the `delete` permission and deleting switched on,
   and happens only when every image was copied. The study's menu offers it as **Copy to server...**.
+* **Uploads.** `POST /api/upload?server=key` (the default server without it); the Uploads page offers
+  *Upload to* (remembered by the browser). An upload link stores into the server chosen when it is made
+  (`"server"` in `POST /api/upload-links`; links made before several servers: the default one), and lists
+  its studies with that server's IDs.
 * **`GET /api/me`** lists the servers the account may use (`orthanc_servers`: key, label, colour); the page
   shows its server controls only with two or more. Users (`/api/admin/users`) and roles have `servers`:
   `null` = every server, or a list of keys (at least one).

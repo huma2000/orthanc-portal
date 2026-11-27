@@ -2219,7 +2219,8 @@ function enqueueFiles(fileList, label = "") {
   if (upload.batches.length > 50) upload.batches.length = 50;
   // A loop, not push(...files): spreading a very large array (a whole archive folder)
   // exceeds the call-stack limit.
-  for (const file of files) { upload.pending.push({ file, batch }); batch.bytesTotal += file.size; }
+  const server = uploadServer();
+  for (const file of files) { upload.pending.push({ file, batch, server }); batch.bytesTotal += file.size; }
   upload.total += files.length;
   upload.finished = false;
   pump();
@@ -2268,7 +2269,7 @@ function fileDone(item) {
 function sendFile(item) {
   return new Promise((resolve) => {
     const xhr = new XMLHttpRequest(); // XHR (not fetch) because it reports upload progress
-    xhr.open("POST", "/api/upload");
+    xhr.open("POST", item.server && item.server !== "main" ? `/api/upload?server=${encodeURIComponent(item.server)}` : "/api/upload");
     xhr.setRequestHeader("X-Requested-With", "portal");
     xhr.setRequestHeader("Content-Type", "application/dicom");
     xhr.setRequestHeader("X-File-Name", encodeURIComponent(item.file.webkitRelativePath || item.file.name));
@@ -2481,6 +2482,26 @@ function buildDropzone({ title, hint = "", home = false }) {
 }
 
 /** The "Uploads" tab: the drop zone, the progress of the current upload and every upload of this session. */
+/**
+ * The Orthanc server files dropped now go to (several servers): this browser's last choice, else
+ * the default server when the person may use it, else their first one.
+ */
+function uploadServer() {
+  let saved = null;
+  try { saved = localStorage.getItem(`portal-upload-server-${state.user.id}`); } catch { /* not kept */ }
+  if (saved && serverInfo(saved)) return saved;
+  return serverInfo("main") ? "main" : ((orthancServers()[0] || {}).key || "main");
+}
+
+/** "Upload to: [Main ▾]" (only with several servers). */
+function uploadServerChoice() {
+  if (!severalServers()) return null;
+  const select = h("select", {
+    onchange: (event) => { try { localStorage.setItem(`portal-upload-server-${state.user.id}`, event.target.value); } catch { /* not kept */ } },
+  }, orthancServers().map((x) => h("option", { value: x.key, selected: x.key === uploadServer() }, x.label)));
+  return h("label", { class: "upload-server" }, "Upload to", select);
+}
+
 function buildUploadView() {
   const dropzone = buildDropzone({
     title: "Drop DICOM files or a whole study folder here",
@@ -2490,7 +2511,7 @@ function buildUploadView() {
   const history = h("section", { class: "panel" });
   upload.ui.history = history;
   const view = h("div", { class: "view" },
-    h("div", { class: "page-head" }, h("h1", null, "Uploads")), dropzone, progress,
+    h("div", { class: "page-head" }, h("h1", null, "Uploads"), uploadServerChoice()), dropzone, progress,
     h("div", { class: "page-head" }, h("h2", null, "Uploads of this session")), history);
   history.replaceChildren(renderUploadHistory());
   // While something is being sent the list refreshes with every progress event; this keeps the
@@ -3570,6 +3591,10 @@ function openUploadLinkDialog(reload) {
   const size = h("input", { type: "number", min: 1, max: feature.max_mb, value: Math.min(feature.max_mb, 2048), required: true });
   const label = h("input", { value: feature.label || "", maxlength: 64, placeholder: "received", autocomplete: "off" });
   const note = h("input", { maxlength: 120, placeholder: "For your own records, e.g. Mrs Doe, previous MRI from St Mary's", autocomplete: "off" });
+  // With several servers: which one receives what is sent through the link.
+  const linkServer = severalServers()
+    ? h("select", null, orthancServers().map((x) => h("option", { value: x.key, selected: x.key === uploadServer() }, x.label)))
+    : null;
   const notify = h("input", { type: "checkbox", disabled: !state.user.email || !feature.notify });
   const emailOptions = buildEmailOptions(() => true, true);
   const submit = h("button", { class: "btn primary", type: "submit" }, "Create link and password");
@@ -3584,7 +3609,7 @@ function openUploadLinkDialog(reload) {
       try {
         const r = await api("POST", "/api/upload-links", {
           minutes: duration.minutes, max_mb: Number(size.value), label: label.value, note: note.value,
-          notify: notify.checked, email: emailOptions.value,
+          notify: notify.checked, email: emailOptions.value, ...(linkServer ? { server: linkServer.value } : {}),
         });
         showResult(r);
       } catch (e) {
@@ -3600,6 +3625,7 @@ function openUploadLinkDialog(reload) {
     h("label", null, t("Most they can send, in MB (up to {max})", { max: feature.max_mb }), size),
     h("label", null, "Label put on the studies received (empty = none)", label),
     h("label", null, "Note (optional)", note),
+    linkServer ? h("label", null, "Store the studies in", linkServer) : null,
     feature.notify ? h("div", null, h("label", { class: "check" }, notify, "Email me when files arrive"),
       state.user.email ? null : h("p", { class: "hint" }, "Add your email address in My account first.")) : null,
     emailOptions.node,

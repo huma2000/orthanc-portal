@@ -84,6 +84,9 @@ pub struct CreateUploadLink {
     #[serde(default)]
     notify: bool,
     email: Option<EmailRequest>,
+    /// The key of the Orthanc server the studies go to (empty = the default one).
+    #[serde(default)]
+    server: String,
 }
 
 /// The label asked for a link: a valid label, or empty.
@@ -103,8 +106,13 @@ pub async fn create(
     Json(req): Json<CreateUploadLink>,
 ) -> AppResult<Json<Value>> {
     require_creator(&state, &user)?;
-    // What is sent through the link goes into the default server (a choice comes in phase 3).
-    state.orthancs.default_for(&user)?;
+    // What is sent through the link goes into the chosen server, which must be one of the person's.
+    let server = if req.server.is_empty() { crate::settings::MAIN_SERVER.to_string() } else { req.server.clone() };
+    if server == crate::settings::MAIN_SERVER {
+        state.orthancs.default_for(&user)?;
+    } else {
+        state.orthancs.get(&user, &server)?;
+    }
     let settings = state.settings.get();
     if settings.share_public_url.is_empty() {
         return Err(AppError::BadRequest(
@@ -154,6 +162,7 @@ pub async fn create(
         label: &label,
         max_bytes: (max_mb as i64) * MB,
         notify_email: notify_email.as_deref(),
+        server: &server,
     })?;
     state.db.audit(
         &user.username,
@@ -192,6 +201,7 @@ pub async fn create(
         "url": url,
         "password": password,
         "password_kept": settings.share_keep_passwords,
+        "server": link.server,
         "expires_at": expires_at,
         "max_mb": max_mb,
         "label": label,
@@ -348,11 +358,12 @@ pub async fn studies(
     require_creator(&state, &user)?;
     user.require(Permission::Read)?;
     let link = managed(&state, &user, id)?;
-    let orthanc = &state.orthancs.default_for(&user)?;
+    let orthanc = &state.orthancs.get(&user, &link.server)?;
+    let server = link.server.as_str();
     let found: Vec<StudySummary> = futures_util::stream::iter(link.studies.into_iter().take(200))
         .map(|study| async move { orthanc.get_json(&format!("/studies/{study}")).await.ok() })
         .buffered(6)
-        .filter_map(|v| async move { v.map(|v| StudySummary::from_orthanc(&v)) })
+        .filter_map(|v| async move { v.map(|v| StudySummary::from_orthanc(&v).on_server(server)) })
         .collect()
         .await;
     Ok(Json(found))
@@ -544,7 +555,9 @@ pub async fn file(
 
     // The bytes read so far, then the rest as it arrives.
     let rest = futures_util::stream::iter([Ok::<_, axum::Error>(axum::body::Bytes::from(head))]).chain(stream);
-    match state.orthanc.upload_instance(reqwest::Body::wrap_stream(rest), Some(length as u64)).await {
+    // Into the link's server (checked when the link was made).
+    let orthanc = state.orthancs.stored(&link.server)?;
+    match orthanc.upload_instance(reqwest::Body::wrap_stream(rest), Some(length as u64)).await {
         Ok(result) => {
             let study = result["ParentStudy"].as_str().unwrap_or_default().to_string();
             let is_new = !study.is_empty() && !link.studies.contains(&study);
@@ -552,7 +565,7 @@ pub async fn file(
             if is_new {
                 let settings = state.settings.get();
                 if !link.label.is_empty() && settings.labels_enabled && crate::util::is_valid_orthanc_id(&study) {
-                    let _ = state.orthanc.put_empty(&format!("/studies/{study}/labels/{}", link.label)).await;
+                    let _ = orthanc.put_empty(&format!("/studies/{study}/labels/{}", link.label)).await;
                 }
                 state.db.audit(
                     &format!("sender-{}", link.id),
@@ -611,7 +624,7 @@ async fn may_receive(state: &AppState, link: &UploadLink, uid: &str) -> AppResul
         None => {}
     }
     let body = json!({ "Level": "Study", "Query": { "StudyInstanceUID": uid }, "Expand": false, "Limit": 20 });
-    let found = state.orthanc.find(&body).await?;
+    let found = state.orthancs.stored(&link.server)?.find(&body).await?;
     let ids: Vec<&str> = found.iter().filter_map(|v| v.as_str().or_else(|| v["ID"].as_str())).collect();
     let admitted = ids.iter().all(|id| link.studies.iter().any(|s| s == id));
     let mut map = decided().lock().unwrap_or_else(|e| e.into_inner());

@@ -1434,7 +1434,9 @@
   "Copy to": "Copiar a",
   "Then delete it from {server} (only when every image was copied)": "Después borrarlo de {server} (solo si se copiaron todas las imágenes)",
   "The portal copies every image from one server to the other. Images the other server already has are kept as they are.": "El portal copia cada imagen de un servidor al otro. Las imágenes que el otro servidor ya tiene se quedan como están.",
-  "{n} images copied in {time}": "{n} imágenes copiadas en {time}"
+  "{n} images copied in {time}": "{n} imágenes copiadas en {time}",
+  "Upload to": "Subir a",
+  "Store the studies in": "Guardar los estudios en"
  },
  "messages": {
   "A label can have 1 to 64 letters, digits, '-' or '_' (no spaces or accents)": "Una etiqueta puede tener de 1 a 64 letras, cifras, «-» o «_» (sin espacios ni tildes)",

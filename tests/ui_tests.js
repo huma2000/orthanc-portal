@@ -845,6 +845,10 @@ async function newLink(admin, body) {
     await admin.call("PUT", "/api/admin/settings", { study_columns: columns });
     all_extra.push(hidden);
 
+    // Uploads: which server the files go to.
+    await m.tab("Uploads"); await sleep(500);
+    check("Uploads: a choice of the server the files go to", Array.from((m.$(".upload-server select") || { options: [] }).options).map((o) => o.textContent).join() === "Main,Archive");
+
     // The Users page: which servers each account can use.
     await m.tab("Settings"); await sleep(800);
     m.click(m.$$(".subtabs [role=tab]").find((b) => b.textContent === "Users"));

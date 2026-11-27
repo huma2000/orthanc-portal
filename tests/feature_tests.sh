@@ -424,6 +424,21 @@ ok "...every image went there, and the transfer says so" "$(( $(cat "$WORK/m2/up
 ok "...not to the server it is on (400)" "$(code $F $A POST /api/studies/$SID/copy -H "$J" -d '{"server":"main"}')" "400"
 ok "...nor to an unknown one (404)" "$(code $F $A POST /api/studies/$SID/copy -H "$J" -d '{"server":"nowhere"}')" "404"
 ok "...deleting the original needs deleting switched on (403)" "$(code $F $A POST /api/studies/$SID/copy -H "$J" -d '{"server":"archive","delete_original":true}')" "403"
+# Uploads into a chosen server.
+U0=$(cat "$WORK/m2/upload.log" 2>/dev/null | wc -l)
+ok "a staff upload into the archive" "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Cookie: portal_session=$A" -H "$H" -H "Content-Type: application/dicom" --data-binary @small.dcm "$F/api/upload?server=archive")/$(( $(cat "$WORK/m2/upload.log" | wc -l) - U0 ))" "200/1"
+ok "...not into an unknown server (404)" "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Cookie: portal_session=$A" -H "$H" -H "Content-Type: application/dicom" --data-binary @small.dcm "$F/api/upload?server=nowhere")" "404"
+put $A '{"upload_links":true}' > /dev/null
+UL3=$(body $F $A /api/upload-links -X POST -H "$J" -d '{"max_mb":1,"server":"archive"}')
+ok "an upload link that stores into the archive" "$(echo "$UL3" | py "d['server']" 2>/dev/null || echo "$UL3")" "archive"
+ok "...not into an unknown server (404)" "$(code $F $A POST /api/upload-links -H "$J" -d '{"server":"nowhere"}')" "404"
+UT3=$(echo "$UL3" | py "d['url'].rsplit('/u/',1)[1]"); UP3=$(echo "$UL3" | py "d['password']"); UID3=$(echo "$UL3" | py "d['id']")
+UC3=$(curl -s -D - -o /dev/null -H "$H" -H "$J" -d "{\"password\":\"$UP3\"}" $G/api/upload/$UT3/unlock | grep -i set-cookie | sed 's/.*upload_session=\([0-9a-f]*\);.*/\1/')
+mkdicom third.dcm 2.25.3003 2800
+U0=$(cat "$WORK/m2/upload.log" | wc -l); M0=$(cat "$WORK/upload.log" | wc -l)
+ok "...what the person sends goes to the archive, not the default server" "$(curl -s -X POST -H "$H" -H "Cookie: upload_session=$UC3" --data-binary @third.dcm $G/api/upload/$UT3/file | py "d['accepted']")/$(( $(cat "$WORK/m2/upload.log" | wc -l) - U0 ))/$(( $(cat "$WORK/upload.log" | wc -l) - M0 ))" "True/1/0"
+ok "...and its studies are listed with the archive's IDs" "$(body $F $A /api/upload-links/$UID3/studies | py "len(d) > 0 and all(s['id'].startswith('archive:') for s in d)")" "True"
+put $A '{"upload_links":false}' > /dev/null
 ok "recently viewed remembers the server" "$(post $F $A /api/recent/$AID "{\"uid\":\"$UID_\"}" | py "d['ok']")/$(body $F $A /api/recent | py "d[0]['id']")" "True/$AID"
 # A link to that server's study: the guest's page, download and viewer use that server.
 L2=$(body $F $A /api/studies/$AID/share -X POST -H "$J" -d '{"downloads":1}')

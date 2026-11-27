@@ -235,6 +235,8 @@ pub struct UploadLink {
     pub last_upload_at: Option<i64>,
     #[serde(skip)]
     pub notify_email: Option<String>,
+    /// The key of the Orthanc server the studies sent through it go to.
+    pub server: String,
 }
 
 impl UploadLink {
@@ -254,11 +256,12 @@ pub struct NewUploadLink<'a> {
     pub label: &'a str,
     pub max_bytes: i64,
     pub notify_email: Option<&'a str>,
+    pub server: &'a str,
 }
 
 const UPLOAD_LINK_COLUMNS: &str = "id, token, password_hash, password_copy IS NOT NULL, created_at, expires_at, \
      created_by, note, label, max_bytes, bytes_received, files_received, files_rejected, studies, revoked_at, \
-     access_count, last_upload_at, notify_email";
+     access_count, last_upload_at, notify_email, server";
 
 fn row_to_upload_link(row: &Row) -> rusqlite::Result<UploadLink> {
     Ok(UploadLink {
@@ -280,6 +283,7 @@ fn row_to_upload_link(row: &Row) -> rusqlite::Result<UploadLink> {
         access_count: row.get(15)?,
         last_upload_at: row.get(16)?,
         notify_email: row.get(17)?,
+        server: row.get(18)?,
     })
 }
 
@@ -572,6 +576,8 @@ impl Db {
                 ("servers", "TEXT"),
             ],
         )?;
+        // The Orthanc server an upload link sends into (links made before several servers: the default).
+        add_missing_columns(&conn, "upload_links", &[("server", "TEXT NOT NULL DEFAULT 'main'")])?;
         add_missing_columns(
             &conn,
             "shares",
@@ -1387,8 +1393,8 @@ impl Db {
             let conn = self.lock();
             conn.prepare_cached(
                 "INSERT INTO upload_links (token, password_hash, password_copy, created_at, expires_at, created_by,
-                                           note, label, max_bytes, notify_email)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                                           note, label, max_bytes, notify_email, server)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             )?
             .execute(params![
                 new.token,
@@ -1400,7 +1406,8 @@ impl Db {
                 new.note,
                 new.label,
                 new.max_bytes,
-                new.notify_email
+                new.notify_email,
+                new.server
             ])?;
             conn.last_insert_rowid()
         };
