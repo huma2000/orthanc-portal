@@ -128,7 +128,7 @@ async function newLink(admin, body) {
   admin.click(subtab("Search & labels"));
   check("Search & labels shows the modality buttons, the lists and search options, and the labels", visibleSections().join() === "Modality buttons,Studies lists and search,Labels", visibleSections().join());
   admin.click(subtab("Orthanc"));
-  check("Orthanc shows the connection only, with the Save button", visibleSections().join() === "Orthanc connection" && !admin.$("form.settings-form").closest("[hidden]"), visibleSections().join());
+  check("Orthanc shows the connection and the other servers, with the Save button", visibleSections().join() === "Orthanc connection,Other Orthanc servers" && !admin.$("form.settings-form").closest("[hidden]"), visibleSections().join());
   admin.labelInput(admin.section("Orthanc connection"), "Orthanc address").value = "http://typed-not-saved:8042";
   admin.click(subtab("Users")); await until(() => admin.$$("main h2").some((e) => e.textContent === "Users") && admin.$("main table.data"), 6000);
   check("Users tab: the user list, and the settings form is hidden", /admin/.test(admin.$("main table.data").textContent) && !!admin.$("form.settings-form").closest("[hidden]"));
@@ -871,6 +871,21 @@ async function newLink(admin, body) {
     check("...that account sees no choice of servers (it has one)", !limited.$(".server-picker") && !limited.$$("main thead th").some((th) => th.textContent === "Server"));
     const its = limited.$("tr.study a[href*='/ohif/viewer']");
     check("...and opens the archive's copies", !!its && !/server=/.test(its.getAttribute("href")) && (await (await limited.call("GET", "/api/studies")).json()).items.every((s) => s.server === "archive"));
+
+    // Settings > Orthanc: the other servers, edited and saved with the form.
+    m.click(m.$$(".subtabs [role=tab]").find((b) => b.textContent === "Orthanc")); await sleep(800);
+    const archiveRow = () => m.$(".server-row[data-key='archive']");
+    check("Settings > Orthanc lists the other servers, their key fixed", !!archiveRow() && archiveRow().querySelector("input[pattern]").disabled
+      && /A password is saved/.test(archiveRow().querySelector("input[type=password]").placeholder));
+    m.click(m.button(archiveRow(), "Test connection"));
+    await until(() => /ok|bad/.test(archiveRow().querySelector(".test-result").className), 6000);
+    check("...Test connection tries that server with its saved password", /\bok\b/.test(archiveRow().querySelector(".test-result").className), archiveRow().querySelector(".test-result").textContent);
+    const nameInput = archiveRow().querySelector("input[aria-label='Server name']");
+    nameInput.value = "Old archive"; nameInput.dispatchEvent(new m.window.Event("input"));
+    m.submit(m.$("form.settings-form")); await sleep(1800);
+    const saved = (await (await admin.call("GET", "/api/admin/settings")).json()).settings.orthanc_servers[0];
+    check("...a new name is saved, the password kept", saved.label === "Old archive" && saved.password_set === true, JSON.stringify(saved));
+    await admin.call("PUT", "/api/admin/settings", { orthanc_servers: [{ ...saved, label: "Archive" }] });
 
     // Roles: a server choice per role.
     m.click(m.$$(".subtabs [role=tab]").find((b) => /Security/.test(b.textContent))); await sleep(1500);

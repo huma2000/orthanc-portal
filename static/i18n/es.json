@@ -1441,7 +1441,24 @@
   "DICOM destinations": "Destinos DICOM",
   "Copy to another Orthanc server": "Copiar a otro servidor Orthanc",
   "(none ticked = all)": "(ninguno marcado = todos)",
-  "Watch servers": "Vigilar servidores"
+  "Watch servers": "Vigilar servidores",
+  "Name, e.g. Archive 2015-2020": "Nombre, p. ej. Archivo 2015-2020",
+  "Server name": "Nombre del servidor",
+  "Remove the Orthanc server \"{server}\"? Its studies stay in that Orthanc; the portal stops using it when you save. Links, rules and roles that use it prevent the removal.": "¿Quitar el servidor Orthanc «{server}»? Sus estudios se quedan en ese Orthanc; el portal deja de usarlo al guardar. Los enlaces, reglas y roles que lo usan impiden quitarlo.",
+  "Key (in IDs and links; cannot change once saved)": "Clave (en identificadores y enlaces; no se puede cambiar una vez guardada)",
+  "How does it let the portal in?": "¿Cómo deja entrar al portal?",
+  "Without an account": "Sin cuenta",
+  "User name": "Nombre de usuario",
+  "Folder of its log files (optional)": "Carpeta de sus archivos de registro (opcional)",
+  "Badge colour": "Color de la insignia",
+  "Searched by default": "Buscado por defecto",
+  "Only the default server above. Add another Orthanc server to search and use several from this portal.": "Solo el servidor principal de arriba. Añada otro servidor Orthanc para buscar y usar varios desde este portal.",
+  "At most {n} other servers.": "Como mucho {n} servidores más.",
+  "Add a server": "Añadir un servidor",
+  "The default server (above) is always first: plain study IDs are its own. The order here is the order of the searches and badges, and decides which copy a study on several servers opens. Who may use which server is chosen in Users and in Security & roles. Changes apply when you save.": "El servidor principal (arriba) va siempre primero: los identificadores sin prefijo son suyos. El orden de aquí es el de las búsquedas y las insignias, y decide qué copia abre un estudio que está en varios servidores. Quién puede usar cada servidor se elige en Usuarios y en Seguridad y roles. Los cambios se aplican al guardar.",
+  "Name of this server (shown when there are several)": "Nombre de este servidor (se muestra cuando hay varios)",
+  "Other Orthanc servers": "Otros servidores Orthanc",
+  "More Orthanc servers this portal searches and uses, besides the default one above.": "Más servidores Orthanc que este portal busca y usa, además del principal de arriba."
  },
  "messages": {
   "A label can have 1 to 64 letters, digits, '-' or '_' (no spaces or accents)": "Una etiqueta puede tener de 1 a 64 letras, cifras, «-» o «_» (sin espacios ni tildes)",
@@ -1742,6 +1759,7 @@
   "Copied, but the original could not be deleted: {error}": "Copiado, pero no se pudo borrar el original: {error}",
   "The rule '{rule}' watches the Orthanc server '{key}', which does not exist (a server a rule uses can only be removed once the rule no longer uses it)": "La regla «{rule}» vigila el servidor Orthanc «{key}», que no existe (un servidor que usa una regla solo se puede quitar cuando la regla deja de usarlo)",
   "The rule '{rule}' copies to the Orthanc server '{key}', which does not exist": "La regla «{rule}» copia al servidor Orthanc «{key}», que no existe",
-  "The rule '{rule}' copies studies to the server it watches": "La regla «{rule}» copia los estudios al mismo servidor que vigila"
+  "The rule '{rule}' copies studies to the server it watches": "La regla «{rule}» copia los estudios al mismo servidor que vigila",
+  "Enter the address of the Orthanc server": "Escriba la dirección del servidor Orthanc"
  }
 }

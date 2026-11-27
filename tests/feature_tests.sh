@@ -393,6 +393,8 @@ ok "a second Orthanc server is added" "$(put $A "{\"orthanc_servers\":[$ARCHIVE,
 ok "...its password is never sent back" "$(body $F $A /api/admin/settings | py "('password' in d['settings']['orthanc_servers'][0], d['settings']['orthanc_servers'][0]['password_set'])")" "(False, True)"
 ok "...nor sent to another address without typing it again (400)" "$(put $A '{"orthanc_servers":[{"key":"archive","url":"http://127.0.0.1:18099","username":"orthanc"}]}' | tail -1)" "400"
 ok "...nothing changed" "$(body $F $A /api/admin/settings | py "d['settings']['orthanc_servers'][0]['url']")" "http://127.0.0.1:18043"
+ok "Test connection of that server, with its saved password" "$(body $F $A /api/admin/orthanc/test -X POST -H "$J" -d '{"server":"archive"}' | py "d['ok']")" "True"
+ok "...its saved password is not tried on an address typed in the form" "$(body $F $A /api/admin/orthanc/test -X POST -H "$J" -d '{"server":"archive","url":"http://127.0.0.1:18042","username":"orthanc"}' | py "d['ok']")" "False"
 AID="archive:$SID"
 ok "the series of a study on that server: every ID says the server" "$(body $F $A /api/studies/$AID/series | py "len(d) > 0 and all(s['id'].startswith('archive:') and s['study_id'] == '$AID' for s in d)")" "True"
 ok "...the same plain ID is still the default server's study" "$(body $F $A /api/studies/$SID/series | py "all(':' not in s['id'] for s in d)")" "True"

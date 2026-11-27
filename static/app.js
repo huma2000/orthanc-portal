@@ -4317,6 +4317,94 @@ function buildPickList(what, catalog, chosen, defaults) { // `what`: "columns", 
  * A colour picker with a "Default" box: `onChange(color)` gets "#rrggbb", or "" while Default is ticked
  * (the built-in colour). `label` names it for screen readers.
  */
+/**
+ * Settings > Orthanc > Other Orthanc servers: the servers besides the default one. Each row: name,
+ * key (fixed once saved: it is in the IDs and links), address, account (the password is write-only),
+ * log folder, badge colour, searched by default, switched on, Test, move up / down, Remove. Saved
+ * with the rest of the form; `get()` = the `orthanc_servers` setting.
+ */
+function buildServersEditor(servers) {
+  const MAX = 7;
+  let rows = (servers || []).map((x) => ({ ...x, saved: true, password: "", clear: false, anonymous: !x.username }));
+  const list = h("div", { class: "servers-editor" });
+  function draw() {
+    list.replaceChildren(...(rows.length ? rows.map((row, i) => {
+      const input = (key, attrs = {}) => h("input", { value: row[key] || "", oninput: (e) => { row[key] = e.target.value; }, ...attrs });
+      const testBox = h("div", { class: "test-result", hidden: true, role: "status" });
+      const test = h("button", {
+        class: "btn small", type: "button",
+        onclick: async () => {
+          test.disabled = true; testBox.hidden = false; testBox.className = "test-result"; testBox.textContent = t("Testing...");
+          try {
+            const r = await api("POST", "/api/admin/orthanc/test", {
+              server: row.saved ? row.key : "", url: row.url, username: row.anonymous ? "" : row.username, password: row.anonymous ? "" : row.password,
+            });
+            testBox.className = `test-result ${r.ok ? "ok" : "bad"}`;
+            testBox.textContent = translateMessage(r.message) + (r.ok ? "." : "") + (r.version ? ` ${t("Plugins: {plugins}. DICOMweb: {dicomweb}. OHIF: {ohif}. DICOM nodes: {nodes}.", {
+              plugins: r.plugins.join(", ") || t("none"), dicomweb: t(r.dicomweb ? "yes" : "no"), ohif: t(r.ohif ? "yes" : "no"), nodes: r.modalities })}` : "");
+          } catch (e) { testBox.className = "test-result bad"; testBox.textContent = e.message; } finally { test.disabled = false; }
+        },
+      }, "Test connection");
+      const move = (step, symbol, label) => h("button", {
+        class: "btn small", type: "button", title: label, "aria-label": `${lookup(label)} ${row.label || row.key}`, disabled: i + step < 0 || i + step >= rows.length,
+        onclick: () => { [rows[i], rows[i + step]] = [rows[i + step], rows[i]]; draw(); },
+      }, symbol);
+      const account = h("select", { onchange: (e) => { row.anonymous = e.target.value === "anonymous"; draw(); } },
+        h("option", { value: "account", selected: !row.anonymous }, "With an account (user name and password)"),
+        h("option", { value: "anonymous", selected: row.anonymous }, "Without an account"));
+      return h("div", { class: "server-row", "data-key": row.key },
+        h("div", { class: "forward-rule-head" },
+          h("label", { class: "check" }, h("input", { type: "checkbox", checked: row.enabled !== false, onchange: (e) => { row.enabled = e.target.checked; } }), "On"),
+          input("label", { placeholder: "Name, e.g. Archive 2015-2020", maxlength: 60, "aria-label": "Server name" }),
+          h("div", { class: "modbtn-move" }, move(-1, "↑", "Move up"), move(1, "↓", "Move down")),
+          h("button", {
+            class: "btn small danger", type: "button",
+            onclick: () => {
+              if (row.saved && !confirm(t("Remove the Orthanc server \"{server}\"? Its studies stay in that Orthanc; the portal stops using it when you save. Links, rules and roles that use it prevent the removal.", { server: row.label || row.key }))) return;
+              rows.splice(i, 1); draw();
+            },
+          }, "Remove")),
+        h("div", { class: "forward-rule-grid" },
+          h("label", null, "Key (in IDs and links; cannot change once saved)", input("key", { placeholder: "archive", maxlength: 24, disabled: row.saved, pattern: "[a-z0-9-]+" })),
+          h("label", null, "Orthanc address", input("url", { placeholder: "http://archive:8042", type: "url" })),
+          h("label", null, "How does it let the portal in?", account),
+          row.anonymous ? null : h("label", null, "User name", input("username", { autocomplete: "off" })),
+          row.anonymous ? null : h("label", null, "Password", input("password", {
+            type: "password", autocomplete: "new-password",
+            placeholder: row.password_set ? "A password is saved. Leave empty to keep it." : "No password saved",
+          })),
+          row.anonymous || !row.password_set ? null : h("label", { class: "check" },
+            h("input", { type: "checkbox", checked: row.clear, onchange: (e) => { row.clear = e.target.checked; } }), "Remove the saved password"),
+          h("label", null, "Folder of its log files (optional)", input("log_dir", { placeholder: "/var/log/orthanc" })),
+          h("div", { class: "setting" }, h("span", { class: "field-label" }, "Badge colour"), colorChoice(row.color, (c) => { row.color = c; }, "Badge colour")),
+          h("label", { class: "check" }, h("input", { type: "checkbox", checked: row.searched_by_default !== false, onchange: (e) => { row.searched_by_default = e.target.checked; } }), "Searched by default")),
+        h("div", { class: "setting wide" }, test, testBox));
+    }) : [h("p", { class: "muted" }, "Only the default server above. Add another Orthanc server to search and use several from this portal.")]));
+  }
+  draw();
+  const add = h("button", {
+    class: "btn small", type: "button",
+    onclick: () => {
+      if (rows.length >= MAX) { toast(t("At most {n} other servers.", { n: MAX }), "error"); return; }
+      rows.push({ key: "", label: "", url: "", username: "", password: "", anonymous: false, log_dir: "", color: "", enabled: true, searched_by_default: true, saved: false, clear: false });
+      draw();
+    },
+  }, "Add a server");
+  return {
+    node: h("div", { class: "wide" }, list, h("div", { class: "filter-actions" }, add),
+      h("p", { class: "hint" }, "The default server (above) is always first: plain study IDs are its own. The order here is the order of the searches and badges, and decides which copy a study on several servers opens. Who may use which server is chosen in Users and in Security & roles. Changes apply when you save.")),
+    get: () => rows.map((r) => {
+      const server = {
+        key: (r.key || "").trim(), label: (r.label || "").trim(), url: (r.url || "").trim(), username: r.anonymous ? "" : (r.username || "").trim(),
+        log_dir: (r.log_dir || "").trim(), color: r.color || "", enabled: r.enabled !== false, searched_by_default: r.searched_by_default !== false,
+      };
+      if (!r.anonymous && r.password) server.password = r.password;
+      if (r.anonymous || r.clear) server.clear_password = true;
+      return server;
+    }),
+  };
+}
+
 function colorChoice(value, onChange, label) {
   const picker = h("input", { type: "color", value: isColor(value) ? value : "#2547c8", disabled: !isColor(value), "aria-label": label });
   const useDefault = h("input", { type: "checkbox", checked: !isColor(value) });
@@ -4597,6 +4685,7 @@ function buildSettingsView() {
       }
     });
 
+    const serversEditor = buildServersEditor(s.orthanc_servers);
     const rolesEditor = buildRolesEditor(s.roles, doc.defaults.roles, doc.permissions,
       [{ key: "main", label: s.orthanc_label || "Main" }, ...(s.orthanc_servers || []).map((x) => ({ key: x.key, label: x.label || x.key }))]);
     const forwardEditor = buildForwardRulesEditor(s.forward_rules || [], doc.destinations || [],
@@ -4753,6 +4842,7 @@ function buildSettingsView() {
         body.study_detail_fields = detailEditor.get();
         body.ohif_modes = ohifModesEditor.get();
         body.forward_rules = forwardEditor.get();
+        body.orthanc_servers = serversEditor.get();
         if (smtpPassword.value) body.smtp_password = smtpPassword.value;
         if (oauthSecret.value) body.smtp_oauth_client_secret = oauthSecret.value;
         if (clearSmtpPassword.checked) body.clear_smtp_password = true;
@@ -4820,7 +4910,9 @@ function buildSettingsView() {
         h("div", { class: "setting wide" }, testButton, testBox),
         field({ key: "orthanc_log_dir", label: "Folder of Orthanc's log files (optional)", wide: true,
           placeholder: "/var/log/orthanc   or   C:\\Program Files\\Orthanc Server\\Logs",
-          hint: "Where Orthanc writes its log (its --logdir option), as seen from the computer or container running the portal. Orthanc cannot send its log over its API: with this folder, Configuration > System shows it. Empty = not shown." })),
+          hint: "Where Orthanc writes its log (its --logdir option), as seen from the computer or container running the portal. Orthanc cannot send its log over its API: with this folder, Configuration > System shows it. Empty = not shown." }),
+        field({ key: "orthanc_label", label: "Name of this server (shown when there are several)", placeholder: "Main", wide: true })),
+      section("orthanc", "Other Orthanc servers", "More Orthanc servers this portal searches and uses, besides the default one above.", serversEditor.node),
       section("network", "Network", networkIntro, networkFields, listenerInfo),
       section("sharing", "Share links (invitations for people outside)", "A staff member with the share permission can invite somebody outside: a link plus a generated password that opens ONE study, to look at online and to download a limited number of times, until the link expires. These are the defaults offered when creating a link, and the limits nobody can exceed.", SETTINGS_FIELDS.sharing.map(field)),
       section("email", "Email (sending share invitations)", "The Share windows can send the invitation by email (optional, for each link) when a mail server is set here. The emails are plain text; the password is included only when the staff member ticks it.",

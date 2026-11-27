@@ -249,6 +249,11 @@ pub struct TestRequest {
     url: Option<String>,
     username: Option<String>,
     password: Option<String>,
+    /// Another Orthanc server, by key: its saved values are the fallback instead of the default
+    /// server's. Its saved password is only used for its saved address (a secret never goes to
+    /// an address typed in the form without being typed again).
+    #[serde(default)]
+    server: String,
 }
 
 pub async fn test_orthanc(
@@ -258,6 +263,26 @@ pub async fn test_orthanc(
 ) -> AppResult<Json<Diagnosis>> {
     admin.require(Permission::Admin)?;
     let saved = state.settings.get();
+    if !req.server.is_empty() && req.server != crate::settings::MAIN_SERVER {
+        let url = req.url.as_deref().map(str::trim).filter(|u| !u.is_empty()).map(str::to_string);
+        let known = saved.orthanc_servers.iter().find(|s| s.key == req.server);
+        let url = match (url, known) {
+            (Some(url), _) => url,
+            (None, Some(server)) => server.url.clone(),
+            (None, None) => return Err(AppError::BadRequest("Enter the address of the Orthanc server".into())),
+        };
+        if !(url.starts_with("http://") || url.starts_with("https://"))
+            || url.chars().any(|c| c.is_whitespace() || c.is_control())
+        {
+            return Err(AppError::BadRequest("The Orthanc address must look like http://orthanc:8042".into()));
+        }
+        let username = req.username.or_else(|| known.map(|s| s.username.clone())).unwrap_or_default();
+        let password = match req.password.filter(|p| !p.is_empty()) {
+            Some(p) => p,
+            None => known.filter(|s| s.url == url).map(|s| s.password.0.clone()).unwrap_or_default(),
+        };
+        return Ok(Json(OrthancClient::for_test(&url, &username, &password)?.diagnose().await));
+    }
 
     let url =
         req.url.map(|u| u.trim().to_string()).filter(|u| !u.is_empty()).unwrap_or_else(|| saved.orthanc_url.clone());

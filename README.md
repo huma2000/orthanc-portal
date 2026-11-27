@@ -1102,16 +1102,20 @@ All JSON. State-changing calls need the header `X-Requested-With: portal`.
 "intranet" = only registered on the staff listener (default `:8080`); "internet" = only on the invitation listener
 (default `:8081`).
 
-**Adding another Orthanc server (for now through the API).** There is no settings page for the servers yet:
-an administrator adds them with `PUT /api/admin/settings` and `"orthanc_servers": [...]` (below). Each needs
-`key` (fixed once created, used in IDs and links), `url`, and its account. With two or more servers the
-pages show their server controls; Settings > Users and Security & roles choose who may use which server.
+**Adding another Orthanc server.** *Settings > Orthanc > Other Orthanc servers*: **Add a server**, then its
+name, key (fixed once saved: it is in the IDs and links), address, account (the password is write-only, as
+for the default server), log folder, badge colour, *Searched by default* and *On*; **Test connection** tries
+it (a saved password only with its saved address); ↑ / ↓ set the order; **Remove** is refused while links,
+rules or roles use it. Everything is saved with the form. The same is possible through the API
+(`"orthanc_servers"`, below). With two or more servers the pages show their server controls; *Settings >
+Users* and *Security & roles* choose who may use which server. `POST /api/admin/orthanc/test` takes
+`"server": "<key>"` to test another server.
 
 **IDs and several Orthanc servers.** `{id}` is Orthanc's own ID of a study, series, image or job. Besides the
 default Orthanc (the *Orthanc connection* settings, key `main`), the portal can reach other Orthanc servers, set
-in the `orthanc_servers` setting. *Being built*: searching, viewing, downloads, labels, edits, links and
-sending, copies, uploads and auto-forward work with every server; there is no settings page for the servers yet,
-and query / retrieve, worklists and the admin pages still use the default server:
+in the `orthanc_servers` setting. *Being built*: searching, viewing, downloads, labels, edits, links,
+sending, copies, uploads and auto-forward work with every server; query / retrieve, worklists and the admin
+pages still use the default server:
 
 ```json
 "orthanc_servers": [
