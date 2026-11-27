@@ -4492,11 +4492,11 @@ function buildServersEditor(servers, defaultName = "Main") {
           row.anonymous || !row.password_set ? null : h("label", { class: "check" },
             h("input", { type: "checkbox", checked: row.clear, onchange: (e) => { row.clear = e.target.checked; } }), "Remove the saved password"),
           h("label", null, "Folder of its log files (optional)", input("log_dir", { placeholder: "/var/log/orthanc" })),
-          h("div", { class: "setting" }, h("span", { class: "field-label" }, "Badge colour"), colorChoice(row.color, (c) => { row.color = c; }, "Badge colour")),
+          h("div", { class: "setting" }, h("span", { class: "field-label" }, "Badge colour"), colorChoice(row.color, (c) => { row.color = c; }, "Badge colour", "Default colour")),
           h("label", { class: "check", title: lookup("Several servers can be included. This does not make it the default server.") },
             h("input", { type: "checkbox", checked: row.searched_by_default !== false, onchange: (e) => { row.searched_by_default = e.target.checked; } }),
             "Included in searches when no server is chosen")),
-        h("div", { class: "setting wide" }, test, testBox));
+        h("div", { class: "setting wide" }, h("div", { class: "filter-actions" }, test), testBox));
     }) : [h("p", { class: "muted" }, "Only the default server above. Add another Orthanc server to search and use several from this portal.")]));
   }
   draw();
@@ -4527,13 +4527,13 @@ function buildServersEditor(servers, defaultName = "Main") {
   };
 }
 
-function colorChoice(value, onChange, label) {
+function colorChoice(value, onChange, label, defaultText = "Default") {
   const picker = h("input", { type: "color", value: isColor(value) ? value : "#2547c8", disabled: !isColor(value), "aria-label": label });
   const useDefault = h("input", { type: "checkbox", checked: !isColor(value) });
   const changed = () => { picker.disabled = useDefault.checked; onChange(useDefault.checked ? "" : picker.value); };
   picker.addEventListener("input", changed);
   useDefault.addEventListener("change", changed);
-  return h("div", { class: "color-setting" }, picker, h("label", { class: "check" }, useDefault, "Default"));
+  return h("div", { class: "color-setting" }, picker, h("label", { class: "check" }, useDefault, defaultText));
 }
 
 function buildModalityButtonsEditor(buttons, defaults) {

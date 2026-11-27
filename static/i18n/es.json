@@ -1490,7 +1490,8 @@
   "Several servers can be included. This does not make it the default server.": "Se pueden incluir varios servidores. Esto no lo convierte en el servidor principal.",
   "Included in searches when no server is chosen": "Incluido en las búsquedas cuando no se elige servidor",
   "Default server: {name}": "Servidor principal: {name}",
-  "Its address, account and name are set in Orthanc connection above. Plain study IDs and older links are its own, so it is always on, always first, and cannot be removed.": "Su dirección, cuenta y nombre se configuran arriba, en Conexión con Orthanc. Los identificadores sin prefijo y los enlaces antiguos son suyos, así que siempre está activo, siempre va primero y no se puede quitar."
+  "Its address, account and name are set in Orthanc connection above. Plain study IDs and older links are its own, so it is always on, always first, and cannot be removed.": "Su dirección, cuenta y nombre se configuran arriba, en Conexión con Orthanc. Los identificadores sin prefijo y los enlaces antiguos son suyos, así que siempre está activo, siempre va primero y no se puede quitar.",
+  "Default colour": "Color predeterminado"
  },
  "messages": {
   "A label can have 1 to 64 letters, digits, '-' or '_' (no spaces or accents)": "Una etiqueta puede tener de 1 a 64 letras, cifras, «-» o «_» (sin espacios ni tildes)",

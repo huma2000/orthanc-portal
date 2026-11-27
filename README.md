@@ -88,11 +88,23 @@ the section in brackets has the details.
   and sees the time and downloads left.
 * Optional per link: an **anonymized copy** instead of the original *(switch)*, an **email to the creator**
   when it is opened or downloaded *(switch)*, sending the invitation **by email** (password left out unless
-  ticked).
+  ticked; *(switch)* an included password goes in a **separate email, without the link**).
 * The **Shares** page: time and downloads left, openings, **QR code** *(switch)*, show the password again
   *(switch)*, edit (more time, downloads, a new password), revoke.
 * **Upload links** *(switch)*: somebody outside sends studies in (a CD folder) through a link plus a password;
   they see nothing of the archive and can never add images to an existing study.
+
+**Several Orthanc servers** (sections 5, 12)
+
+* Add more Orthanc servers in **Settings > Orthanc** (name, address, account, badge colour, Test connection);
+  with one server nothing changes on the pages.
+* **One search over every server**, merged in the chosen order: the same study on two servers is one row with
+  both badges (**Open the copy on...**), and a server that does not answer is named while the others' results
+  are shown; the total of studies counts each study once, with each server's count.
+* Viewers read each study from its server; **send** from each server, **copy a study to another server**,
+  **upload** and **upload links** into a chosen server, **auto-forward** on every server, and a server choice on
+  Jobs, System, DICOM nodes, worklists, query / retrieve and Statistics.
+* **Which servers each account or role may use**: the other servers' studies do not exist for it.
 
 **Accounts and security** (sections 5, 9c, 11)
 
@@ -128,6 +140,9 @@ the section in brackets has the details.
 
 * One executable (web UI built in, SQLite), or Docker Compose with or without a bundled Orthanc, and a
   Cloudflare Tunnel for the internet side.
+* **New versions** *(switch)*: once a day the portal asks GitHub for its latest release; administrators are told,
+  with the steps to update **this** installation (Docker, built from source, or the Windows program). Nothing is
+  installed by itself.
 
 ---
 
@@ -366,7 +381,7 @@ installed by itself.** The portal works out how it was installed:
 | Installed | How it knows | The steps it gives |
 |---|---|---|
 | **Docker Compose** (options A and B) | the image says so (`PORTAL_INSTALL=docker`), and each compose file names its folder (`PORTAL_COMPOSE_DIR`) | `cd <source>/<that folder>`, `git pull`, `docker compose up -d --build` (the image is built from the source: `docker compose pull` would not update it), `docker compose ps` |
-| **Built from the source** (option C) | the program runs from cargo's `target/.../release` folder | `cd <source folder>`, `git pull`, `cargo build --release`, then restart (`systemctl restart` when it runs as a systemd service) |
+| **Built from the source** (option C) | the program runs from a cargo build folder (`target/release`, `target/debug`...) | `cd <source folder>`, `git pull`, `cargo build --release` (`cargo build` for a debug build), then restart (`systemctl restart` when it runs as a systemd service) |
 | **A program file from a release** | anything else | download the zip for this operating system, check its SHA-256, stop the portal, replace the program, start it again; when the release has no program for this system, build it from the source |
 
 Users, settings, links and studies are always kept (database, Docker volumes, Orthanc). Untick *Check for new
@@ -402,7 +417,7 @@ including to people who are already signed in, and on the invitation page that g
 |---|---|
 | **Browser window title** | The text of the tab and window (max 80 characters). Empty = the portal name. |
 | **Website icon** | PNG, ICO, SVG, JPEG, WebP or GIF, up to 256 KB; square and at least 64 x 64 px works best. Shown in the tab and in bookmarks. |
-| **Logo** | PNG, JPEG, WebP, GIF or SVG, up to 1 MB. Shown in the header (up to about 56 px high) and on the login page. It sits on a **light plate**, so a dark logo stays readable on the dark bar. A wide logo with a transparent background looks best. |
+| **Logo** | PNG, JPEG, WebP, GIF or SVG, up to 1 MB. Shown in the header (up to about 56 px high) and on the login page, where it sits above the portal's name, both centred. It sits on a **light plate**, so a dark logo stays readable on the dark bar. A wide logo with a transparent background looks best. |
 | **Portal name** | Text next to the logo and the login heading. Untick **Show the portal name next to the logo** when the logo already contains the name (it is then kept as the logo's accessible text). |
 | **Login notice** | Optional message under the login heading. |
 
@@ -1140,9 +1155,13 @@ All JSON. State-changing calls need the header `X-Requested-With: portal`.
 
 **Adding another Orthanc server.** *Settings > Orthanc > Other Orthanc servers*: **Add a server**, then its
 name, key (fixed once saved: it is in the IDs and links), address, account (the password is write-only, as
-for the default server), log folder, badge colour, *Searched by default* and *On*; **Test connection** tries
-it (a saved password only with its saved address); ↑ / ↓ set the order; **Remove** is refused while links,
-rules or roles use it. Everything is saved with the form. The same is possible through the API
+for the default server), log folder, badge colour, *Included in searches when no server is chosen* and *On*;
+**Test connection** tries it (a saved password only with its saved address); ↑ / ↓ set the order; **Remove**
+is refused while links, rules or roles use it. Everything is saved with the form, and new names apply at once.
+The list starts with the **default server**: the one of *Orthanc connection* above, where its address, account
+and name (*Name of this server*) are set. Plain study IDs and older links are its own, so it is always on,
+always first and cannot be removed. *Included in searches...* is not "default server": several servers can
+have it. The same is possible through the API
 (`"orthanc_servers"`, below). With two or more servers the pages show their server controls; *Settings >
 Users* and *Security & roles* choose who may use which server. `POST /api/admin/orthanc/test` takes
 `"server": "<key>"` to test another server.
@@ -1236,7 +1255,7 @@ removes it), and must be typed again when its address moves to another server.
 | `GET /api/modalities` | send | DICOM destinations |
 | `POST /api/studies/{id}/send` `{ "target": "alias" }` | send | Start sending a study |
 | `GET /api/transfers` | send | Recent transfers + live job state |
-| `POST /api/studies/{id}/share` `{ "minutes": 2880, "downloads": 1, "note": "", "email"?: { "to", "message"?, "include_password"? } }` | share | Create an invitation (`hours` is still accepted instead of `minutes`): answers `{ id, url, password, password_kept, expires_at, minutes, max_downloads, label, email: { sent, to, error? } }` |
+| `POST /api/studies/{id}/share` `{ "minutes": 2880, "downloads": 1, "note": "", "email"?: { "to", "message"?, "include_password"? } }` | share | Create an invitation (`hours` is still accepted instead of `minutes`): answers `{ id, url, password, password_kept, expires_at, minutes, max_downloads, label, email: { sent, to, error?, password_email?: { sent, error? } } }` (`password_email` when the password went in a separate email) |
 | `PUT /api/shares/{id}` `{ "minutes"?, "downloads_left"?, "note"?, "new_password"?, "email"? }` | share (creator) or admin | Change a link that was not revoked (`minutes` from now, also for an expired link) and optionally email the update; answers the new `password` when one was asked, and `email` |
 | `POST /api/shares/{id}/password` | share (creator) or admin | `{ password }` of an active invitation, if passwords are kept (409 otherwise); recorded in the audit log |
 | `GET /api/shares` | share | The caller's invitations (admins: everyone's) with status, downloads used, openings |
@@ -1329,11 +1348,11 @@ src/routes/           session, studies, thumbnails, upload, download, send (DICO
 
 ## 14. Testing status, first-run checklist, troubleshooting
 
-The code compiles without warnings on Rust 1.91, passes `cargo clippy --all-targets` with no warnings, is
+The code compiles without warnings on current stable Rust (1.99), passes `cargo clippy --all-targets` with no warnings, is
 formatted with `rustfmt` (see `rustfmt.toml`), and its dependencies were checked against the RustSec advisory
 database (no known vulnerable version in `Cargo.lock`). The automated tests live in the **`tests/`** folder:
 
-* `tests/feature_tests.sh`: **281 checks** of the features of section 9c on a fresh portal: two-step sign-in
+* `tests/feature_tests.sh`: **297 checks** of the features of section 9c on a fresh portal: two-step sign-in
   (set-up, codes used once, recovery codes, required mode, reset), My account, link notifications (and that they
   never name the patient), anonymized copies (made, shown, deleted on revocation), whole-patient links, QR codes,
   upload links (password, nothing leaked, size limit, non-DICOM files, revocation), the patient CD export (with
@@ -1346,7 +1365,7 @@ database (no known vulnerable version in `Cargo.lock`). The automated tests live
   upload links into a chosen server, auto-forward per server, the audit log naming the server, the thumbnail
   cache kept apart, and **accounts limited to some servers** (searches, IDs, viewers, bulk send, uploads and
   the pages that only work with the default server).
-* `tests/server_tests.sh`: **654 checks** of the server against a fake Orthanc (`tests/mock_orthanc.py`) and a
+* `tests/server_tests.sh`: **662 checks** of the server against a fake Orthanc (`tests/mock_orthanc.py`) and a
   fake mail server (`tests/mock_smtp.py`):
   the two doors (staff portal vs invitation links only, Cloudflare headers refused on the intranet port), creating
   links with the default and the limited validity/downloads, the password gate and its throttling, what a guest
@@ -1359,14 +1378,14 @@ database (no known vulnerable version in `Cargo.lock`). The automated tests live
   one, and when it refuses the portal** (what is sent, what is not, the message for each case), an
   administrator changing their own password (every other session of that account is signed out), and the
   portal in Spanish (the setting, the dictionary on both listeners, the pages and the invitation emails);
-* `tests/ui_tests.js`: **235 checks** of both web pages in a simulated browser (jsdom): the Share dialog and the
+* `tests/ui_tests.js`: **246 checks** of both web pages in a simulated browser (jsdom): the Share dialog and the
   Shares tab, the guest page (password, study, series, countdown, downloads left, expiry, revoked, 0-download
   links, no OHIF), what each kind of staff account sees, search, the with/without-account choice in Settings,
   and the translations (every `t()` text translated, the language menu, the portal's language, the server's
   messages and the invitation page in Spanish), and with two Orthanc servers: the server buttons of the
   searches, the Server column and its badges, "Open the copy on...", "Copy to server...", "Upload to", the
   study count per server, and the server choice of users and roles;
-* `cargo test`: **88 unit tests** (image validation; password and link generation; the rules that confine a guest
+* `cargo test`: **92 unit tests** (image validation; password and link generation; the rules that confine a guest
   to one study; account / no account and the wording of Orthanc refusals; the thumbnail cache; tokens and sessions;
   the role of a user, settings saved by earlier versions, the appearance settings; email addresses, invitation texts (English and Spanish), the hourly email limit and
   the rule that the mail server password never travels unencrypted).
