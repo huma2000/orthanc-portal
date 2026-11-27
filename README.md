@@ -1133,8 +1133,12 @@ removes it), and must be typed again when its address moves to another server.
   uses that server. The page adds `servers` (those searched) and, when some did not answer,
   `unavailable: [{ "server", "label", "error" }]`: the results then come from the others. A search over
   several servers cannot page beyond the first 5,000 results (400: narrow it).
-* **`GET /api/stats`** gives the total and `servers: [{ "key", "label", "studies" }]` (a study on two servers
-  counts on each).
+* **`GET /api/stats`** gives the total and `servers: [{ "key", "label", "studies" }]`. In the total, a study on
+  several servers counts **once** (the distinct study IDs of their lists, recounted at most every 5 minutes;
+  the plain sum when a server does not answer). The header shows the total, then each server's count.
+* **The Server column** of the studies lists is one of the columns of *Settings > Search & labels* (moved or
+  hidden like the others; installations upgraded from before it get it at the end). It is shown only to
+  people who use several servers.
 * **`GET /api/me`** lists the servers the account may use (`orthanc_servers`: key, label, colour); the page
   shows its server controls only with two or more. Users (`/api/admin/users`) and roles have `servers`:
   `null` = every server, or a list of keys (at least one).

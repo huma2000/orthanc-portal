@@ -433,9 +433,12 @@ ok "an unknown server is refused (400)" "$(code $F $A GET "/api/studies?servers=
 ok "series of the archive: series and study IDs say so" "$(body $F $A "/api/series?servers=archive" | py "len(d['items']) > 0 and all(x['id'].startswith('archive:') and x['study']['id'].startswith('archive:') for x in d['items'])")" "True"
 ok "series of both: each series once, naming both" "$(body $F $A "/api/series" | py "sorted({tuple(x['servers']) for x in d['items']})")" "[('main', 'archive')]"
 ok "too deep a page over several servers is refused (400)" "$(code $F $A GET "/api/studies?offset=6000")" "400"
-ok "the number of studies: in all and on each server" "$(body $F $A /api/stats | py "(d['studies'] == sum(s['studies'] for s in d['servers']), [s['key'] for s in d['servers']])")" "(True, ['main', 'archive'])"
-M1=$(wc -l < "$WORK/proxy.log"); M2=$(wc -l < "$WORK/m2/proxy.log")
-ok "a viewer's search naming no study asks both servers, and gives each study once" "$(body $F $A "/dicom-web/studies?00100020=P-001" | py "len(d)")/$(( $(wc -l < "$WORK/proxy.log") - M1 ))/$(( $(wc -l < "$WORK/m2/proxy.log") - M2 ))" "1/1/1"
+ok "the number of studies: on each server" "$(body $F $A /api/stats | py "[s['key'] for s in d['servers']]")" "['main', 'archive']"
+# The distinct study IDs of both fake Orthancs (the main one also holds copies made by earlier checks).
+DISTINCT=$( (curl -s -u orthanc:s3cr3tpw http://127.0.0.1:18042/studies; echo; curl -s -u orthanc:s3cr3tpw http://127.0.0.1:18043/studies) | python3 -c "import sys,json;print(len({i for line in sys.stdin if line.strip() for i in json.loads(line)}))")
+ok "...and in all, a study on both counted once" "$(body $F $A /api/stats | py "d['studies']")" "$DISTINCT"
+M1=$(cat "$WORK/proxy.log" 2>/dev/null | wc -l); M2=$(cat "$WORK/m2/proxy.log" 2>/dev/null | wc -l)
+ok "a viewer's search naming no study asks both servers, and gives each study once" "$(body $F $A "/dicom-web/studies?00100020=P-001" | py "len(d)")/$(( $(cat "$WORK/proxy.log" 2>/dev/null | wc -l) - M1 ))/$(( $(cat "$WORK/m2/proxy.log" 2>/dev/null | wc -l) - M2 ))" "1/1/1"
 
 # An account that may use the archive only.
 ok "an account cannot be limited to no server (400)" "$(code $F $A POST /api/admin/users -H "$J" -d '{"username":"nosrv","password":"LongPassword123","permissions":["read"],"servers":[]}')" "400"
@@ -452,10 +455,10 @@ ok "...it cannot share or send the default server's study (404)" "$(code $F $AR 
 ok "...bulk sending refuses the default server's studies" "$(body $F $AR /api/send -X POST -H "$J" -d "{\"target\":\"ris\",\"studies\":[\"$SID\"]}" | py "(d.get('started'), len(d.get('errors', [])))" 2>/dev/null || echo refused)" "(0, 1)"
 has "...uploading (into the default server) is refused" "$(body $F $AR /api/upload -X POST -H "Content-Type: application/dicom" --data-binary "DICM")" "cannot use the Orthanc server"
 ok "...only the archive's counts" "$(body $F $AR /api/stats | py "[s['key'] for s in d['servers']]")" "['archive']"
-M1=$(wc -l < "$WORK/proxy.log"); M2=$(wc -l < "$WORK/m2/proxy.log")
-ok "...its viewer reads the study from the archive, never from the default server" "$(code $F $AR GET "/dicom-web/studies/$UID_/series")/$(( $(wc -l < "$WORK/proxy.log") - M1 ))/$(( $(wc -l < "$WORK/m2/proxy.log") - M2 ))" "200/0/1"
-M1=$(wc -l < "$WORK/proxy.log"); M2=$(wc -l < "$WORK/m2/proxy.log")
-ok "...and its viewer's searches too" "$(code $F $AR GET "/dicom-web/studies?00100020=P-001")/$(( $(wc -l < "$WORK/proxy.log") - M1 ))/$(( $(wc -l < "$WORK/m2/proxy.log") - M2 ))" "200/0/1"
+M1=$(cat "$WORK/proxy.log" 2>/dev/null | wc -l); M2=$(cat "$WORK/m2/proxy.log" 2>/dev/null | wc -l)
+ok "...its viewer reads the study from the archive, never from the default server" "$(code $F $AR GET "/dicom-web/studies/$UID_/series")/$(( $(cat "$WORK/proxy.log" 2>/dev/null | wc -l) - M1 ))/$(( $(cat "$WORK/m2/proxy.log" 2>/dev/null | wc -l) - M2 ))" "200/0/1"
+M1=$(cat "$WORK/proxy.log" 2>/dev/null | wc -l); M2=$(cat "$WORK/m2/proxy.log" 2>/dev/null | wc -l)
+ok "...and its viewer's searches too" "$(code $F $AR GET "/dicom-web/studies?00100020=P-001")/$(( $(cat "$WORK/proxy.log" 2>/dev/null | wc -l) - M1 ))/$(( $(cat "$WORK/m2/proxy.log" 2>/dev/null | wc -l) - M2 ))" "200/0/1"
 ARID=$(body $F $A /api/admin/users | py "[u['id'] for u in d['users'] if u['username'] == 'arch'][0]")
 ok "back to every server" "$(code $F $A PUT /api/admin/users/$ARID -H "$J" -d '{"servers":null}')/$(code $F $AR GET /api/studies/$SID/series)" "200/200"
 ok "...an update without servers keeps them" "$(code $F $A PUT /api/admin/users/$ARID -H "$J" -d '{"servers":["archive"]}')/$(code $F $A PUT /api/admin/users/$ARID -H "$J" -d '{"email":""}')/$(code $F $AR GET /api/studies/$SID/series)" "200/200/404"

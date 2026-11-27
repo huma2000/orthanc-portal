@@ -25,6 +25,7 @@ use crate::orthanc::OrthancClient;
 use crate::settings::{Settings, MAIN_SERVER};
 use crate::util::is_valid_orthanc_id;
 use serde::Serialize;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -37,6 +38,11 @@ const MISSING_TTL_SECS: i64 = 30;
 const MAX_ROUTES: usize = 20_000;
 /// `(user id, StudyInstanceUID)` -> `(server key, expiry)`.
 type Routes = HashMap<(i64, String), (String, i64)>;
+
+/// How long the number of distinct studies of a set of servers is reused.
+const DISTINCT_TTL_SECS: i64 = 5 * 60;
+/// How long a server may take to list its studies for that count.
+const LIST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long a server may take to say whether it holds a study.
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -132,13 +138,19 @@ pub struct OrthancPool {
     /// `(user id, StudyInstanceUID)` -> `(server key, expiry)`: which server a person's viewer
     /// reads a study from (see [`for_study`](Self::for_study)).
     routes: Arc<Mutex<Routes>>,
+    /// Servers' keys (joined) -> (number of distinct studies, when counted).
+    distinct: Arc<Mutex<HashMap<String, (u64, i64)>>>,
 }
 
 impl OrthancPool {
     /// `main` is the client of the default server (the one in `AppState::orthanc`): the pool
     /// shares it, so both always point at the same place.
     pub fn new(main: OrthancClient, settings: &Settings) -> Result<Self, AppError> {
-        let pool = Self { members: Arc::new(RwLock::new(Arc::new(Vec::new()))), routes: Arc::default() };
+        let pool = Self {
+            members: Arc::new(RwLock::new(Arc::new(Vec::new()))),
+            routes: Arc::default(),
+            distinct: Arc::default(),
+        };
         pool.rebuild(Some(main), settings)?;
         Ok(pool)
     }
@@ -149,8 +161,9 @@ impl OrthancPool {
         if let Err(e) = self.rebuild(None, settings) {
             tracing::error!("Orthanc servers: {e}");
         }
-        // Servers may have moved: the viewers look their studies up again.
+        // Servers may have moved: the viewers look their studies up again, and studies are counted again.
         self.routes.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.distinct.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
     fn rebuild(&self, main: Option<OrthancClient>, settings: &Settings) -> Result<(), AppError> {
@@ -323,6 +336,35 @@ impl OrthancPool {
                 Ok(usable[0].1.clone())
             }
         }
+    }
+
+    /// How many different studies these servers hold together: a study on several servers counts
+    /// once. Orthanc gives the same study the same ID on every server (it is made from the patient
+    /// ID and the StudyInstanceUID), so this is the number of distinct IDs of their study lists.
+    /// Listing every study is not free on a big archive: the answer is reused for a few minutes.
+    /// `None` when a server could not list its studies.
+    pub async fn distinct_studies(&self, servers: &[(ServerInfo, OrthancClient)]) -> Option<u64> {
+        let key = servers.iter().map(|(s, _)| s.key.as_str()).collect::<Vec<_>>().join(",");
+        let now = crate::util::now_unix();
+        if let Some((count, at)) = self.distinct.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+            if now - at < DISTINCT_TTL_SECS {
+                return Some(*count);
+            }
+        }
+        let lists = futures_util::future::join_all(servers.iter().map(|(_, client)| async move {
+            match tokio::time::timeout(LIST_TIMEOUT, client.get_json("/studies")).await {
+                Ok(Ok(Value::Array(ids))) => Some(ids),
+                _ => None,
+            }
+        }))
+        .await;
+        let mut ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for list in lists {
+            ids.extend(list?.into_iter().filter_map(|id| id.as_str().map(str::to_string)));
+        }
+        let count = ids.len() as u64;
+        self.distinct.lock().unwrap_or_else(|e| e.into_inner()).insert(key, (count, now));
+        Some(count)
     }
 
     /// Key, name and colour of a server (switched-off ones included).

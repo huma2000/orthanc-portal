@@ -714,6 +714,11 @@ pub struct Settings {
     /// Columns of the studies tables, in order (keys of [`STUDY_COLUMNS`]).
     #[serde(default = "default_study_columns")]
     pub study_columns: Vec<String>,
+    /// Which upgrades of `study_columns` saved settings already had: 1 = the Server column was
+    /// offered (added once at the end, so people who use several servers see it; it can then be
+    /// moved or hidden like the others).
+    #[serde(default)]
+    pub columns_version: u32,
     /// Search boxes of the Studies search, in order (keys of [`STUDY_SEARCH_FIELDS`]).
     #[serde(default = "default_study_search_fields")]
     pub study_search_fields: Vec<String>,
@@ -857,7 +862,7 @@ pub fn download_name(template: &str, values: &[(&str, &str)]) -> String {
 }
 
 /// Every column the studies tables can show (Settings > Search & labels), in the order offered.
-pub const STUDY_COLUMNS: [&str; 14] = [
+pub const STUDY_COLUMNS: [&str; 15] = [
     "patient",
     "patient_id",
     "birth_date",
@@ -872,6 +877,8 @@ pub const STUDY_COLUMNS: [&str; 14] = [
     "modalities",
     "series",
     "labels",
+    // The Orthanc server(s) holding the study: shown only to people who use several servers.
+    "server",
 ];
 /// Every search box the Studies search can offer.
 pub const STUDY_SEARCH_FIELDS: [&str; 13] = [
@@ -891,7 +898,9 @@ pub const STUDY_SEARCH_FIELDS: [&str; 13] = [
 ];
 
 fn default_study_columns() -> Vec<String> {
-    ["patient", "patient_id", "study_date", "description", "modalities", "series", "labels"].map(String::from).to_vec()
+    ["patient", "patient_id", "study_date", "description", "modalities", "series", "labels", "server"]
+        .map(String::from)
+        .to_vec()
 }
 fn default_study_search_fields() -> Vec<String> {
     ["patient_name", "patient_id", "description", "modality", "dates", "labels"].map(String::from).to_vec()
@@ -935,6 +944,21 @@ fn default_upload_text() -> String {
 /// normal and the simplified view, which became the only one). They are removed from the roles of
 /// saved settings before reading them: otherwise the whole saved document would be refused.
 const RETIRED_PERMISSIONS: [&str; 1] = ["switch_view"];
+
+/// Saved settings from before the Server column: it is added once at the end of their columns
+/// (afterwards, hiding it is respected).
+fn offer_server_column(stored: &mut Value) {
+    let Some(obj) = stored.as_object_mut() else { return };
+    if obj.contains_key("columns_version") {
+        return;
+    }
+    if let Some(columns) = obj.get_mut("study_columns").and_then(Value::as_array_mut) {
+        if !columns.iter().any(|c| c == "server") {
+            columns.push(json!("server"));
+        }
+    }
+    obj.insert("columns_version".into(), json!(1));
+}
 
 fn forget_retired_permissions(stored: &mut Value) {
     if let Some(roles) = stored.get_mut("roles").and_then(Value::as_array_mut) {
@@ -1054,6 +1078,7 @@ impl Settings {
             transfers_auto_refresh: true,
             auto_refresh_seconds: default_auto_refresh_seconds(),
             study_columns: default_study_columns(),
+            columns_version: 1,
             study_search_fields: default_study_search_fields(),
             search_as_you_type: false,
             search_min_chars: default_search_min_chars(),
@@ -1170,6 +1195,7 @@ impl Settings {
         let merged = (|| -> Result<Settings> {
             let mut stored: Value = serde_json::from_str(&raw)?;
             forget_retired_permissions(&mut stored);
+            offer_server_column(&mut stored);
             let mut base = serde_json::to_value(&seed)?;
             if let (Some(base_obj), Some(stored_obj)) = (base.as_object_mut(), stored.as_object()) {
                 for (k, v) in stored_obj {
@@ -2199,6 +2225,18 @@ mod tests {
         let limited = with(json!(["archive"])).unwrap();
         assert!(limited.with_patch(&json!({ "orthanc_servers": [] })).is_err());
         assert_eq!(Settings::defaults().roles[0].servers, None, "roles start with every server");
+    }
+
+    /// Saved settings from before the Server column get it once; hiding it afterwards is kept.
+    #[test]
+    fn the_server_column_is_offered_once() {
+        let old = json!({ "study_columns": ["patient", "study_date"] }).to_string();
+        let upgraded = Settings::merged_with_stored(Settings::defaults(), Some(old));
+        assert_eq!(upgraded.study_columns, ["patient", "study_date", "server"]);
+        assert_eq!(upgraded.columns_version, 1);
+        let hidden = json!({ "study_columns": ["patient"], "columns_version": 1 }).to_string();
+        assert_eq!(Settings::merged_with_stored(Settings::defaults(), Some(hidden)).study_columns, ["patient"]);
+        assert!(Settings::defaults().study_columns.contains(&"server".to_string()));
     }
 
     #[test]

@@ -674,6 +674,13 @@ pub async fn statistics(State(state): State<AppState>, AuthUser(user): AuthUser)
     if let (true, Some(e)) = (per_server.is_empty(), first_error) {
         return Err(e);
     }
+    // With several servers, a study on more than one of them counts once in the total (the sum
+    // when a server could not list its studies).
+    if per_server.len() > 1 && unavailable.is_empty() {
+        if let Some(distinct) = state.orthancs.distinct_studies(&servers).await {
+            total = Some(distinct);
+        }
+    }
     let mut answer = json!({ "studies": total, "servers": per_server });
     if !unavailable.is_empty() {
         answer["unavailable"] = json!(unavailable);

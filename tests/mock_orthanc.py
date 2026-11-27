@@ -513,6 +513,7 @@ class H(BaseHTTPRequestHandler):
             return self._json(["dicom-web", "ohif", "explorer.html"] + [x for x in os.environ.get("MOCK_PLUGINS", "").split(",") if x])
         if extra_get(self, p, self.path.split("?", 1)[1] if "?" in self.path else "") is not None: return
         if p == "/tools/labels": return self._json(all_labels())
+        if p == "/studies": return self._json(list(all_studies().keys()))   # every study's ID
         m = re.match(r"^/studies/([^/]+)/labels$", p)
         if m: return self._json(sorted(LABELS.get(m.group(1), ())))
         if DEMO:

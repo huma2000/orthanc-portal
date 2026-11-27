@@ -1419,7 +1419,8 @@
   "Open the copy on...": "Abrir la copia de...",
   "Open the copy on {server}": "Abrir la copia de {server}",
   "{server} (this copy)": "{server} (esta copia)",
-  "Stored on {servers}: choose which copy to work with": "Almacenado en {servers}: elija con qué copia trabajar"
+  "Stored on {servers}: choose which copy to work with": "Almacenado en {servers}: elija con qué copia trabajar",
+  "A study stored on several servers counts once in the total.": "Un estudio almacenado en varios servidores cuenta una sola vez en el total."
  },
  "messages": {
   "A label can have 1 to 64 letters, digits, '-' or '_' (no spaces or accents)": "Una etiqueta puede tener de 1 a 64 letras, cifras, «-» o «_» (sin espacios ni tildes)",

@@ -826,6 +826,21 @@ async function newLink(admin, body) {
     m.click(chips().find((b) => b.textContent === "All")); await sleep(1500);
     check("...All ticks them all again", chips().map((b) => b.getAttribute("aria-pressed")).join() === "true,true,true");
 
+    // The number of studies at the top: the total (a study on both counted once), then each server.
+    await until(() => /Archive/.test((m.$("#total-studies-servers") || {}).textContent || ""), 6000);
+    check("the study count: the total, then each server's", m.$("#total-studies").textContent === "2"
+      && /\(Main 1 · Archive 1\)/.test(m.$("#total-studies-servers").textContent), `${m.$("#total-studies").textContent} ${m.$("#total-studies-servers").textContent}`);
+
+    // The Server column follows Settings > Search & labels: it can be hidden.
+    const columns = (await (await admin.call("GET", "/api/admin/settings")).json()).settings.study_columns;
+    check("the Server column is in the column settings (and in the default ones)", columns.includes("server"));
+    await admin.call("PUT", "/api/admin/settings", { study_columns: columns.filter((c) => c !== "server") });
+    const hidden = await makeDom(STAFF); await hidden.login("admin", "SuperSecret123");
+    await hidden.tab("Studies"); await until(() => hidden.$("tr.study"), 6000);
+    check("...hidden there, it is not shown", !hidden.$$("main thead th").some((th) => th.textContent === "Server"));
+    await admin.call("PUT", "/api/admin/settings", { study_columns: columns });
+    all_extra.push(hidden);
+
     // The Users page: which servers each account can use.
     await m.tab("Settings"); await sleep(800);
     m.click(m.$$(".subtabs [role=tab]").find((b) => b.textContent === "Users"));

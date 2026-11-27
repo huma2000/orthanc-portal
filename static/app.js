@@ -861,7 +861,8 @@ function renderSimplified() {
   const head = h("header", { class: "simple-head" },
     h("div", { class: "brand brand-slot", "data-size": "40" }, ...brandContent(40, false)),
     h("div", { class: "head-right" },
-      showTotal ? h("div", { class: "simple-total" }, "Total studies: ", h("b", { id: "total-studies" }, totalStudies.text)) : null,
+      showTotal ? h("div", { class: "simple-total" }, "Total studies: ", h("b", { id: "total-studies" }, totalStudies.text),
+        h("span", { id: "total-studies-servers", class: "total-servers" }, totalStudies.servers || "")) : null,
       languageMenu()));
 
   // Red notice (administrators only) when Orthanc is unreachable or too old.
@@ -879,11 +880,13 @@ function renderSimplified() {
  * click on an icon, so the number is asked from Orthanc at most once a minute, unless `force`
  * (after an upload).
  */
-const totalStudies = { text: "...", at: 0 };
+const totalStudies = { text: "...", servers: "", at: 0 };
 async function refreshTotalStudies(force = false) {
   const show = () => {
     const slot = document.getElementById("total-studies");
     if (slot) { slot.textContent = totalStudies.text; slot.title = totalStudies.title || ""; }
+    const each = document.getElementById("total-studies-servers");
+    if (each) each.textContent = totalStudies.servers;
   };
   show();
   if (!document.getElementById("total-studies") || (!force && Date.now() - totalStudies.at < 60000)) return;
@@ -891,12 +894,15 @@ async function refreshTotalStudies(force = false) {
   try {
     const stats = await api("GET", "/api/stats");
     totalStudies.text = typeof stats.studies === "number" ? stats.studies.toLocaleString(i18n.locale) : "?";
-    // With several servers, the count of each one in the tooltip.
-    totalStudies.title = (stats.servers || []).length > 1
-      ? stats.servers.map((x) => `${x.label}: ${typeof x.studies === "number" ? x.studies.toLocaleString(i18n.locale) : "?"}`).join(" · ")
-      : "";
+    // With several servers: the count of each one after the total (where a study on two servers
+    // counts once).
+    const several = (stats.servers || []).length > 1;
+    const count = (n) => (typeof n === "number" ? n.toLocaleString(i18n.locale) : "?");
+    totalStudies.servers = several ? ` (${stats.servers.map((x) => `${x.label} ${count(x.studies)}`).join(" · ")})` : "";
+    totalStudies.title = several ? lookup("A study stored on several servers counts once in the total.") : "";
   } catch {
     totalStudies.text = "?"; // Orthanc unreachable: the administrators' red notice explains it
+    totalStudies.servers = "";
     totalStudies.at = 0;     // try again at the next page
   }
   show();
@@ -1769,12 +1775,10 @@ const STUDY_DETAIL_TITLES = {
   institution: "Institution", modalities: "Modalities", series: "Content", labels: "Labels", study_uid: "StudyInstanceUID",
   server: "Stored on",
 };
-const DEFAULT_STUDY_COLUMNS = ["patient", "patient_id", "study_date", "description", "modalities", "series", "labels"];
-const studyColumnKeys = () => [
-  ...(searchOptions().columns || DEFAULT_STUDY_COLUMNS).filter((key) => STUDY_COLUMNS[key] && key !== "server" && (key !== "labels" || labelsOn())),
-  // With several Orthanc servers, the last column says where each study is.
-  ...(severalServers() ? ["server"] : []),
-];
+const DEFAULT_STUDY_COLUMNS = ["patient", "patient_id", "study_date", "description", "modalities", "series", "labels", "server"];
+// The Server column (where it is placed in Settings, or hidden) only for people who use several servers.
+const studyColumnKeys = () => (searchOptions().columns || DEFAULT_STUDY_COLUMNS)
+  .filter((key) => STUDY_COLUMNS[key] && (key !== "labels" || labelsOn()) && (key !== "server" || severalServers()));
 /** Number of cells in a study row: tick box, arrow, preview, the chosen columns, actions. */
 const studyColumnCount = () => 2 + (bulkOn() ? 1 : 0) + (showThumbs() ? 1 : 0) + studyColumnKeys().length;
 
@@ -4617,7 +4621,8 @@ function buildSettingsView() {
     const labelColorsEditor = buildLabelColorsEditor(s.label_colors);
     const columnsEditor = buildPickList("columns", Object.entries(STUDY_COLUMNS).map(([k, c]) => [k, c.title]), s.study_columns, doc.defaults.study_columns);
     const fieldsEditor = buildPickList("search boxes", Object.entries(STUDY_FIELDS).map(([k, f]) => [k, f.title]), s.study_search_fields, doc.defaults.study_search_fields);
-    const detailEditor = buildPickList("fields", Object.entries(STUDY_DETAIL_TITLES), s.study_detail_fields || [], doc.defaults.study_detail_fields || []);
+    // "Stored on" is not a choice: the study window shows it by itself with several servers.
+    const detailEditor = buildPickList("fields", Object.entries(STUDY_DETAIL_TITLES).filter(([k]) => k !== "server"),s.study_detail_fields || [], doc.defaults.study_detail_fields || []);
     const ohifModesEditor = buildPickList("modes", Object.entries(OHIF_MODES).map(([k, [title]]) => [k, title]), s.ohif_modes || ["viewer"], ["viewer"]);
 
     // Docker (LISTENERS_FROM_ENV): the addresses must match the published ports, so they are
