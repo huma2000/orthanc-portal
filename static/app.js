@@ -4599,7 +4599,8 @@ function buildSettingsView() {
 
     const rolesEditor = buildRolesEditor(s.roles, doc.defaults.roles, doc.permissions,
       [{ key: "main", label: s.orthanc_label || "Main" }, ...(s.orthanc_servers || []).map((x) => ({ key: x.key, label: x.label || x.key }))]);
-    const forwardEditor = buildForwardRulesEditor(s.forward_rules || [], doc.destinations || []);
+    const forwardEditor = buildForwardRulesEditor(s.forward_rules || [], doc.destinations || [],
+      [{ key: "main", label: s.orthanc_label || "Main" }, ...(s.orthanc_servers || []).filter((x) => x.enabled !== false).map((x) => ({ key: x.key, label: x.label || x.key }))]);
 
     // ---- Email: the mail server password is write-only (like Orthanc's), and a test button.
     const smtpPassword = h("input", { type: "password", autocomplete: "new-password", placeholder: s.smtp_password_set ? "A password is saved. Leave empty to keep it." : "No password saved" });
@@ -5729,17 +5730,31 @@ function buildSystemView() {
  * Editor of the auto-forward rules (Settings > Auto-forward): one row per rule with its conditions
  * and its destination. `destinations` = the places studies can be sent to. `get()` = the rules.
  */
-function buildForwardRulesEditor(rules, destinations) {
-  const clone = (list) => list.map((r) => ({ ...r, modalities: (r.modalities || []).join(", "), labels: (r.labels || []).join(", ") }));
+function buildForwardRulesEditor(rules, destinations, servers = []) {
+  const clone = (list) => list.map((r) => ({ ...r, modalities: (r.modalities || []).join(", "), labels: (r.labels || []).join(", "), servers: [...(r.servers || [])] }));
+  const several = servers.length > 1;
   let rows = clone(rules);
   const list = h("div", { class: "forward-rules" });
   const destinationSelect = (row) => {
-    const known = destinations.some((d) => d.id === row.target);
+    const copyTargets = several ? servers.map((x) => [`server:${x.key}`, x.label]) : [];
+    const known = destinations.some((d) => d.id === row.target) || copyTargets.some(([id]) => id === row.target);
     return h("select", { "aria-label": "Destination", onchange: (e) => { row.target = e.target.value; } },
       h("option", { value: "", selected: !row.target }, "Do not send it (only notify)"),
       !known && row.target ? h("option", { value: row.target, selected: true }, t("{name} (not found in Orthanc)", { name: row.target })) : null,
-      destinations.map((d) => h("option", { value: d.id, selected: d.id === row.target }, d.description ? `${d.description}: ${d.id}` : d.id)));
+      // With several servers, each sends to its own destinations: these are the default server's (the
+      // others need the same names in their own configuration).
+      h("optgroup", { label: several ? lookup("DICOM destinations (of each server)") : lookup("DICOM destinations") },
+        destinations.map((d) => h("option", { value: d.id, selected: d.id === row.target }, d.description ? `${d.description}: ${d.id}` : d.id))),
+      copyTargets.length ? h("optgroup", { label: lookup("Copy to another Orthanc server") },
+        copyTargets.map(([id, label]) => h("option", { value: id, selected: id === row.target }, label))) : null);
   };
+  /** "Watch servers: [x] Main [ ] Archive" (none ticked = all). */
+  const watchServers = (row) => h("div", { class: "role-perms" },
+    servers.map((x) => h("label", { class: "check" }, h("input", {
+      type: "checkbox", checked: row.servers.includes(x.key),
+      onchange: (e) => { row.servers = e.target.checked ? [...new Set([...row.servers, x.key])] : row.servers.filter((k) => k !== x.key); },
+    }), x.label)),
+    h("span", { class: "muted" }, lookup("(none ticked = all)")));
   const text = (row, key, placeholder, label, maxlength = 64) => h("input", {
     value: row[key] || "", placeholder, maxlength, "aria-label": label, oninput: (e) => { row[key] = e.target.value; },
   });
@@ -5755,6 +5770,7 @@ function buildForwardRulesEditor(rules, destinations) {
         h("label", null, "Institution contains", text(row, "institution", "(empty = any)", "Institution")),
         h("label", null, "Description contains", text(row, "description", "(empty = any)", "Description")),
         h("label", null, "Has a label (any of)", text(row, "labels", "urgent, teaching (empty = any)", "Labels", 400)),
+        several ? h("div", { class: "field" }, h("span", { class: "field-label" }, "Watch servers"), watchServers(row)) : null,
         h("label", null, "Send to", destinationSelect(row)),
         h("label", null, "Notify by email", text(row, "notify", "a@example.org, b@example.org (empty = nobody)", "Notify by email", 1000)))))
       : [h("p", { class: "muted" }, "No rule yet.")]));
@@ -5763,13 +5779,14 @@ function buildForwardRulesEditor(rules, destinations) {
   return {
     node: h("div", { class: "wide" }, list,
       h("div", { class: "filter-actions" },
-        h("button", { class: "btn small", type: "button", onclick: () => { rows.push({ name: "", enabled: true, modalities: "", calling_aet: "", institution: "", description: "", labels: "", target: "", notify: "" }); draw(); } }, "Add rule")),
+        h("button", { class: "btn small", type: "button", onclick: () => { rows.push({ name: "", enabled: true, modalities: "", calling_aet: "", institution: "", description: "", labels: "", target: "", notify: "", servers: [] }); draw(); } }, "Add rule")),
       h("p", { class: "hint" }, "A rule sends the study on, emails the addresses given, or both. The email goes out once per study, through the mail server of Settings > Email, and never names the patient: it gives the modalities, institution, description, date and accession number, and a link to the study when the portal's public address is set (Settings > Network & sharing). Labels are those the study has when it is complete: a label put on later does not count.")),
     get: () => rows.map((r) => ({
       name: (r.name || "").trim(), enabled: r.enabled !== false, target: r.target || "",
       modalities: String(r.modalities || "").split(/[\s,;]+/).map((c) => c.toUpperCase()).filter(Boolean),
       calling_aet: (r.calling_aet || "").trim(), institution: (r.institution || "").trim(), description: (r.description || "").trim(),
       labels: String(r.labels || "").split(/[\s,;]+/).filter(Boolean), notify: (r.notify || "").trim(),
+      servers: r.servers || [],
     })),
   };
 }
@@ -5779,6 +5796,9 @@ function forwardStatus(status) {
   if (!status) return null;
   const lines = [];
   if (status.last_check) lines.push(t("Last look at Orthanc's new studies: {date}.", { date: formatTimestamp(status.last_check) }));
+  // With several servers, when each one was last read.
+  const checks = Object.entries(status.checks || {});
+  if (checks.length > 1) lines.push(checks.map(([key, ts]) => `${serverName(key)}: ${formatTimestamp(ts)}`).join(" · "));
   lines.push(t("Studies sent by the rules since the portal started: {n}.", { n: status.forwarded || 0 }));
   if (status.notified) lines.push(t("Emails sent by the rules since the portal started: {n}.", { n: status.notified }));
   if (status.last_forward) lines.push(t("Last one: {date}, rule \"{rule}\".", { date: formatTimestamp(status.last_forward.ts), rule: status.last_forward.rule }));

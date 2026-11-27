@@ -81,6 +81,23 @@ pub async fn copy_study(
         user.require_or_admin(Permission::Delete)?;
         feature(state.settings.get().allow_delete, "Deleting is switched off")?;
     }
+    let (transfer_id, total) =
+        start_copy(&state, &user.username, source, study, &req.server, target, req.delete_original).await?;
+    Ok(Json(json!({ "transfer_id": transfer_id, "images": total })))
+}
+
+/// Starts copying a study to the server `target_key` (checked by the caller: a person's request,
+/// or an auto-forward rule) and records it in the Transfers list. Gives the transfer's ID and the
+/// number of images.
+pub async fn start_copy(
+    state: &AppState,
+    username: &str,
+    source: OrthancClient,
+    study: ResourceRef,
+    target_key: &str,
+    target: OrthancClient,
+    delete: bool,
+) -> AppResult<(i64, u64)> {
     let summary = StudySummary::from_orthanc(&source.get_json(&format!("/studies/{}", study.id)).await?);
     let images: Vec<String> = source
         .get_json(&format!("/studies/{}/instances", study.id))
@@ -97,22 +114,22 @@ pub async fn copy_study(
             .take(160)
             .collect();
     let job = format!("copy-{}", &crate::sharing::new_token()[..16]);
-    let transfer_id = state.db.add_transfer(&user.username, &study.compound(), &label, &req.server, &job, "copy")?;
+    let transfer_id = state.db.add_transfer(username, &study.compound(), &label, target_key, &job, "copy")?;
     let total = images.len() as u64;
     running().insert(transfer_id, Progress { total, done: 0, failed: 0, started: Instant::now() });
-    let target_name = state.orthancs.info(&req.server).map(|s| s.label).unwrap_or_else(|| req.server.clone());
+    let target_name = state.orthancs.info(target_key).map(|s| s.label).unwrap_or_else(|| target_key.to_string());
     state.db.audit(
-        &user.username,
+        username,
         "copy_study",
         &format!(
             "{label} ({}) -> {target_name}{}",
             study.compound(),
-            if req.delete_original { ", then deleted from its server" } else { "" }
+            if delete { ", then deleted from its server" } else { "" }
         ),
     );
-    let task = Copy { state: state.clone(), transfer_id, source, target, study, images, delete: req.delete_original };
-    tokio::spawn(task.run(user.username.clone(), label));
-    Ok(Json(json!({ "transfer_id": transfer_id, "images": total })))
+    let task = Copy { state: state.clone(), transfer_id, source, target, study, images, delete };
+    tokio::spawn(task.run(username.to_string(), label));
+    Ok((transfer_id, total))
 }
 
 /// One copy, run in the background.

@@ -424,6 +424,21 @@ ok "...every image went there, and the transfer says so" "$(( $(cat "$WORK/m2/up
 ok "...not to the server it is on (400)" "$(code $F $A POST /api/studies/$SID/copy -H "$J" -d '{"server":"main"}')" "400"
 ok "...nor to an unknown one (404)" "$(code $F $A POST /api/studies/$SID/copy -H "$J" -d '{"server":"nowhere"}')" "404"
 ok "...deleting the original needs deleting switched on (403)" "$(code $F $A POST /api/studies/$SID/copy -H "$J" -d '{"server":"archive","delete_original":true}')" "403"
+# Auto-forward on every server: a rule watches the servers it names.
+ok "a rule watching a server that does not exist is refused (400)" "$(put $A '{"forward_rules":[{"name":"X","target":"ris","servers":["nowhere"]}]}' | tail -1)" "400"
+ok "...and one copying to a server that does not exist (400)" "$(put $A '{"forward_rules":[{"name":"X","target":"server:nowhere"}]}' | tail -1)" "400"
+ok "...and one copying to the server it watches (400)" "$(put $A '{"forward_rules":[{"name":"X","target":"server:archive","servers":["archive"]}]}' | tail -1)" "400"
+put $A '{"forward_enabled":true,"forward_rules":[{"name":"Archive out","target":"ris","servers":["archive"]},{"name":"Archive to main","target":"server:main","servers":["archive"]}]}' > /dev/null
+ok "...a server a rule watches cannot be removed (400)" "$(put $A '{"orthanc_servers":[]}' | tail -1)" "400"
+for i in $(seq 1 40); do [ -n "$(sqlval "select value from settings where key='value:forward_seq:archive'" 2>/dev/null)" ] && break; sleep 0.5; done
+S1=$(cat "$WORK/store.log" 2>/dev/null | wc -l); S2=$(cat "$WORK/m2/store.log" 2>/dev/null | wc -l); U1=$(cat "$WORK/upload.log" 2>/dev/null | wc -l)
+curl -s -X POST -d "{\"ChangeType\":\"StableStudy\",\"ID\":\"$SID\",\"ResourceType\":\"Study\"}" http://127.0.0.1:18043/__mock/change > /dev/null
+for i in $(seq 1 40); do [ "$(cat "$WORK/m2/store.log" 2>/dev/null | wc -l)" -gt "$S2" ] && [ "$(cat "$WORK/upload.log" | wc -l)" -ge $((U1 + 8)) ] && break; sleep 0.5; done
+ok "a study arriving on the archive is sent by the archive, not by the default server" "$(( $(cat "$WORK/m2/store.log" | wc -l) - S2 ))/$(( $(cat "$WORK/store.log" 2>/dev/null | wc -l) - S1 ))" "1/0"
+ok "...and copied to the default server by the other rule" "$(( $(cat "$WORK/upload.log" | wc -l) - U1 ))" "8"
+ok "...both shown as automatic transfers" "$(body $F $A /api/transfers | py "sorted({t['username'] for t in d[:2]})")" "['auto: Archive out', 'auto: Archive to main']"
+ok "...the Settings screen says when each server was read" "$(body $F $A /api/admin/settings | py "'archive' in d['forward']['checks']")" "True"
+put $A '{"forward_enabled":false,"forward_rules":[]}' > /dev/null
 # Uploads into a chosen server.
 U0=$(cat "$WORK/m2/upload.log" 2>/dev/null | wc -l)
 ok "a staff upload into the archive" "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Cookie: portal_session=$A" -H "$H" -H "Content-Type: application/dicom" --data-binary @small.dcm "$F/api/upload?server=archive")/$(( $(cat "$WORK/m2/upload.log" | wc -l) - U0 ))" "200/1"

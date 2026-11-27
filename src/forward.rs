@@ -12,22 +12,39 @@
 //! A rule with addresses to notify emails them, once per study (a study that becomes stable again
 //! is not announced twice). The email never names the patient.
 //!
+//! **Several Orthanc servers**: each server's list of changes is read, with its own position. A
+//! rule watches the servers it names (all of them when it names none). A study is sent by the
+//! server it arrived on, to one of that server's destinations; a rule whose target is
+//! `server:<key>` copies the study to that other Orthanc server instead (`routes/copy.rs`).
+//!
 //! Switching the feature on starts from the CURRENT end of the list: studies that arrived while it
 //! was off are not sent all at once. A study that gets more images later becomes stable again and is
 //! sent again, as Orthanc's own routing scripts do (the destination stores each image once).
 
 use crate::error::AppError;
 use crate::mailer::{self, RuleNotice};
+use crate::orthanc::OrthancClient;
 use crate::routes::send::{find_destination, start_send};
-use crate::settings::ForwardRule;
+use crate::servers::{compound, ResourceRef, ServerInfo};
+use crate::settings::{ForwardRule, MAIN_SERVER};
 use crate::state::AppState;
 use crate::util::{is_valid_orthanc_id, now_unix};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
-/// Where the portal stopped reading Orthanc's changes ("" = start from the end next time).
+/// Where the portal stopped reading Orthanc's changes ("" = start from the end next time): the
+/// default server's under its original name, the others' under `forward_seq:<key>`.
 const SEQ_KEY: &str = "forward_seq";
+
+fn seq_key(server: &str) -> String {
+    if server == MAIN_SERVER {
+        SEQ_KEY.to_string()
+    } else {
+        format!("{SEQ_KEY}:{server}")
+    }
+}
 /// Changes read per question to Orthanc, and questions per round at most.
 const BATCH: u64 = 200;
 const BATCHES_PER_ROUND: usize = 10;
@@ -40,10 +57,18 @@ struct Status {
     forwarded: u64,
     last_forward: Option<Value>,
     notified: u64,
+    /// When each server's changes were last read, by key.
+    checks: BTreeMap<String, i64>,
 }
 
-static STATUS: Mutex<Status> =
-    Mutex::new(Status { last_check: None, last_error: None, forwarded: 0, last_forward: None, notified: 0 });
+static STATUS: Mutex<Status> = Mutex::new(Status {
+    last_check: None,
+    last_error: None,
+    forwarded: 0,
+    last_forward: None,
+    notified: 0,
+    checks: BTreeMap::new(),
+});
 
 fn status_lock() -> std::sync::MutexGuard<'static, Status> {
     STATUS.lock().unwrap_or_else(|e| e.into_inner())
@@ -58,6 +83,7 @@ pub fn status() -> Value {
         "forwarded": s.forwarded,
         "last_forward": s.last_forward,
         "notified": s.notified,
+        "checks": s.checks,
     })
 }
 
@@ -70,43 +96,71 @@ pub async fn run(state: AppState) {
         let settings = state.settings.get();
         let rules: Vec<ForwardRule> = settings.forward_rules.iter().filter(|r| r.enabled).cloned().collect();
         if !settings.forward_enabled || rules.is_empty() {
-            // Off: forget the position, so switching it on later starts from that moment.
-            if matches!(state.db.get_value(SEQ_KEY), Ok(Some(seq)) if !seq.is_empty()) {
-                let _ = state.db.set_value(SEQ_KEY, "");
+            // Off: forget the positions, so switching it on later starts from that moment.
+            for server in settings.servers() {
+                forget_position(&state, &server.key);
             }
             continue;
         }
-        let outcome = round(&state, &rules).await;
+        let mut errors = Vec::new();
+        for (server, orthanc) in state.orthancs.all_enabled() {
+            let watching: Vec<ForwardRule> =
+                rules.iter().filter(|r| r.servers.is_empty() || r.servers.contains(&server.key)).cloned().collect();
+            if watching.is_empty() {
+                // No rule watches it: a rule added later starts from that moment.
+                forget_position(&state, &server.key);
+                continue;
+            }
+            match round(&state, &server, &orthanc, &watching).await {
+                Ok(()) => {
+                    status_lock().checks.insert(server.key.clone(), now_unix());
+                }
+                Err(e) => errors.push(format!("{}: {e}", server.label)),
+            }
+        }
         let mut s = status_lock();
         s.last_check = Some(now_unix());
-        s.last_error = outcome.err().map(|e| e.to_string());
+        s.last_error = (!errors.is_empty()).then(|| errors.join(" · "));
     }
 }
 
-/// One round: reads the new changes and forwards the stable studies that match.
-async fn round(state: &AppState, rules: &[ForwardRule]) -> Result<(), AppError> {
-    let stored = state.db.get_value(SEQ_KEY)?.unwrap_or_default();
+fn forget_position(state: &AppState, server: &str) {
+    let key = seq_key(server);
+    if matches!(state.db.get_value(&key), Ok(Some(seq)) if !seq.is_empty()) {
+        let _ = state.db.set_value(&key, "");
+    }
+}
+
+/// One round on one server: reads its new changes and forwards the stable studies that match.
+async fn round(
+    state: &AppState,
+    server: &ServerInfo,
+    orthanc: &OrthancClient,
+    rules: &[ForwardRule],
+) -> Result<(), AppError> {
+    let key = seq_key(&server.key);
+    let stored = state.db.get_value(&key)?.unwrap_or_default();
     let Ok(mut since) = stored.parse::<u64>() else {
         // First round after switching on: start at the current end of the list.
-        let last = state.orthanc.get_json("/changes?last").await?;
+        let last = orthanc.get_json("/changes?last").await?;
         let seq = last["Last"].as_u64().unwrap_or(0);
-        state.db.set_value(SEQ_KEY, &seq.to_string())?;
+        state.db.set_value(&key, &seq.to_string())?;
         return Ok(());
     };
     for _ in 0..BATCHES_PER_ROUND {
-        let page = state.orthanc.get_json(&format!("/changes?since={since}&limit={BATCH}")).await?;
+        let page = orthanc.get_json(&format!("/changes?since={since}&limit={BATCH}")).await?;
         let changes = page["Changes"].as_array().cloned().unwrap_or_default();
         for change in &changes {
             if change["ChangeType"].as_str() == Some("StableStudy") {
                 if let Some(id) = change["ID"].as_str().filter(|id| is_valid_orthanc_id(id)) {
-                    forward_study(state, rules, id).await;
+                    forward_study(state, server, orthanc, rules, id).await;
                 }
             }
         }
         let last = page["Last"].as_u64().unwrap_or(since);
         if last > since {
             since = last;
-            state.db.set_value(SEQ_KEY, &since.to_string())?;
+            state.db.set_value(&key, &since.to_string())?;
         }
         if page["Done"].as_bool().unwrap_or(true) || changes.is_empty() {
             break;
@@ -130,9 +184,9 @@ pub struct StudyFacts {
     pub uid: String,
 }
 
-async fn facts(state: &AppState, id: &str, need_aet: bool) -> Result<StudyFacts, AppError> {
-    let study = state.orthanc.get_json(&format!("/studies/{id}")).await?;
-    let series = state.orthanc.get_json(&format!("/studies/{id}/series")).await?;
+async fn facts(orthanc: &OrthancClient, id: &str, need_aet: bool) -> Result<StudyFacts, AppError> {
+    let study = orthanc.get_json(&format!("/studies/{id}")).await?;
+    let series = orthanc.get_json(&format!("/studies/{id}/series")).await?;
     let series = series.as_array().cloned().unwrap_or_default();
     let mut modalities: Vec<String> = series
         .iter()
@@ -146,8 +200,7 @@ async fn facts(state: &AppState, id: &str, need_aet: bool) -> Result<StudyFacts,
     if need_aet {
         let instance = series.iter().find_map(|s| s["Instances"].as_array()?.first()?.as_str().map(String::from));
         if let Some(instance) = instance.filter(|i| is_valid_orthanc_id(i)) {
-            calling_aet = state
-                .orthanc
+            calling_aet = orthanc
                 .get_text(&format!("/instances/{instance}/metadata/RemoteAET"))
                 .await
                 .unwrap_or_default()
@@ -211,10 +264,20 @@ pub fn matches(rule: &ForwardRule, study: &StudyFacts) -> bool {
         && (rule.labels.is_empty() || study.labels.iter().any(|l| rule.labels.contains(l)))
 }
 
-async fn forward_study(state: &AppState, rules: &[ForwardRule], id: &str) {
+async fn forward_study(
+    state: &AppState,
+    server: &ServerInfo,
+    orthanc: &OrthancClient,
+    rules: &[ForwardRule],
+    id: &str,
+) {
     // The sender is one more question to Orthanc: only when a rule looks at it or tells it.
     let need_aet = rules.iter().any(|r| !r.calling_aet.is_empty() || !r.notify.is_empty());
-    let study = match facts(state, id, need_aet).await {
+    // The study as the portal writes it: `key:id` on the other servers.
+    let full_id = compound(&server.key, id);
+    let id = full_id.as_str();
+    let plain = full_id.rsplit(':').next().unwrap_or_default().to_string();
+    let study = match facts(orthanc, &plain, need_aet).await {
         Ok(study) => study,
         Err(AppError::NotFound) => return, // deleted meanwhile
         Err(e) => {
@@ -224,15 +287,32 @@ async fn forward_study(state: &AppState, rules: &[ForwardRule], id: &str) {
     };
     for rule in rules.iter().filter(|r| matches(r, &study)) {
         if !rule.notify.is_empty() {
-            notify(state, rule, id, &study);
+            notify(state, rule, id, &study, server);
         }
         if rule.target.is_empty() {
             continue; // a rule that only notifies
         }
         let who = format!("auto: {}", rule.name);
         let outcome = async {
-            let node = find_destination(state, &state.orthanc, &rule.target).await?;
-            start_send(state, &who, None, &node, id).await
+            match rule.target.strip_prefix("server:") {
+                // Copied to another Orthanc server.
+                Some(key) if key == server.key => {
+                    Err(AppError::BadRequest("the study is already on that server".into()))
+                }
+                Some(key) => {
+                    let target = state.orthancs.stored(key)?;
+                    let study = ResourceRef { server: server.key.clone(), id: plain.clone() };
+                    let (transfer, _) =
+                        crate::routes::copy::start_copy(state, &who, orthanc.clone(), study, key, target, false)
+                            .await?;
+                    Ok((transfer, format!("copy #{transfer}")))
+                }
+                // Sent by its server, to one of its destinations.
+                None => {
+                    let node = find_destination(state, orthanc, &rule.target).await?;
+                    start_send(state, &who, None, &node, id).await
+                }
+            }
         }
         .await;
         match outcome {
@@ -251,7 +331,7 @@ async fn forward_study(state: &AppState, rules: &[ForwardRule], id: &str) {
 
 /// Emails the rule's addresses about the study, once per study and rule, in the background (the
 /// rounds never wait for the mail server). Written in the audit log either way.
-fn notify(state: &AppState, rule: &ForwardRule, id: &str, study: &StudyFacts) {
+fn notify(state: &AppState, rule: &ForwardRule, id: &str, study: &StudyFacts, server: &ServerInfo) {
     let who = format!("auto: {}", rule.name);
     match state.db.first_rule_notice(&rule.name, id, now_unix()) {
         Ok(true) => {}
@@ -280,6 +360,8 @@ fn notify(state: &AppState, rule: &ForwardRule, id: &str, study: &StudyFacts) {
         labels: &study.labels,
         link,
         lang: settings.language,
+        // Named only when there are several servers.
+        server: if settings.servers().len() > 1 { server.label.as_str() } else { "" },
     }
     .email();
     let (state, to, id) = (state.clone(), rule.notify.clone(), id.to_string());
@@ -316,6 +398,7 @@ mod tests {
             labels: vec![],
             target: "ris".into(),
             notify: String::new(),
+            servers: vec![],
         }
     }
 

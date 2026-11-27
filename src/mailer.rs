@@ -610,6 +610,8 @@ pub struct RuleNotice<'a> {
     /// The study in the staff portal, when its address is known (Settings > `public_base_url`).
     pub link: Option<String>,
     pub lang: Language,
+    /// The name of the Orthanc server it arrived on (empty with a single server).
+    pub server: &'a str,
 }
 
 impl RuleNotice<'_> {
@@ -631,6 +633,7 @@ impl RuleNotice<'_> {
             (if es { "Número de acceso" } else { "Accession number" }, clean(self.accession)),
             (if es { "Enviado por" } else { "Sent by" }, clean(self.calling_aet)),
             (if es { "Etiquetas" } else { "Labels" }, self.labels.join(", ")),
+            (if es { "Almacenado en" } else { "Stored on" }, clean(self.server)),
         ];
         let facts: String = rows.iter().filter(|(_, v)| !v.is_empty()).map(|(k, v)| format!("{k}: {v}\n")).collect();
         let what: Vec<String> = [modalities, clean(self.institution)].into_iter().filter(|s| !s.is_empty()).collect();

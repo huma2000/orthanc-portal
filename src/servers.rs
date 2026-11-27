@@ -363,6 +363,12 @@ impl OrthancPool {
         Some(count)
     }
 
+    /// Every server that is switched on, in order, with its client: for background tasks that
+    /// belong to no person (auto-forward).
+    pub fn all_enabled(&self) -> Vec<(ServerInfo, OrthancClient)> {
+        self.snapshot().iter().filter(|m| m.enabled).map(|m| (Self::describe(m), m.client.clone())).collect()
+    }
+
     /// Key, name and colour of a server (switched-off ones included).
     pub fn info(&self, key: &str) -> Option<ServerInfo> {
         self.snapshot().iter().find(|m| m.key == key).map(Self::describe)

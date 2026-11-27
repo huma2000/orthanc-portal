@@ -344,6 +344,11 @@ pub struct ForwardRule {
     /// Empty = nobody. The email never names the patient.
     #[serde(default)]
     pub notify: String,
+    /// The Orthanc servers whose arrivals it watches, by key (empty = all of them). A study is
+    /// sent by the server it arrived on, to one of ITS destinations; `server:<key>` as the
+    /// target copies it to that other Orthanc server instead.
+    #[serde(default)]
+    pub servers: Vec<String>,
 }
 
 /// A named bundle of permissions, offered as a shortcut when editing a user.
@@ -1312,6 +1317,7 @@ impl Settings {
             rule.institution = rule.institution.trim().to_string();
             rule.description = rule.description.trim().to_string();
             rule.target = rule.target.trim().to_string();
+            tidy_server_keys(&mut rule.servers);
             rule.notify = match crate::mailer::parse_recipients(&rule.notify) {
                 Ok(to) => crate::mailer::addresses(&to),
                 Err(_) => rule.notify.trim().to_string(), // empty, or refused by validate()
@@ -1722,6 +1728,26 @@ impl Settings {
             if !rule.notify.is_empty() {
                 if let Err(e) = crate::mailer::parse_recipients(&rule.notify) {
                     return bad(format!("The rule '{}': {e}", rule.name));
+                }
+            }
+            let known = self.servers();
+            let exists = |key: &str| known.iter().any(|s| s.key == key);
+            if let Some(key) = rule.servers.iter().find(|k| !exists(k)) {
+                return bad(format!(
+                    "The rule '{}' watches the Orthanc server '{key}', which does not exist (a server a rule uses can \
+                     only be removed once the rule no longer uses it)",
+                    rule.name
+                ));
+            }
+            if let Some(key) = rule.target.strip_prefix("server:") {
+                if !exists(key) {
+                    return bad(format!(
+                        "The rule '{}' copies to the Orthanc server '{key}', which does not exist",
+                        rule.name
+                    ));
+                }
+                if rule.servers.len() == 1 && rule.servers[0] == key {
+                    return bad(format!("The rule '{}' copies studies to the server it watches", rule.name));
                 }
             }
             if rule.labels.len() > 20 || rule.labels.iter().any(|l| !crate::routes::labels::valid_label(l)) {

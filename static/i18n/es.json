@@ -1436,7 +1436,12 @@
   "The portal copies every image from one server to the other. Images the other server already has are kept as they are.": "El portal copia cada imagen de un servidor al otro. Las imágenes que el otro servidor ya tiene se quedan como están.",
   "{n} images copied in {time}": "{n} imágenes copiadas en {time}",
   "Upload to": "Subir a",
-  "Store the studies in": "Guardar los estudios en"
+  "Store the studies in": "Guardar los estudios en",
+  "DICOM destinations (of each server)": "Destinos DICOM (de cada servidor)",
+  "DICOM destinations": "Destinos DICOM",
+  "Copy to another Orthanc server": "Copiar a otro servidor Orthanc",
+  "(none ticked = all)": "(ninguno marcado = todos)",
+  "Watch servers": "Vigilar servidores"
  },
  "messages": {
   "A label can have 1 to 64 letters, digits, '-' or '_' (no spaces or accents)": "Una etiqueta puede tener de 1 a 64 letras, cifras, «-» o «_» (sin espacios ni tildes)",
@@ -1734,6 +1739,9 @@
   "The study is already on that server": "El estudio ya está en ese servidor",
   "This study has no images to copy": "Este estudio no tiene imágenes que copiar",
   "{failed} of {total} images could not be copied: {error}": "{failed} de {total} imágenes no se pudieron copiar: {error}",
-  "Copied, but the original could not be deleted: {error}": "Copiado, pero no se pudo borrar el original: {error}"
+  "Copied, but the original could not be deleted: {error}": "Copiado, pero no se pudo borrar el original: {error}",
+  "The rule '{rule}' watches the Orthanc server '{key}', which does not exist (a server a rule uses can only be removed once the rule no longer uses it)": "La regla «{rule}» vigila el servidor Orthanc «{key}», que no existe (un servidor que usa una regla solo se puede quitar cuando la regla deja de usarlo)",
+  "The rule '{rule}' copies to the Orthanc server '{key}', which does not exist": "La regla «{rule}» copia al servidor Orthanc «{key}», que no existe",
+  "The rule '{rule}' copies studies to the server it watches": "La regla «{rule}» copia los estudios al mismo servidor que vigila"
  }
 }
