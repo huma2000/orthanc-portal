@@ -3002,7 +3002,8 @@ function buildEmailOptions(canIncludePassword, newLink = false) {
   const details = h("div", { class: "email-details", hidden: true },
     h("label", null, "To", to),
     h("label", null, "Message (optional)", message),
-    h("label", { class: "check" }, withPassword, "Include the password in the email"),
+    h("label", { class: "check" }, withPassword,
+      (state.user.features.share || {}).email_split ? "Include the password (in a separate email, without the link)" : "Include the password in the email"),
     passwordHint);
   function refresh() {
     details.hidden = !send.checked;
@@ -3013,7 +3014,9 @@ function buildEmailOptions(canIncludePassword, newLink = false) {
     passwordHint.textContent = t(!possible
       ? "This link's password is not kept, so it cannot go in the email: tick \"Give the link a new password\" to include one."
       : withPassword.checked
-        ? "Anyone who can read this email can open the study. Safer: leave it out and give the password by phone or text message."
+        ? ((state.user.features.share || {}).email_split
+          ? "The link and the password go in two emails: one of them alone does not open the study. Safest: give the password by phone or text message."
+          : "Anyone who can read this email can open the study. Safer: leave it out and give the password by phone or text message.")
         : "The email says the password will be given separately (by phone or text message): safer.");
   }
   send.addEventListener("change", () => { refresh(); if (send.checked) to.focus(); });
@@ -3031,6 +3034,12 @@ function buildEmailOptions(canIncludePassword, newLink = false) {
 /** One line about the email sent with a link (answer of the server), or null. */
 function emailOutcome(email) {
   if (!email) return null;
+  const pw = email.password_email;
+  if (email.sent && pw) {
+    return pw.sent
+      ? h("p", { class: "notice" }, t("Invitation emailed to {to}, and the password in a separate email.", { to: email.to }))
+      : h("p", { class: "form-error" }, t("The invitation was emailed to {to}, but the email with the password was not sent: {error}", { to: email.to, error: translateMessage(pw.error) }));
+  }
   return email.sent
     ? h("p", { class: "notice" }, t("Invitation emailed to {to}.", { to: email.to }))
     : h("p", { class: "form-error" }, t("The link is ready, but the email to {to} was not sent: {error}", { to: email.to, error: translateMessage(email.error) }));
@@ -4151,6 +4160,8 @@ const SETTINGS_FIELDS = {
       hint: "In the Share window and the Shares list, to print on a handout. A QR code never contains the password." },
     { key: "share_notify", label: "Offer \"Email me when the link is opened or downloaded\"", type: "checkbox", wide: true,
       hint: "Also \"Email me when files arrive\" of upload links. Needs the mail server below and an email address on the person's account (My account, or Users). The emails name the link, never the patient. Switching it off also stops the notices already asked for." },
+    { key: "share_email_split_password", label: "Send the password in a separate email", type: "checkbox", wide: true,
+      hint: "When staff include the password in the invitation of a share or upload link, it goes in a second email without the link, so a single intercepted or misdirected email does not open the study. For every link of the portal." },
     { key: "share_email_default", label: "Tick \"Send the invitation by email\" by default", type: "checkbox", wide: true,
       hint: "In the windows that create a share or upload link. Staff then type the address, or untick it to give the link by hand. Needs the mail server below; editing an existing link never emails unless ticked." },
   ],

@@ -734,6 +734,15 @@ changed; if the mail server then fails, the link is kept and the window says why
 email is recorded in the audit log (`share_emailed`, with or without the password). Without a mail server
 nothing is ever sent and the windows say how to set one up.
 
+**The password in a separate email** (*Settings > Share links > Send the password in a separate email*, off by
+default, for every link of the portal). When staff include the password, the invitation of a share or upload
+link goes out as **two emails**: the first with the link (it says the password follows), the second with the
+password and **without the link**, so one intercepted or misdirected email alone does not open the study. The
+second is only sent when the first was; the window says what happened to each (`email.password_email:
+{ sent, error? }` in the API), and both are in the audit log (`share_password_emailed`,
+`upload_link_password_emailed`). Each counts towards the hourly email limit. Giving the password by phone or
+text message is still the safest.
+
 **Email through Microsoft 365 (OAuth 2.0).** Microsoft 365 / Exchange Online no longer accepts a user name and
 password for sending mail (SMTP), so the portal signs in with **OAuth 2.0** instead: an app registered in your
 Microsoft Entra ID gets a token with its client secret (no person signs in) and sends as one mailbox, with the

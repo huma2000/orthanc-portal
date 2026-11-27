@@ -174,13 +174,17 @@ pub async fn create(
     let emailed = match email {
         Some(email) => {
             let to_text = mailer::addresses(&email.to);
+            // The password in a second email, without the link (Settings > Share links).
+            let split = email.include_password && settings.share_email_split_password;
+            let to = email.to.clone();
             let invitation = UploadInvitation {
                 portal_name: &settings.portal_name,
                 sender: &user.username,
                 url: &url,
                 minutes_left: minutes,
                 max_mb: max_mb as i64,
-                password: email.include_password.then_some(password.as_str()),
+                password: (email.include_password && !split).then_some(password.as_str()),
+                password_follows: split,
                 message: &email.message,
                 footer: &settings.email_footer,
                 language: settings.language,
@@ -188,7 +192,20 @@ pub async fn create(
             Some(match mailer::send(&settings, email.to, &invitation.subject(), &invitation.body()).await {
                 Ok(()) => {
                     state.db.audit(&user.username, "upload_link_emailed", &format!("#{} to {to_text}", link.id));
-                    json!({ "sent": true, "to": to_text })
+                    let mut answer = json!({ "sent": true, "to": to_text });
+                    if split {
+                        answer["password_email"] = crate::routes::shares::send_password_email(
+                            &state,
+                            &settings,
+                            &user.username,
+                            to,
+                            &password,
+                            true,
+                            &format!("#{}", link.id),
+                        )
+                        .await;
+                    }
+                    answer
                 }
                 Err(error) => json!({ "sent": false, "to": to_text, "error": error }),
             })

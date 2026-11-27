@@ -181,6 +181,14 @@ ok "...who cannot create one (403)" "$(code $F $V POST /api/upload-links -H "$J"
 ok "a link above the size limit is refused (400)" "$(code $F $D POST /api/upload-links -H "$J" -d '{"max_mb":999999}')" "400"
 UL=$(body $F $D /api/upload-links -X POST -H "$J" -d '{"max_mb":1,"note":"Mrs Doe previous MRI","notify":true}')
 UT=$(echo "$UL" | py "d['url'].rsplit('/u/',1)[1]"); UP=$(echo "$UL" | py "d['password']"); UID2=$(echo "$UL" | py "d['id']")
+# An upload link whose password goes in its own email (Settings > Share links).
+put $A '{"share_email_split_password":true}' > /dev/null
+C0=$(mailcount)
+ULM=$(body $F $D /api/upload-links -X POST -H "$J" -d '{"max_mb":1,"email":{"to":"clinic@example.org","include_password":true}}')
+ok "an upload link emailed with its password apart: two emails" "$(echo "$ULM" | py "(d['email']['sent'], d['email']['password_email']['sent'])")/$(( $(mailcount) - C0 ))" "(True, True)/2"
+has "...the last one has the password" "$(lastmail)" "$(echo "$ULM" | py "d['password']")"
+hasnt "...and not the link" "$(lastmail)" "$(echo "$ULM" | py "d['url']")"
+put $A '{"share_email_split_password":false}' > /dev/null
 has "created: a link to the internet side" "$(echo "$UL" | py "d['url']")" "https://pacs.example.com/u/"
 ok "...with the default label" "$(echo "$UL" | py "d['label']")" "received"
 ok "the page exists on the internet listener" "$(curl -s -o /dev/null -w '%{http_code}' $G/u/$UT)" "200"
@@ -262,7 +270,7 @@ ST=$(body $F $A /api/admin/stats)
 ok "twelve months" "$(echo "$ST" | py "len(d['months'])")" "12"
 ok "...the archive's size" "$(echo "$ST" | py "d['storage']['studies']")" "1"
 ok "...links created this month" "$(echo "$ST" | py "d['links']['shares_created'][-1] >= 3")" "True"
-ok "...upload links" "$(echo "$ST" | py "d['links']['upload_links_created'][-1]")" "1"
+ok "...upload links" "$(echo "$ST" | py "d['links']['upload_links_created'][-1]")" "2"
 ok "...who shares most" "$(echo "$ST" | py "d['top']['sharers'][0]['user']")" "doctor"
 ok "Orthanc counted the months" "$(grep -c StudyDate $WORK/count.log | awk '{print ($1 >= 12)}')" "1"
 ok "administrators only (403)" "$(code $F $D GET /api/admin/stats)" "403"

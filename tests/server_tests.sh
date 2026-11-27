@@ -358,6 +358,30 @@ MAIL=$(lastmail)
 has "...it says it was updated" "$MAIL" "has updated your link"
 has "...with the new time" "$MAIL" "1 hour 30 minutes"
 has "...and the kept password" "$MAIL" "Password: $M2PW"
+# The password in a separate email (Settings > Share links): the link's email, then the password's.
+nthmail() { python3 - "$WORK/mail" "$1" <<'PY'
+import sys, glob
+from email import message_from_bytes, policy
+files = sorted(glob.glob(sys.argv[1] + "/*.eml"))
+m = message_from_bytes(open(files[int(sys.argv[2])], "rb").read(), policy=policy.default)
+print(m["Subject"]); print(m.get_body(("plain",)).get_content())
+PY
+}
+put $A '{"share_email_split_password":true}' > /dev/null
+C0=$(ls "$WORK"/mail/*.eml | wc -l)
+M3=$(mkshare $SH '{"email":{"to":"a@example.org","include_password":true}}')
+M3PW=$(echo "$M3" | py "d['password']"); M3URL=$(echo "$M3" | py "d['url']")
+ok "password in a separate email: two emails, both sent" "$(echo "$M3" | py "(d['email']['sent'], d['email']['password_email']['sent'])")/$(( $(ls "$WORK"/mail/*.eml | wc -l) - C0 ))" "(True, True)/2"
+LINKMAIL=$(nthmail -2); PWMAIL=$(nthmail -1)
+has "...the first has the link" "$LINKMAIL" "$M3URL"
+hasnt "...but not the password" "$LINKMAIL" "$M3PW"
+has "...and says it comes in another email" "$LINKMAIL" "comes in a separate email"
+has "...the second has the password" "$PWMAIL" "$M3PW"
+hasnt "...but not the link" "$PWMAIL" "$M3URL"
+has "...and is in the audit log" "$(body $F $A /api/admin/audit)" "share_password_emailed"
+C0=$(ls "$WORK"/mail/*.eml | wc -l)
+ok "...without the password asked for: one email only" "$(mkshare $SH '{"email":{"to":"a@example.org"}}' | py "'password_email' in d['email']")/$(( $(ls "$WORK"/mail/*.eml | wc -l) - C0 ))" "False/1"
+put $A '{"share_email_split_password":false}' > /dev/null
 put $A '{"language":"es"}' > /dev/null
 ok "with the portal in Spanish (Settings > Appearance)..." "$(body $F $SH /api/shares/$M2ID -X PUT -H "$J" -d '{"email":{"to":"a@example.org"}}' | py "d['email']['sent']")" "True"
 MAIL=$(lastmail)

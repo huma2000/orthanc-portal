@@ -1480,7 +1480,13 @@
   "Built from the source code in {folder}.": "Compilado a partir del código fuente en {folder}.",
   "Installed as a program file: {file}.": "Instalado como archivo de programa: {file}.",
   "How to update this installation to {version}:": "Cómo actualizar esta instalación a {version}:",
-  "How to update this installation": "Cómo actualizar esta instalación"
+  "How to update this installation": "Cómo actualizar esta instalación",
+  "Include the password (in a separate email, without the link)": "Incluir la contraseña (en otro correo, sin el enlace)",
+  "The link and the password go in two emails: one of them alone does not open the study. Safest: give the password by phone or text message.": "El enlace y la contraseña van en dos correos: uno solo no abre el estudio. Lo más seguro: dar la contraseña por teléfono o SMS.",
+  "Send the password in a separate email": "Enviar la contraseña en otro correo",
+  "When staff include the password in the invitation of a share or upload link, it goes in a second email without the link, so a single intercepted or misdirected email does not open the study. For every link of the portal.": "Cuando el personal incluye la contraseña en la invitación de un enlace para compartir o para subir, va en un segundo correo sin el enlace, de modo que un solo correo interceptado o enviado por error no abre el estudio. Para todos los enlaces del portal.",
+  "Invitation emailed to {to}, and the password in a separate email.": "Invitación enviada a {to}, y la contraseña en otro correo.",
+  "The invitation was emailed to {to}, but the email with the password was not sent: {error}": "La invitación se envió a {to}, pero el correo con la contraseña no se envió: {error}"
  },
  "messages": {
   "A label can have 1 to 64 letters, digits, '-' or '_' (no spaces or accents)": "Una etiqueta puede tener de 1 a 64 letras, cifras, «-» o «_» (sin espacios ni tildes)",

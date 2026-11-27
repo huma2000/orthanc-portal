@@ -338,6 +338,8 @@ pub struct Invitation<'a> {
     pub downloads_left: i64,
     /// `Some` = included in the email (ticked by the staff member).
     pub password: Option<&'a str>,
+    /// The password is sent in a second email (Settings > Share links): this one says so.
+    pub password_follows: bool,
     /// Optional personal message of the staff member.
     pub message: &'a str,
     /// The link was changed (more time, downloads, a new password), not just created.
@@ -364,6 +366,7 @@ struct Words {
     download_times: &'static str,
     password: &'static str,
     password_separately: &'static str,
+    password_follows: &'static str,
     sent_by: &'static str,
 }
 
@@ -382,6 +385,7 @@ const ENGLISH: Words = Words {
     password: "Password: {password}\n(capital letters, spaces and dashes do not matter)",
     password_separately:
         "You need a password to open it. It will be given to you separately (for example by phone or text message).",
+    password_follows: "You need a password to open it: it comes in a separate email.",
     sent_by: "This email was sent by {portal}. If you were not expecting it, you can ignore it.",
 };
 
@@ -400,6 +404,7 @@ const SPANISH: Words = Words {
     password: "Contraseña: {password}\n(no importan las mayúsculas, los espacios ni los guiones)",
     password_separately:
         "Necesita una contraseña para abrirlo. Se le facilitará por separado (por ejemplo, por teléfono o por SMS).",
+    password_follows: "Necesita una contraseña para abrirlo: le llegará en otro correo.",
     sent_by: "Este correo lo ha enviado {portal}. Si no lo esperaba, puede ignorarlo.",
 };
 
@@ -441,9 +446,10 @@ impl Invitation<'_> {
             n => w.download_times.replace("{n}", &n.to_string()),
         };
         text += "\n\n";
-        text += &match self.password {
-            Some(p) => w.password.replace("{password}", p),
-            None => w.password_separately.to_string(),
+        text += &match (self.password, self.password_follows) {
+            (_, true) => w.password_follows.to_string(),
+            (Some(p), false) => w.password.replace("{password}", p),
+            (None, false) => w.password_separately.to_string(),
         };
         text += &format!("\n\n{}\n", self.fill(w.sent_by));
         if !self.footer.is_empty() {
@@ -527,6 +533,8 @@ pub struct UploadInvitation<'a> {
     pub minutes_left: u64,
     pub max_mb: i64,
     pub password: Option<&'a str>,
+    /// The password is sent in a second email (Settings > Share links): this one says so.
+    pub password_follows: bool,
     pub message: &'a str,
     pub footer: &'a str,
     pub language: Language,
@@ -563,6 +571,10 @@ impl UploadInvitation<'_> {
             ),
         };
         text += &match (self.password, self.language) {
+            _ if self.password_follows => match self.language {
+                Language::En => "You need a password to open it: it comes in a separate email.".into(),
+                Language::Es => "Necesita una contraseña para abrirlo: le llegará en otro correo.".into(),
+            },
             (Some(pw), Language::En) => format!("Password: {pw}\n(capital letters, spaces and dashes do not matter)"),
             (Some(pw), Language::Es) => {
                 format!("Contraseña: {pw}\n(no importan las mayúsculas, los espacios ni los guiones)")
@@ -581,6 +593,68 @@ impl UploadInvitation<'_> {
         }
         text
     }
+}
+
+/// The second email when the password travels apart from the link (Settings > Share links >
+/// "Send the password in a separate email"): (subject, body). It holds the password and NOT the
+/// link, so one intercepted email alone does not open the study. `upload` = an upload link.
+pub fn password_email(
+    portal: &str,
+    sender: &str,
+    password: &str,
+    upload: bool,
+    footer: &str,
+    lang: Language,
+) -> (String, String) {
+    let (subject, body) = match lang {
+        Language::En => (
+            format!("{portal}: the password of your link"),
+            format!(
+                "Hello,
+
+This is the password of the link that {sender} at {portal} sent you in another email{}:
+
+  {password}
+
+(capital letters, spaces and dashes do not matter)
+
+It only works with that link. If you did not receive the other email, ask {sender}.
+
+This email was sent by {portal}. If you were not expecting it, you can ignore it.
+",
+                if upload { " (to send us images)" } else { " (a shared imaging study)" }
+            ),
+        ),
+        Language::Es => (
+            format!("{portal}: la contraseña de su enlace"),
+            format!(
+                "Hola:
+
+Esta es la contraseña del enlace que {sender}, de {portal}, le ha enviado en otro correo{}:
+
+  {password}
+
+(no importan las mayúsculas, los espacios ni los guiones)
+
+Solo funciona con ese enlace. Si no ha recibido el otro correo, pregunte a {sender}.
+
+Este correo lo ha enviado {portal}. Si no lo esperaba, puede ignorarlo.
+",
+                if upload { " (para enviarnos imágenes)" } else { " (un estudio de imagen compartido)" }
+            ),
+        ),
+    };
+    let body = if footer.is_empty() {
+        body
+    } else {
+        format!(
+            "{body}
+--
+{footer}
+"
+        )
+    };
+    (subject, body)
 }
 
 /// Sends a notice in the background: the person who triggered it (a guest) never waits for the
@@ -780,6 +854,7 @@ mod tests {
             minutes_left: 2880,
             downloads_left: 1,
             password: None,
+            password_follows: false,
             message: "Second opinion please",
             updated: false,
             footer: "1 High Street",
@@ -793,6 +868,39 @@ mod tests {
         assert!(inv.body().contains("Password: ABCD-EFGH-JKLM"));
     }
 
+    /// The password in its own email: the link's email announces it, and holds neither.
+    #[test]
+    fn the_password_can_travel_apart_from_the_link() {
+        let inv = Invitation {
+            portal_name: "Demo",
+            sender: "doctor",
+            url: "https://x/s/abc",
+            minutes_left: 60,
+            downloads_left: 1,
+            password: None,
+            password_follows: true,
+            message: "",
+            updated: false,
+            footer: "",
+            language: Language::En,
+        };
+        let link_mail = inv.body();
+        assert!(link_mail.contains("https://x/s/abc") && link_mail.contains("comes in a separate email"));
+        assert!(!link_mail.contains("Password:"));
+        let (subject, body) = password_email("Demo", "doctor", "ABCD-EFGH-JKLM", false, "1 High Street", Language::En);
+        assert_eq!(subject, "Demo: the password of your link");
+        assert!(
+            body.contains("ABCD-EFGH-JKLM")
+                && !body.contains("https://")
+                && body.ends_with(
+                    "1 High Street
+"
+                )
+        );
+        let (subject, body) = password_email("Demo", "doctor", "ABCD", true, "", Language::Es);
+        assert!(subject.contains("contraseña") && body.contains("para enviarnos imágenes"));
+    }
+
     #[test]
     fn invitations_can_be_in_spanish() {
         let inv = Invitation {
@@ -802,6 +910,7 @@ mod tests {
             minutes_left: 1500,
             downloads_left: 3,
             password: None,
+            password_follows: false,
             message: "",
             updated: false,
             footer: "",

@@ -549,6 +549,10 @@ pub struct Settings {
     /// upload links). Only matters when a mail server is set up. Off by default.
     #[serde(default)]
     pub share_email_default: bool,
+    /// When the password is emailed with a share or upload link, send it in a SECOND email,
+    /// without the link (Settings > Share links). Off by default.
+    #[serde(default)]
+    pub share_email_split_password: bool,
     /// The Share window offers "every study of this patient, in one link" (also needs `multi_study_shares`).
     #[serde(default = "default_true")]
     pub share_patient: bool,
@@ -1024,6 +1028,7 @@ impl Settings {
             share_anonymize: true,
             share_notify: true,
             share_email_default: false,
+            share_email_split_password: false,
             share_patient: true,
             share_label: true,
             share_qr: true,

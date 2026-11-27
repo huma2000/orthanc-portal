@@ -82,7 +82,9 @@ pub(crate) fn prepare_email(
     }
     let to = mailer::parse_recipients(&req.to).map_err(AppError::BadRequest)?;
     // Counted now, before anything is created: a refused email never leaves a half-made link.
-    mailer::reserve_quota(user, to.len(), now_unix()).map_err(AppError::TooManyRequests)?;
+    // The password in its own email counts as a second email to each recipient.
+    let emails = if req.include_password && settings.share_email_split_password { 2 } else { 1 };
+    mailer::reserve_quota(user, to.len() * emails, now_unix()).map_err(AppError::TooManyRequests)?;
     let message: String = req.message.trim().chars().filter(|c| *c == '\n' || !c.is_control()).take(1000).collect();
     Ok(Some(PreparedEmail { to, message, include_password: req.include_password }))
 }
@@ -104,6 +106,8 @@ async fn send_invitation(
         return json!({ "sent": false, "to": to_text, "error": "The link is not active: give it more time first." });
     }
     let password = if email.include_password { password } else { None };
+    // The password in a second email, without the link (Settings > Share links).
+    let split = password.is_some() && settings.share_email_split_password;
     let url = sharing::share_url(&settings.share_public_url, &share.token);
     let invitation = Invitation {
         portal_name: &settings.portal_name,
@@ -112,19 +116,60 @@ async fn send_invitation(
         // Rounded up: a link made for 90 minutes says "1 hour 30 minutes", not 29.
         minutes_left: ((share.expires_at - now + 59) / 60).max(1) as u64,
         downloads_left: share.downloads_left(),
-        password,
+        password: if split { None } else { password },
+        password_follows: split,
         message: &email.message,
         updated,
         footer: &settings.email_footer,
         language: settings.language,
     };
+    let to = email.to.clone();
     match mailer::send(settings, email.to, &invitation.subject(), &invitation.body()).await {
         Ok(()) => {
-            let with = if password.is_some() { "with the password" } else { "without the password" };
+            let with = match (password.is_some(), split) {
+                (true, true) => "the password in a separate email",
+                (true, false) => "with the password",
+                _ => "without the password",
+            };
             state.db.audit(sender, "share_emailed", &format!("#{} to {to_text} ({with})", share.id));
-            json!({ "sent": true, "to": to_text })
+            let mut answer = json!({ "sent": true, "to": to_text });
+            if let (true, Some(password)) = (split, password) {
+                answer["password_email"] =
+                    send_password_email(state, settings, sender, to, password, false, &format!("#{}", share.id)).await;
+            }
+            answer
         }
+        // The link's email did not go out: the password's is not sent either.
         Err(error) => json!({ "sent": false, "to": to_text, "error": error }),
+    }
+}
+
+/// The password's own email (after the link's): `{ sent, error? }`, and recorded.
+pub(crate) async fn send_password_email(
+    state: &AppState,
+    settings: &Settings,
+    sender: &str,
+    to: Vec<Mailbox>,
+    password: &str,
+    upload: bool,
+    link: &str,
+) -> Value {
+    let to_text = mailer::addresses(&to);
+    let (subject, body) = mailer::password_email(
+        &settings.portal_name,
+        sender,
+        password,
+        upload,
+        &settings.email_footer,
+        settings.language,
+    );
+    match mailer::send(settings, to, &subject, &body).await {
+        Ok(()) => {
+            let action = if upload { "upload_link_password_emailed" } else { "share_password_emailed" };
+            state.db.audit(sender, action, &format!("{link} to {to_text}"));
+            json!({ "sent": true })
+        }
+        Err(error) => json!({ "sent": false, "error": error }),
     }
 }
 

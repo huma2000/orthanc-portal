@@ -39,6 +39,8 @@ pub struct ShareFeature {
     email: bool,
     /// "Send the invitation by email" starts ticked when a new link is created.
     email_default: bool,
+    /// An emailed password goes in a second email, without the link (Settings > Share links).
+    email_split: bool,
     /// "Share an anonymized copy" is offered.
     anonymize: bool,
     /// "Email me when the link is opened or downloaded" is offered (mail server + an address on the account).
@@ -193,6 +195,7 @@ async fn me_response(state: &AppState, user: User) -> Me {
         max_downloads: settings.share_max_downloads,
         email: settings.email_configured(),
         email_default: settings.email_configured() && settings.share_email_default,
+        email_split: settings.share_email_split_password,
         anonymize: settings.share_anonymize,
         notify: settings.share_notify && settings.email_configured(),
         patient: settings.multi_study_shares && settings.share_patient,
