@@ -160,7 +160,12 @@ the section in brackets has the details.
   connection**; against an older server, or an index without the `HasExtendedFind` capability, it logs an
   error and shows a red notice to administrators (it keeps running, so you can fix the address in Settings).
   There is no compatibility code for old versions. The latest release is recommended.
-* Orthanc **DICOMweb plugin** (Weasis and OHIF both need it).
+* Orthanc **DICOMweb plugin** (Weasis and OHIF both need it). Releases after 1.24 also need
+  `"AllowedHosts": ["*"]` (or the list of the portal's host names) in the `"DicomWeb"` section of
+  `orthanc.json`: the portal tells the plugin the address people use, and without that option the plugin
+  refuses it ("Unable to trust the forwarded HTTP headers") and the viewers show no images. Older releases
+  ignore the option, so it can be added now. **Test connection** says so when it is missing. The latest
+  plugin (1.24) needs Orthanc 1.13.0 or newer.
 * Orthanc **OHIF plugin**, configured with `"DataSource": "dicom-web"` (optional; without it the
   portal simply hides the browser-viewer button). The official `jodogne/orthanc-plugins` and
   `orthancteam/orthanc` Docker images include these plugins.
@@ -235,7 +240,7 @@ docker compose up -d --build
 
 What the Orthanc is already set up with (`deploy/orthanc.json`, official `jodogne/orthanc-plugins` image):
 the account the portal uses (its password is read from `ORTHANC_PORTAL_PASSWORD` in `.env`: there is no default
-password, and nothing to edit in `orthanc.json`), the **DICOMweb** plugin and the **OHIF** plugin with the `dicom-web` data source,
+password, and nothing to edit in `orthanc.json`), the **DICOMweb** plugin (with `"AllowedHosts": ["*"]`, see above) and the **OHIF** plugin with the `dicom-web` data source,
 DICOM nodes kept in its database (so the ones you add in the portal survive a restart), DICOM port `4242`
 published for your scanners (`DICOM_PORT` in `.env`; remove that line if nothing sends images by DICOM) and its web port `8042`
 **not published**: only the portal can reach it. Images and index live in the `orthanc-db` volume (**back it
@@ -1287,6 +1292,7 @@ plugin, a real Weasis or a real DICOM destination here, and the compose files we
 | Search error mentioning `Limit`/`Since` or a tag | Orthanc refused that filter for your index; the message comes from Orthanc |
 | No "OHIF" button | OHIF plugin not loaded (see `GET /plugins` on Orthanc), or switched off in *Settings > General > Viewers and uploads* |
 | No "Weasis" button | Switched off in *Settings > General > Viewers and uploads* |
+| OHIF or Weasis shows no images; "Orthanc's DICOMweb plugin does not trust the address..." | DICOMweb plugin after 1.24 without `AllowedHosts`: add `"AllowedHosts": ["*"]` to the `"DicomWeb"` section of `orthanc.json` and restart Orthanc |
 | OHIF opens but shows no images / 404 on `/studies/...` | The plugin uses its default `dicom-json` data source: set `"OHIF": {"DataSource": "dicom-web"}` |
 | OHIF page stays blank | Check the browser console for blocked resources; OHIF pages use the relaxed policy in `security_headers` (`src/routes/mod.rs`) |
 | Weasis starts but shows no images | DICOMweb plugin disabled; or the workstation cannot reach the portal address in the link; or the token expired (click View again) |

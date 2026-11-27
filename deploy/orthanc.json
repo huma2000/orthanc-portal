@@ -58,7 +58,15 @@
     "Enable": true,
     "Root": "/dicom-web/",
     "EnableWado": true,
-    "WadoRoot": "/wado"
+    "WadoRoot": "/wado",
+    // The viewers reach these images through the portal under the portal's own address
+    // (an intranet name or IP, the Cloudflare hostname...). The portal tells the plugin
+    // that address, and the plugin writes it in the links of its answers. DICOMweb
+    // releases after 1.24 only accept it from a list of trusted host names, and answer
+    // "Unable to trust the forwarded HTTP headers" otherwise. Port 8042 is not published
+    // (see docker-compose.yml): only the portal talks to Orthanc, so every name is trusted.
+    // Older releases of the plugin ignore this option.
+    "AllowedHosts": ["*"]
   },
 
   // ----- OHIF web viewer -----

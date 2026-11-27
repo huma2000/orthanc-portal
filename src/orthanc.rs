@@ -57,6 +57,15 @@ const JSON_TIMEOUT: Duration = Duration::from_secs(60);
 /// Oldest supported Orthanc: the release that introduced the extended find API.
 pub const MIN_VERSION: (u32, u32, u32) = (1, 12, 5);
 
+/// What to do when the DICOMweb plugin refuses the address the viewers use. Releases after 1.24
+/// only trust forwarded host names listed in `AllowedHosts`, and answer HTTP 500 otherwise.
+pub const ALLOWED_HOSTS_ADVICE: &str = "Orthanc's DICOMweb plugin does not trust the address the viewers use, so they show no images: add \"AllowedHosts\": [\"*\"] to the \"DicomWeb\" section of orthanc.json (or list the portal's host names) and restart Orthanc";
+
+/// The plugin's refusal of a forwarded host name (see [`ALLOWED_HOSTS_ADVICE`]).
+fn is_untrusted_host_error(body: &str) -> bool {
+    body.contains("AllowedHosts") || body.contains("Unable to trust the forwarded HTTP headers")
+}
+
 /// How long the list of loaded plugins is remembered.
 const PLUGINS_TTL: Duration = Duration::from_secs(60);
 
@@ -448,8 +457,13 @@ impl OrthancClient {
         };
         let has = |name: &str| plugins.iter().any(|p| p.to_lowercase().contains(name));
         let modalities = self.modalities_raw().await.map(|m| m.len()).unwrap_or(0);
+        let dicomweb = has("dicom-web") || has("dicomweb");
+        // The viewers reach DICOMweb under the portal's own address: check the plugin accepts one.
+        let untrusted_host = dicomweb && info.supported && self.dicomweb_refuses_forwarded_host().await;
 
-        let message = if info.supported {
+        let message = if untrusted_host {
+            ALLOWED_HOSTS_ADVICE.to_string()
+        } else if info.supported {
             match self.account() {
                 Some(user) => format!("Connected to Orthanc {} with the account '{user}'", info.version),
                 None => format!("Connected to Orthanc {} without an account", info.version),
@@ -461,15 +475,35 @@ impl OrthancClient {
             )
         };
         Diagnosis {
-            ok: info.supported,
+            ok: info.supported && !untrusted_host,
             message,
             version: Some(info.version),
             supported: info.supported,
             account: self.account(),
-            dicomweb: has("dicom-web") || has("dicomweb"),
+            dicomweb,
             ohif: has("ohif"),
             plugins,
             modalities,
+        }
+    }
+
+    /// Asks the DICOMweb plugin for one study the way a viewer does through the portal, under a
+    /// host name that is not `localhost`. `true` when it refuses that name (no `AllowedHosts`).
+    async fn dicomweb_refuses_forwarded_host(&self) -> bool {
+        const PROBE_HOST: &str = "portal-check.invalid";
+        let answer = self
+            .request(Method::GET, "/dicom-web/studies?limit=1")
+            .header(header::HOST, PROBE_HOST)
+            .header("x-forwarded-host", PROBE_HOST)
+            .header("x-forwarded-proto", "https")
+            .timeout(JSON_TIMEOUT)
+            .send()
+            .await;
+        match answer {
+            Ok(resp) if resp.status() == StatusCode::INTERNAL_SERVER_ERROR => {
+                is_untrusted_host_error(&resp.text().await.unwrap_or_default())
+            }
+            _ => false,
         }
     }
 
@@ -679,6 +713,19 @@ impl OrthancClient {
         // so clearly instead of relaying a 401 that would make the viewer ask the user to log in.
         if matches!(resp.status(), StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
             return Err(AppError::Upstream(self.refusal(resp.status())));
+        }
+        // The DICOMweb plugin refusing the portal's address: say what to change, not "500".
+        if resp.status() == StatusCode::INTERNAL_SERVER_ERROR && path_and_query.starts_with("/dicom-web/") {
+            let body = resp.text().await.unwrap_or_default();
+            if is_untrusted_host_error(&body) {
+                tracing::warn!("{ALLOWED_HOSTS_ADVICE}");
+                return Err(AppError::Upstream(ALLOWED_HOSTS_ADVICE.into()));
+            }
+            let details = serde_json::from_str::<Value>(&body)
+                .ok()
+                .and_then(|v| v["Details"].as_str().or(v["Message"].as_str()).map(str::to_string))
+                .unwrap_or_else(|| "internal error".into());
+            return Err(AppError::Upstream(format!("Orthanc could not answer the viewer: {details}")));
         }
         Ok(resp)
     }
