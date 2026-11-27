@@ -252,6 +252,9 @@ pub struct Install {
     pub exe: String,
     /// Built from source: the folder of the source code.
     pub source_dir: Option<String>,
+    /// Built from source: a debug build (`target/debug`), rebuilt with `cargo build`; otherwise a
+    /// release build, rebuilt with `cargo build --release`.
+    pub debug_build: bool,
     /// Started by systemd (Linux service).
     pub systemd: bool,
 }
@@ -288,11 +291,23 @@ pub fn detect(
                 && d.len() <= 100
                 && d.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'))
         });
-        return Install { kind: "docker", os, compose_dir, exe: exe_text, source_dir: None, systemd: false };
+        return Install {
+            kind: "docker",
+            os,
+            compose_dir,
+            exe: exe_text,
+            source_dir: None,
+            debug_build: false,
+            systemd: false,
+        };
     }
-    // The program is in `<source>/target/.../release/`: walk up to `target`, keeping the path as written.
-    let release = exe.ancestors().find(|a| a.file_name().is_some_and(|n| n == "release"));
-    let target = release.and_then(|r| r.ancestors().find(|a| a.file_name().is_some_and(|n| n == "target")));
+    // Built by cargo: the program is in `<source>/target/<profile>/` (`target/debug`, `target/release`,
+    // or deeper with a CARGO_TARGET_DIR of its own). `target` must be ABOVE the program's folder: a
+    // program file put directly in a folder called "target" is not a build. The path is kept as written.
+    let profile = exe.parent();
+    let target = profile
+        .and_then(|p| p.parent())
+        .and_then(|above| above.ancestors().find(|a| a.file_name().is_some_and(|n| n == "target")));
     if let Some(source) = target.and_then(|t| t.parent()) {
         return Install {
             kind: "source",
@@ -300,10 +315,11 @@ pub fn detect(
             compose_dir: None,
             exe: exe_text,
             source_dir: Some(source.display().to_string()),
+            debug_build: profile.and_then(|p| p.file_name()).is_some_and(|n| n == "debug"),
             systemd,
         };
     }
-    Install { kind: "binary", os, compose_dir: None, exe: exe_text, source_dir: None, systemd }
+    Install { kind: "binary", os, compose_dir: None, exe: exe_text, source_dir: None, debug_build: false, systemd }
 }
 
 /// This copy's installation.
@@ -348,7 +364,11 @@ pub fn instructions(install: &Install, release: Option<&Release>) -> Vec<Step> {
         vec![
             step("Go to the folder of the source code:", Some(cd)),
             step(format!("Get {version}:"), Some("git pull".into())),
-            step("Build it (the first time after an update takes a few minutes):", Some("cargo build --release".into())),
+            // The same kind of build as the one running now, so restarting it runs the new version.
+            step(
+                "Build it (the first time after an update takes a few minutes):",
+                Some(if install.debug_build { "cargo build" } else { "cargo build --release" }.into()),
+            ),
             restart(install),
             step("Users, settings, links and studies are kept: they are in the database and in Orthanc, not in the program.", None),
         ]
@@ -524,6 +544,12 @@ mod tests {
         );
         let work = detect(false, None, Path::new("/src/p/target/work/release/orthanc-portal"), "linux", false);
         assert_eq!(work.source_dir.as_deref(), Some("/src/p"), "a target folder of its own (CARGO_TARGET_DIR)");
+        // A debug build (cargo run): built from source too, and rebuilt the same way.
+        let debug = detect(false, None, Path::new("/src/p/target/debug/orthanc-portal"), "linux", false);
+        assert_eq!((debug.kind, debug.source_dir.as_deref(), debug.debug_build), ("source", Some("/src/p"), true));
+        assert!(commands(&instructions(&debug, None)).contains(&"cargo build".to_string()));
+        // A program file put directly in a folder called "target" is not a build.
+        assert_eq!(detect(false, None, Path::new("/srv/target/orthanc-portal"), "linux", false).kind, "binary");
 
         // A program from a release, on Windows: its zip, the checksum, replace the file.
         let binary = detect(false, None, Path::new("C:/Portal/orthanc-portal.exe"), "windows", false);
