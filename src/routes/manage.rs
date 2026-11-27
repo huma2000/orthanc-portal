@@ -20,9 +20,11 @@ use crate::auth::AuthUser;
 use crate::db::User;
 use crate::error::{AppError, AppResult};
 use crate::models::StudySummary;
+use crate::orthanc::OrthancClient;
 use crate::permissions::Permission;
+use crate::servers::ResourceRef;
 use crate::state::AppState;
-use crate::util::{feature, orthanc_id};
+use crate::util::feature;
 use axum::extract::{Path, State};
 use axum::Json;
 use serde::Deserialize;
@@ -114,19 +116,21 @@ fn replacements(level: Level, replace: &BTreeMap<String, String>) -> AppResult<M
 /// Starts a modify / anonymize job and records it.
 async fn run_job(
     state: &AppState,
+    on: (&OrthancClient, &ResourceRef),
     user: &User,
     path: &str,
     body: Value,
     audit: (&str, String),
 ) -> AppResult<Json<Value>> {
-    let job = state.orthanc.start_job(path, &body).await?;
+    let (orthanc, resource) = on;
+    let job = resource.sibling(&orthanc.start_job(path, &body).await?).compound();
     state.db.audit(&user.username, audit.0, &format!("{} (job {job})", audit.1));
     Ok(Json(json!({ "job_id": job })))
 }
 
 /// A short description of a study for the audit log.
-async fn describe_study(state: &AppState, id: &str) -> String {
-    match state.orthanc.get_json(&format!("/studies/{id}")).await {
+async fn describe_study(orthanc: &OrthancClient, id: &str) -> String {
+    match orthanc.get_json(&format!("/studies/{id}")).await {
         Ok(v) => {
             let s = StudySummary::from_orthanc(&v);
             format!("{id} ({} | {} | {})", s.patient_name.replace('^', " "), s.study_date, s.study_description)
@@ -135,16 +139,26 @@ async fn describe_study(state: &AppState, id: &str) -> String {
     }
 }
 
+/// The Orthanc ID of another study named in the request, which must be on the same server.
+fn same_server(resource: &ResourceRef, raw: &str) -> AppResult<String> {
+    let other = ResourceRef::parse(raw)?;
+    if other.server != resource.server {
+        return Err(AppError::BadRequest("Both studies must be on the same Orthanc server".into()));
+    }
+    Ok(other.id)
+}
+
 // --------------------------------------------------------------------------- delete
 
 async fn delete(state: AppState, user: User, level: Level, id: String) -> AppResult<Json<Value>> {
     user.require_or_admin(Permission::Delete)?;
     feature(state.settings.get().allow_delete, "Deleting is switched off")?;
-    orthanc_id(&id)?;
-    let what = if level == Level::Study { describe_study(&state, &id).await } else { id.clone() };
-    state.orthanc.delete(&format!("/{}/{id}", level.path())).await?;
+    let (orthanc, resource) = state.orthancs.resolve(&id)?;
+    let id = resource.id.clone();
+    let what = if level == Level::Study { describe_study(&orthanc, &id).await } else { id.clone() };
+    orthanc.delete(&format!("/{}/{id}", level.path())).await?;
     state.db.audit(&user.username, &format!("delete_{}", level.path()), &what);
-    Ok(Json(json!({ "deleted": id })))
+    Ok(Json(json!({ "deleted": resource.compound() })))
 }
 
 pub async fn delete_study(
@@ -196,13 +210,14 @@ fn modify_body(replace: Map<String, Value>, keep_uids: bool, level: Level) -> Va
 async fn modify(state: AppState, user: User, level: Level, id: String, req: ModifyRequest) -> AppResult<Json<Value>> {
     user.require_or_admin(Permission::Edit)?;
     feature(state.settings.get().allow_modify, "Modifying is switched off")?;
-    orthanc_id(&id)?;
+    let (orthanc, resource) = state.orthancs.resolve(&id)?;
+    let id = resource.id.clone();
     let replace = replacements(level, &req.replace)?;
     let changes =
         replace.iter().map(|(k, v)| format!("{k}={}", v.as_str().unwrap_or(""))).collect::<Vec<_>>().join(", ");
     let path = format!("/{}/{id}/modify", level.path());
     let audit = (if level == Level::Study { "modify_study" } else { "modify_series" }, format!("{id}: {changes}"));
-    run_job(&state, &user, &path, modify_body(replace, req.keep_uids, level), audit).await
+    run_job(&state, (&orthanc, &resource), &user, &path, modify_body(replace, req.keep_uids, level), audit).await
 }
 
 pub async fn modify_study(
@@ -239,12 +254,13 @@ pub async fn move_study(
 ) -> AppResult<Json<Value>> {
     user.require_or_admin(Permission::Edit)?;
     feature(state.settings.get().allow_modify, "Modifying is switched off")?;
-    orthanc_id(&id)?;
-    orthanc_id(&req.patient_from_study)?;
-    if req.patient_from_study == id {
+    let (orthanc, resource) = state.orthancs.resolve(&id)?;
+    let id = resource.id.clone();
+    let other = same_server(&resource, &req.patient_from_study)?;
+    if other == id {
         return Err(AppError::BadRequest("Choose a study of another patient".into()));
     }
-    let target = state.orthanc.get_json(&format!("/studies/{}", req.patient_from_study)).await?;
+    let target = orthanc.get_json(&format!("/studies/{other}")).await?;
     let mut replace = Map::new();
     for tag in PATIENT_TAGS {
         replace.insert(tag.into(), json!(target["PatientMainDicomTags"][tag].as_str().unwrap_or("")));
@@ -253,6 +269,7 @@ pub async fn move_study(
     let path = format!("/studies/{id}/modify");
     run_job(
         &state,
+        (&orthanc, &resource),
         &user,
         &path,
         modify_body(replace, req.keep_uids, Level::Study),
@@ -285,7 +302,8 @@ pub async fn move_series(
 ) -> AppResult<Json<Value>> {
     user.require_or_admin(Permission::Edit)?;
     feature(state.settings.get().allow_modify, "Modifying is switched off")?;
-    orthanc_id(&id)?;
+    let (orthanc, resource) = state.orthancs.resolve(&id)?;
+    let id = resource.id.clone();
     let mut replace = Map::new();
     let target_text = if req.study == "new" {
         let description = req.description.trim();
@@ -294,8 +312,8 @@ pub async fn move_series(
         replace.insert("StudyDescription".into(), json!(description));
         "a new study".to_string()
     } else {
-        orthanc_id(&req.study)?;
-        let target = state.orthanc.get_json(&format!("/studies/{}", req.study)).await?;
+        let other = same_server(&resource, &req.study)?;
+        let target = orthanc.get_json(&format!("/studies/{other}")).await?;
         for tag in PATIENT_TAGS {
             replace.insert(tag.into(), json!(target["PatientMainDicomTags"][tag].as_str().unwrap_or("")));
         }
@@ -306,8 +324,15 @@ pub async fn move_series(
     };
     let body = json!({ "Replace": replace, "Keep": ["SeriesInstanceUID", "SOPInstanceUID"], "KeepSource": false,
                        "Force": true, "Asynchronous": true });
-    run_job(&state, &user, &format!("/series/{id}/modify"), body, ("move_series", format!("{id} -> {target_text}")))
-        .await
+    run_job(
+        &state,
+        (&orthanc, &resource),
+        &user,
+        &format!("/series/{id}/modify"),
+        body,
+        ("move_series", format!("{id} -> {target_text}")),
+    )
+    .await
 }
 
 // ------------------------------------------------------------------------ anonymize
@@ -336,7 +361,8 @@ async fn anonymize(
 ) -> AppResult<Json<Value>> {
     user.require_or_admin(Permission::Edit)?;
     feature(state.settings.get().allow_anonymize, "Anonymizing is switched off")?;
-    orthanc_id(&id)?;
+    let (orthanc, resource) = state.orthancs.resolve(&id)?;
+    let id = resource.id.clone();
     let mut replace = Map::new();
     for (tag, value) in [("PatientName", req.patient_name.trim()), ("PatientID", req.patient_id.trim())] {
         if !value.is_empty() {
@@ -353,6 +379,7 @@ async fn anonymize(
     );
     run_job(
         &state,
+        (&orthanc, &resource),
         &user,
         &path,
         body,
@@ -409,7 +436,8 @@ pub async fn add_series(
 ) -> AppResult<Json<Value>> {
     user.require_or_admin(Permission::Edit)?;
     feature(state.settings.get().allow_add_series, "Adding a series is switched off")?;
-    orthanc_id(&id)?;
+    let (orthanc, resource) = state.orthancs.resolve(&id)?;
+    let id = resource.id.clone();
     if req.files.is_empty() || req.files.len() > 50 {
         return Err(AppError::BadRequest("Choose 1 to 50 files".into()));
     }
@@ -434,8 +462,8 @@ pub async fn add_series(
     };
 
     // The study must exist (and gives the line of the audit log).
-    let what = describe_study(&state, &id).await;
-    state.orthanc.get_json(&format!("/studies/{id}")).await?;
+    let what = describe_study(&orthanc, &id).await;
+    orthanc.get_json(&format!("/studies/{id}")).await?;
 
     let series_uid = new_uid();
     let modality = if pdf { "DOC" } else { "OT" };
@@ -452,7 +480,7 @@ pub async fn add_series(
             },
             "Content": file,
         });
-        state.orthanc.post_json("/tools/create-dicom", &body).await?;
+        orthanc.post_json("/tools/create-dicom", &body).await?;
         created += 1;
     }
     state.db.audit(
@@ -476,17 +504,19 @@ pub async fn job_status(
     if !may {
         return Err(AppError::Forbidden("edit"));
     }
-    if !(id.len() <= 64 && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-')) {
-        return Err(AppError::BadRequest("Invalid job id".into()));
-    }
-    let job = state.orthanc.get_job(&id).await?;
+    let (orthanc, job_ref) = state.orthancs.resolve(&id).map_err(|e| match e {
+        AppError::BadRequest(_) => AppError::BadRequest("Invalid job id".into()),
+        other => other,
+    })?;
+    let job = orthanc.get_job(&job_ref.id).await?;
+    let produced = job["Content"]["ID"].as_str().map(|id| job_ref.sibling(id).compound());
     Ok(Json(json!({
         "state": job["State"],
         "progress": job["Progress"],
         "error": job["ErrorDescription"],
         "type": job["Type"],
         // What the job produced (the new study of a modification...).
-        "id": job["Content"]["ID"],
+        "id": produced,
     })))
 }
 

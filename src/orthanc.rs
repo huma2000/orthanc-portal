@@ -36,7 +36,7 @@
 
 use crate::error::AppError;
 use crate::models::ModalityNode;
-use crate::settings::{OhifMode, Settings};
+use crate::settings::{OhifMode, OrthancServer, Settings};
 use axum::body::Bytes;
 use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use reqwest::header::{self, HeaderMap};
@@ -110,6 +110,12 @@ impl Endpoint {
             Some((settings.orthanc_username.clone(), settings.orthanc_password.0.clone()))
         };
         Self { base_url: settings.orthanc_url.clone(), credentials }
+    }
+
+    fn from_server(server: &OrthancServer) -> Self {
+        let credentials =
+            if server.username.is_empty() { None } else { Some((server.username.clone(), server.password.0.clone())) };
+        Self { base_url: server.url.clone(), credentials }
     }
 
     /// The account name sent to Orthanc, or `None` when the portal connects anonymously.
@@ -194,11 +200,30 @@ impl OrthancClient {
         Self::build(Endpoint { base_url: url.trim().trim_end_matches('/').to_string(), credentials })
     }
 
+    /// A client for one of the other Orthanc servers (`orthanc_servers`).
+    pub fn for_server(server: &OrthancServer) -> Result<Self, AppError> {
+        Self::build(Endpoint::from_server(server))
+    }
+
     /// Points the running client at another Orthanc (or other credentials).
     /// In-flight requests finish against the old one; new requests use the new one.
     pub fn reconfigure(&self, settings: &Settings) {
-        *self.endpoint.write().unwrap_or_else(|e| e.into_inner()) = Endpoint::from_settings(settings);
-        *self.plugins_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        self.set_endpoint(Endpoint::from_settings(settings));
+    }
+
+    /// The same, for one of the other Orthanc servers.
+    pub fn reconfigure_server(&self, server: &OrthancServer) {
+        self.set_endpoint(Endpoint::from_server(server));
+    }
+
+    fn set_endpoint(&self, endpoint: Endpoint) {
+        let mut current = self.endpoint.write().unwrap_or_else(|e| e.into_inner());
+        let same = current.base_url == endpoint.base_url && current.credentials == endpoint.credentials;
+        *current = endpoint;
+        drop(current);
+        if !same {
+            *self.plugins_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
     }
 
     /// Creates a request to `{Orthanc address}{path}` with the Orthanc credentials attached.

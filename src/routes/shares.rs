@@ -35,7 +35,9 @@ use crate::db::{NewShare, Share, SharedStudy};
 use crate::error::{AppError, AppResult};
 use crate::mailer::{self, Invitation};
 use crate::models::StudySummary;
+use crate::orthanc::OrthancClient;
 use crate::permissions::Permission;
+use crate::servers::{compound, ResourceRef};
 use crate::settings::Settings;
 use crate::sharing;
 use crate::state::AppState;
@@ -205,13 +207,13 @@ async fn labelled_studies(state: &AppState, label: &str) -> AppResult<Vec<String
 }
 
 /// Every study of the patient of study `id`, that one first (at most [`MAX_STUDIES_PER_LINK`]).
-async fn patient_studies(state: &AppState, id: &str) -> AppResult<Vec<String>> {
-    let study = state.orthanc.get_json(&format!("/studies/{id}")).await?;
+async fn patient_studies(orthanc: &OrthancClient, id: &str) -> AppResult<Vec<String>> {
+    let study = orthanc.get_json(&format!("/studies/{id}")).await?;
     let patient_id = study["ParentPatient"].as_str().unwrap_or_default().to_string();
     if !is_valid_orthanc_id(&patient_id) {
         return Ok(vec![id.to_string()]);
     }
-    let patient = state.orthanc.get_json(&format!("/patients/{patient_id}")).await?;
+    let patient = orthanc.get_json(&format!("/patients/{patient_id}")).await?;
     let mut ids = vec![id.to_string()];
     for other in patient["Studies"].as_array().into_iter().flatten().filter_map(|v| v.as_str()) {
         if other != id && is_valid_orthanc_id(other) && ids.len() < MAX_STUDIES_PER_LINK {
@@ -222,9 +224,16 @@ async fn patient_studies(state: &AppState, id: &str) -> AppResult<Vec<String>> {
 }
 
 /// Makes anonymized copies of the studies for one link: one made-up patient for all of them
-/// (`ANON-<code>`), the originals untouched. Returns the ids of the copies, in the same order.
-/// If one fails, the copies already made are deleted again.
-async fn anonymized_copies(state: &AppState, ids: &[String], code: &str) -> AppResult<Vec<String>> {
+/// (`ANON-<code>`), the originals untouched. Returns the ids of the copies (`key:id` on another
+/// server than the default one), in the same order. If one fails, the copies already made are
+/// deleted again.
+async fn anonymized_copies(
+    state: &AppState,
+    on: (&OrthancClient, &str),
+    ids: &[String],
+    code: &str,
+) -> AppResult<Vec<String>> {
+    let (orthanc, server) = on;
     let body = json!({
         "Replace": { "PatientName": "ANONYMOUS", "PatientID": format!("ANON-{code}") },
         "KeepSource": true,
@@ -232,12 +241,12 @@ async fn anonymized_copies(state: &AppState, ids: &[String], code: &str) -> AppR
     });
     let mut copies = Vec::with_capacity(ids.len());
     for id in ids {
-        let made = state.orthanc.post_json_long(&format!("/studies/{id}/anonymize"), &body).await;
+        let made = orthanc.post_json_long(&format!("/studies/{id}/anonymize"), &body).await;
         match made.map(|answer| answer["ID"].as_str().unwrap_or_default().to_string()) {
             Ok(copy) if is_valid_orthanc_id(&copy) => {
                 // Best effort: the label only helps staff recognise the copy.
-                let _ = state.orthanc.put_empty(&format!("/studies/{copy}/labels/{ANONYMIZED_LABEL}")).await;
-                copies.push(copy);
+                let _ = orthanc.put_empty(&format!("/studies/{copy}/labels/{ANONYMIZED_LABEL}")).await;
+                copies.push(compound(server, &copy));
             }
             outcome => {
                 delete_copies(state, &copies).await;
@@ -251,11 +260,17 @@ async fn anonymized_copies(state: &AppState, ids: &[String], code: &str) -> AppR
     Ok(copies)
 }
 
-/// Deletes anonymized copies from Orthanc (those already gone count as deleted).
+/// Deletes anonymized copies from Orthanc, each on its server (those already gone count as
+/// deleted; those on a server switched off or not answering are tried again later).
 pub async fn delete_copies(state: &AppState, copies: &[String]) -> bool {
     let mut all = true;
-    for copy in copies.iter().filter(|c| is_valid_orthanc_id(c)) {
-        match state.orthanc.delete(&format!("/studies/{copy}")).await {
+    for copy in copies.iter().filter_map(|c| ResourceRef::try_parse(c)) {
+        let Ok(orthanc) = state.orthancs.of(&copy) else {
+            tracing::warn!("the anonymized copy {copy} could not be deleted: its Orthanc server is not available");
+            all = false;
+            continue;
+        };
+        match orthanc.delete(&format!("/studies/{}", copy.id)).await {
             Ok(()) | Err(AppError::NotFound) => {}
             Err(e) => {
                 tracing::warn!("the anonymized copy {copy} could not be deleted: {e}");
@@ -312,15 +327,10 @@ pub async fn create_share(
     create(state, user, vec![id], req).await
 }
 
-async fn create(
-    state: AppState,
-    user: crate::db::User,
-    mut ids: Vec<String>,
-    req: CreateShare,
-) -> AppResult<Json<Value>> {
-    if ids.iter().any(|id| !is_valid_orthanc_id(id)) {
-        return Err(AppError::BadRequest("Invalid study id".into()));
-    }
+async fn create(state: AppState, user: crate::db::User, ids: Vec<String>, req: CreateShare) -> AppResult<Json<Value>> {
+    // One link, one Orthanc server: from here on `ids` are that server's own IDs.
+    let raw: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let (orthanc, server, mut ids) = state.orthancs.resolve_together(&raw)?;
     let settings = state.settings.get();
     if settings.share_public_url.is_empty() {
         return Err(AppError::BadRequest(
@@ -350,7 +360,7 @@ async fn create(
             return Err(AppError::BadRequest("Choose one study to share every study of its patient".into()));
         }
         feature(settings.share_patient, "Sharing every study of a patient is switched off")?;
-        ids = patient_studies(&state, &ids[0]).await?;
+        ids = patient_studies(&orthanc, &ids[0]).await?;
         feature(ids.len() < 2 || settings.multi_study_shares, "Links for several studies are switched off")?;
     }
 
@@ -367,8 +377,8 @@ async fn create(
     let token = sharing::new_token();
     // Anonymized: the link points at copies made for it (the originals stay as they are).
     let owned_copies = if req.anonymize {
-        let copies = anonymized_copies(&state, &ids, &token[..8].to_ascii_uppercase()).await?;
-        ids = copies.clone();
+        let copies = anonymized_copies(&state, (&orthanc, &server), &ids, &token[..8].to_ascii_uppercase()).await?;
+        ids = copies.iter().filter_map(|c| ResourceRef::try_parse(c)).map(|c| c.id).collect();
         copies
     } else {
         Vec::new()
@@ -376,7 +386,7 @@ async fn create(
 
     // Reading the studies checks that they exist and gives what the link will point at.
     // Read a few at a time (a link can share up to 50 studies), in the order chosen.
-    let orthanc = &state.orthanc;
+    let orthanc = &orthanc;
     let read: Vec<AppResult<Value>> = futures_util::stream::iter(ids.clone())
         .map(|id| async move { orthanc.get_json(&format!("/studies/{id}")).await })
         .buffered(6)
@@ -398,11 +408,11 @@ async fn create(
         studies.push(study);
     }
     let study = &studies[0];
-    let id = ids[0].clone();
+    let id = compound(&server, &ids[0]);
     let extra: Vec<SharedStudy> = ids[1..]
         .iter()
         .zip(&studies[1..])
-        .map(|(id, s)| SharedStudy { id: id.clone(), uid: s.study_instance_uid.clone() })
+        .map(|(id, s)| SharedStudy { id: compound(&server, id), uid: s.study_instance_uid.clone() })
         .collect();
 
     let password = sharing::generate_password();

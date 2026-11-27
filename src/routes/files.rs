@@ -19,7 +19,7 @@ use crate::models::StudySummary;
 use crate::permissions::Permission;
 use crate::routes::download::zip_response;
 use crate::state::AppState;
-use crate::util::{feature, orthanc_id};
+use crate::util::feature;
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
@@ -54,8 +54,9 @@ pub async fn series_instances(
 ) -> AppResult<Json<Value>> {
     user.require(Permission::Read)?;
     browser_on(&state)?;
-    orthanc_id(&id)?;
-    let list = state.orthanc.get_json(&format!("/series/{id}/instances?requested-tags=SOPClassUID")).await?;
+    let (orthanc, resource) = state.orthancs.resolve(&id)?;
+    let id = resource.id.clone();
+    let list = orthanc.get_json(&format!("/series/{id}/instances?requested-tags=SOPClassUID")).await?;
     let mut items: Vec<Value> = list
         .as_array()
         .map(|items| {
@@ -65,7 +66,7 @@ pub async fn series_instances(
                     let tags = &i["MainDicomTags"];
                     let sop_class = i["RequestedTags"]["SOPClassUID"].as_str().unwrap_or("");
                     json!({
-                        "id": i["ID"].as_str().unwrap_or(""),
+                        "id": resource.sibling(i["ID"].as_str().unwrap_or("")).compound(),
                         "number": tags["InstanceNumber"].as_str().unwrap_or(""),
                         "sop_instance_uid": tags["SOPInstanceUID"].as_str().unwrap_or(""),
                         "sop_class_uid": sop_class,
@@ -88,8 +89,9 @@ pub async fn instance_tags(
 ) -> AppResult<Json<Value>> {
     user.require(Permission::Read)?;
     browser_on(&state)?;
-    orthanc_id(&id)?;
-    Ok(Json(state.orthanc.get_json(&format!("/instances/{id}/tags?ignore-length=0")).await?))
+    let (orthanc, resource) = state.orthancs.resolve(&id)?;
+    let id = resource.id.clone();
+    Ok(Json(orthanc.get_json(&format!("/instances/{id}/tags?ignore-length=0")).await?))
 }
 
 #[derive(Deserialize)]
@@ -106,9 +108,10 @@ pub async fn instance_preview(
 ) -> AppResult<Response> {
     user.require(Permission::Visualize)?;
     browser_on(&state)?;
-    orthanc_id(&id)?;
+    let (orthanc, resource) = state.orthancs.resolve(&id)?;
+    let id = resource.id.clone();
     let width = q.width.unwrap_or(1024).clamp(64, 2048);
-    let Some((bytes, content_type)) = state.orthanc.rendered_image(&id, width).await? else {
+    let Some((bytes, content_type)) = orthanc.rendered_image(&id, width).await? else {
         return Err(AppError::BadRequest("This image cannot be shown as a picture".into()));
     };
     Response::builder()
@@ -126,9 +129,10 @@ pub async fn instance_pdf(
 ) -> AppResult<Response> {
     user.require(Permission::Visualize)?;
     browser_on(&state)?;
-    orthanc_id(&id)?;
-    let upstream = state.orthanc.get_stream(&format!("/instances/{id}/pdf")).await?;
-    state.db.audit(&user.username, "open_pdf", &id);
+    let (orthanc, resource) = state.orthancs.resolve(&id)?;
+    let id = resource.id.clone();
+    let upstream = orthanc.get_stream(&format!("/instances/{id}/pdf")).await?;
+    state.db.audit(&user.username, "open_pdf", &resource.to_string());
     file_response(upstream, "application/pdf", "inline; filename=\"report.pdf\"")
 }
 
@@ -140,10 +144,11 @@ pub async fn instance_download(
 ) -> AppResult<Response> {
     user.require(Permission::Download)?;
     feature(state.settings.get().single_file_download, "Downloading single files is switched off")?;
-    orthanc_id(&id)?;
-    let upstream = state.orthanc.get_stream(&format!("/instances/{id}/file")).await?;
+    let (orthanc, resource) = state.orthancs.resolve(&id)?;
+    let id = resource.id.clone();
+    let upstream = orthanc.get_stream(&format!("/instances/{id}/file")).await?;
     let name = format!("{}.dcm", id.chars().take(17).collect::<String>());
-    state.db.audit(&user.username, "download_instance", &id);
+    state.db.audit(&user.username, "download_instance", &resource.to_string());
     file_response(upstream, "application/dicom", &format!("attachment; filename=\"{name}\""))
 }
 
@@ -155,10 +160,11 @@ pub async fn series_nifti(
 ) -> AppResult<Response> {
     user.require(Permission::Download)?;
     feature(state.settings.get().nifti_export, "The NIfTI export is switched off")?;
-    orthanc_id(&id)?;
-    let upstream = state.orthanc.get_stream(&format!("/series/{id}/nifti?compress")).await?;
+    let (orthanc, resource) = state.orthancs.resolve(&id)?;
+    let id = resource.id.clone();
+    let upstream = orthanc.get_stream(&format!("/series/{id}/nifti?compress")).await?;
     let name = format!("series_{}.nii.gz", id.chars().take(8).collect::<String>());
-    state.db.audit(&user.username, "download_nifti", &id);
+    state.db.audit(&user.username, "download_nifti", &resource.to_string());
     file_response(upstream, "application/gzip", &format!("attachment; filename=\"{name}\""))
 }
 
@@ -181,11 +187,9 @@ pub async fn download_many(
     if ids.is_empty() || ids.len() > 100 {
         return Err(AppError::BadRequest("Choose 1 to 100 studies".into()));
     }
-    for id in &ids {
-        orthanc_id(id)?;
-    }
+    let (orthanc, _, orthanc_ids) = state.orthancs.resolve_together(&ids)?;
     let tool = if q.dicomdir.unwrap_or(false) { "/tools/create-media" } else { "/tools/create-archive" };
-    let upstream = state.orthanc.post_stream(tool, &json!({ "Resources": ids, "Synchronous": true })).await?;
+    let upstream = orthanc.post_stream(tool, &json!({ "Resources": orthanc_ids, "Synchronous": true })).await?;
     let file_name = format!("{}_studies.zip", ids.len());
     state.db.audit(&user.username, "download_studies", &format!("{} studies: {}", ids.len(), ids.join(",")));
     zip_response(upstream, &file_name)

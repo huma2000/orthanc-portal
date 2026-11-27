@@ -8,6 +8,7 @@ use crate::branding::BrandingStore;
 use crate::db::Db;
 use crate::orthanc::OrthancClient;
 use crate::server::ListenerManager;
+use crate::servers::OrthancPool;
 use crate::settings::SettingsStore;
 use crate::sharing::MemberCache;
 use crate::thumbnails::ThumbnailCache;
@@ -22,6 +23,8 @@ pub struct AppState {
     pub db: Db,
     /// Client for the Orthanc REST API.
     pub orthanc: OrthancClient,
+    /// Every Orthanc server, by key (the default one shares the client above). See `servers.rs`.
+    pub orthancs: OrthancPool,
     /// Browser login sessions: cookie token -> user id.
     pub sessions: TokenStore,
     /// Short-lived tokens embedded in `weasis://` links: bearer token -> user id.

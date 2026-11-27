@@ -35,15 +35,6 @@ pub fn is_valid_orthanc_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 80 && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }
 
-/// `Ok` for a valid Orthanc id, otherwise the "400 Invalid id" every route answers.
-pub fn orthanc_id(id: &str) -> Result<(), AppError> {
-    if is_valid_orthanc_id(id) {
-        Ok(())
-    } else {
-        Err(AppError::BadRequest("Invalid id".into()))
-    }
-}
-
 /// `Ok` when an optional feature is switched on, otherwise a 403 that says where to switch it on.
 /// `what` is the start of the sentence: "Deleting is switched off".
 pub fn feature(on: bool, what: &str) -> Result<(), AppError> {

@@ -202,7 +202,7 @@ pub async fn update_settings(
     // 4. Publish: from now on every request sees the new values.
     state.settings.set(new.clone());
     if changed.iter().any(|k| k.starts_with("orthanc_")) {
-        state.orthanc.reconfigure(&new);
+        state.orthancs.reconfigure(&new);
         messages.push("The connection to Orthanc was updated.".into());
     }
     // Thumbnails: resize the cache, and empty it when they are switched off or when

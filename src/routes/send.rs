@@ -21,8 +21,9 @@ use crate::auth::AuthUser;
 use crate::error::{AppError, AppResult};
 use crate::models::{ModalityNode, StudySummary};
 use crate::permissions::Permission;
+use crate::servers::ResourceRef;
 use crate::state::AppState;
-use crate::util::{feature, is_valid_orthanc_id};
+use crate::util::feature;
 use axum::extract::{Path, State};
 use axum::Json;
 use futures_util::{stream, StreamExt};
@@ -93,9 +94,15 @@ pub(crate) async fn start_send(
     node: &ModalityNode,
     id: &str,
 ) -> AppResult<(i64, String)> {
-    if !is_valid_orthanc_id(id) {
-        return Err(AppError::BadRequest("Invalid study id".into()));
+    let study_ref = ResourceRef::parse(id)?;
+    // The DICOM nodes, peers and DICOMweb servers listed are those of the default Orthanc.
+    // Sending from another server needs that server's own (multi-server phase 3).
+    if !study_ref.is_main() {
+        return Err(AppError::BadRequest(
+            "Sending is only available for the studies of the default Orthanc server for now".into(),
+        ));
     }
+    let id = study_ref.id.as_str();
     let study = StudySummary::from_orthanc(&state.orthanc.get_json(&format!("/studies/{id}")).await?);
     let label: String =
         format!("{} | {} | {}", study.patient_name.replace('^', " "), study.study_date, study.study_description)
@@ -134,11 +141,9 @@ pub async fn send_study(
     Json(req): Json<SendRequest>,
 ) -> AppResult<Json<Value>> {
     user.require(Permission::Send)?;
-    if !is_valid_orthanc_id(&id) {
-        return Err(AppError::BadRequest("Invalid study id".into()));
-    }
+    let (_, study) = state.orthancs.resolve(&id)?;
     let node = find_destination(&state, &req.target).await?;
-    let (transfer_id, job_id) = start_send(&state, &user.username, &node, &id).await?;
+    let (transfer_id, job_id) = start_send(&state, &user.username, &node, &study.compound()).await?;
     Ok(Json(json!({ "transfer_id": transfer_id, "job_id": job_id })))
 }
 
@@ -159,7 +164,7 @@ pub async fn send_many(
     if req.studies.is_empty() || req.studies.len() > 100 {
         return Err(AppError::BadRequest("Choose 1 to 100 studies".into()));
     }
-    if req.studies.iter().any(|id| !is_valid_orthanc_id(id)) {
+    if req.studies.iter().any(|id| ResourceRef::try_parse(id).is_none()) {
         return Err(AppError::BadRequest("Invalid study id".into()));
     }
     let node = find_destination(&state, &req.target).await?;

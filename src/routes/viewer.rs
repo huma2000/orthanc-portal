@@ -34,6 +34,7 @@
 
 use crate::auth::{self, authenticate_share, authenticate_viewer, AuthUser};
 use crate::error::{AppError, AppResult};
+use crate::orthanc::OrthancClient;
 use crate::permissions::Permission;
 use crate::routes::Audience;
 use crate::sharing;
@@ -165,14 +166,17 @@ async fn forward(
     // Who is asking? Staff: the session cookie or a Weasis token, with the `visualize`
     // permission. Guest: the cookie set by an invitation's password; the viewer then only
     // gets what belongs to that invitation's study (checked below).
-    let guest: Option<(i64, Vec<String>)> = match audience {
+    // Which Orthanc answers: a guest's link is on one server (its studies' IDs say which);
+    // staff use the default server.
+    let (orthanc, guest): (OrthancClient, Option<(i64, Vec<String>)>) = match audience {
         Audience::Staff => {
             authenticate_viewer(state, headers)?;
-            None
+            (state.orthanc.clone(), None)
         }
         Audience::Guest => {
             let share = authenticate_share(state, headers)?;
-            Some((share.id, share.study_uids()))
+            let (server, _) = state.orthancs.resolve(&share.study_id)?;
+            (server, Some((share.id, share.study_uids())))
         }
     };
 
@@ -217,7 +221,7 @@ async fn forward(
             _ => None,
         };
         if let Some(member) = member {
-            if !belongs_to_study(state, *share_id, &member).await? {
+            if !belongs_to_study(state, &orthanc, *share_id, &member).await? {
                 return Err(denied());
             }
         }
@@ -230,7 +234,7 @@ async fn forward(
 
     let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
     let proto = if is_https(headers) { "https" } else { "http" };
-    let answer = state.orthanc.proxy_get(&upstream, headers, host, proto).await?;
+    let answer = orthanc.proxy_get(&upstream, headers, host, proto).await?;
 
     let cache_control = match area {
         Area::Ohif | Area::App(_) if is_static_asset(path) => "private, max-age=3600",
@@ -253,7 +257,12 @@ async fn forward(
 /// Does the series (and image) a guest names belong to the study written before it? Asked to
 /// Orthanc with `/tools/find` on the UIDs (all checked to be plain UIDs, so no wildcard), and
 /// remembered for a few minutes per invitation.
-async fn belongs_to_study(state: &AppState, share_id: i64, member: &sharing::Member) -> AppResult<bool> {
+async fn belongs_to_study(
+    state: &AppState,
+    orthanc: &OrthancClient,
+    share_id: i64,
+    member: &sharing::Member,
+) -> AppResult<bool> {
     let now = crate::util::now_unix();
     if state.guest_members.knows(share_id, member, now) {
         return Ok(true);
@@ -268,7 +277,7 @@ async fn belongs_to_study(state: &AppState, share_id: i64, member: &sharing::Mem
         };
         if !state.guest_members.knows(share_id, &listed, now) {
             let query = json!({ "StudyInstanceUID": member.study, "SeriesInstanceUID": series });
-            let found = state.orthanc.find(&json!({ "Level": "Instance", "Query": query, "Expand": true })).await?;
+            let found = orthanc.find(&json!({ "Level": "Instance", "Query": query, "Expand": true })).await?;
             if found.is_empty() {
                 return Ok(false); // the series is not part of the study
             }
@@ -294,7 +303,7 @@ async fn belongs_to_study(state: &AppState, share_id: i64, member: &sharing::Mem
         tags.insert("SOPInstanceUID".into(), json!(instance));
     }
     let level = if member.instance.is_some() { "Instance" } else { "Series" };
-    let found = state.orthanc.find(&json!({ "Level": level, "Query": tags, "Limit": 1 })).await?;
+    let found = orthanc.find(&json!({ "Level": level, "Query": tags, "Limit": 1 })).await?;
     if found.is_empty() {
         return Ok(false);
     }

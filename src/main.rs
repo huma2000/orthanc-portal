@@ -64,6 +64,7 @@ mod orthanc;
 mod permissions;
 mod routes;
 mod server;
+mod servers;
 mod settings;
 mod sharing;
 mod state;
@@ -130,6 +131,7 @@ async fn main() -> anyhow::Result<()> {
         settings: SettingsStore::new(settings.clone()),
         db,
         orthanc: orthanc.clone(),
+        orthancs: servers::OrthancPool::new(orthanc.clone(), &settings)?,
         sessions: TokenStore::default(),
         weasis_tokens: TokenStore::default(),
         share_sessions: TokenStore::default(),

@@ -383,6 +383,50 @@ sleep 17
 ok "the same study becoming stable again (more images) is not announced twice" "$(( $(mailcount) - MAILS ))" "1"
 put $A '{"forward_enabled":false,"public_base_url":""}' > /dev/null
 
+echo "== several Orthanc servers (the IDs of another server are written key:id)"
+# A second fake Orthanc: the same study, under the same Orthanc ID, as on the default one.
+mkdir -p "$WORK/m2"
+MOCK_LOG_DIR="$WORK/m2" "$PYTHON3" "$TESTS/mock_orthanc.py" 18043 > "$WORK/mock2.out" 2>&1 & remember mock2 $!
+sleep 0.6
+ARCHIVE='{"key":"archive","label":"Archive","url":"http://127.0.0.1:18043","username":"orthanc"'
+ok "a second Orthanc server is added" "$(put $A "{\"orthanc_servers\":[$ARCHIVE,\"password\":\"s3cr3tpw\"}]}" | tail -1)" "200"
+ok "...its password is never sent back" "$(body $F $A /api/admin/settings | py "('password' in d['settings']['orthanc_servers'][0], d['settings']['orthanc_servers'][0]['password_set'])")" "(False, True)"
+ok "...nor sent to another address without typing it again (400)" "$(put $A '{"orthanc_servers":[{"key":"archive","url":"http://127.0.0.1:18099","username":"orthanc"}]}' | tail -1)" "400"
+ok "...nothing changed" "$(body $F $A /api/admin/settings | py "d['settings']['orthanc_servers'][0]['url']")" "http://127.0.0.1:18043"
+AID="archive:$SID"
+ok "the series of a study on that server: every ID says the server" "$(body $F $A /api/studies/$AID/series | py "len(d) > 0 and all(s['id'].startswith('archive:') and s['study_id'] == '$AID' for s in d)")" "True"
+ok "...the same plain ID is still the default server's study" "$(body $F $A /api/studies/$SID/series | py "all(':' not in s['id'] for s in d)")" "True"
+ok "a label goes on THAT server's study" "$(code $F $A PUT /api/studies/$AID/labels/second-server)/$(tail -1 "$WORK/m2/labels.log" | py "d['put']")" "200/second-server"
+ok "...not on the default server's" "$(grep -c second-server "$WORK/labels.log")" "0"
+# zips N -> how many study ZIPs the second Orthanc was asked for (every request is in its auth.log)
+zips() { grep -c "/studies/$SID/archive" "$WORK/m2/auth.log"; }
+Z0=$(zips)
+ok "downloading it asks that server for the ZIP" "$(code $F $A GET /api/studies/$AID/download)/$(( $(zips) - Z0 ))" "200/1"
+ok "its thumbnail" "$(code $F $A GET /api/studies/$AID/thumbnail)" "200"
+put $A '{"allow_modify":true}' > /dev/null
+MJ=$(body $F $A /api/studies/$AID/modify -X POST -H "$J" -d '{"replace":{"StudyDescription":"ON ARCHIVE"}}' | py "d['job_id']")
+ok "editing it starts a job on that server, and the job's ID says so" "$(echo "$MJ" | cut -d: -f1)/$([ -s "$WORK/m2/modify.log" ] && echo asked)" "archive/asked"
+ok "...the job is followed there" "$(code $F $A GET "/api/jobs/$MJ")" "200"
+put $A '{"allow_modify":false}' > /dev/null
+ok "an unknown server: 404" "$(code $F $A GET /api/studies/nowhere:$SID/series)" "404"
+ok "a malformed server key: 400" "$(code $F $A GET /api/studies/Archive:$SID/series)" "400"
+ok "one ZIP of studies on two servers is refused (400)" "$(code $F $A GET "/api/download?studies=$SID,$AID")" "400"
+has "sending from another server is not offered yet" "$(body $F $A /api/studies/$AID/send -X POST -H "$J" -d '{"target":"ris"}')" "default Orthanc server"
+ok "recently viewed remembers the server" "$(post $F $A /api/recent/$AID "{\"uid\":\"$UID_\"}" | py "d['ok']")/$(body $F $A /api/recent | py "d[0]['id']")" "True/$AID"
+# A link to that server's study: the guest's page, download and viewer use that server.
+L2=$(body $F $A /api/studies/$AID/share -X POST -H "$J" -d '{"downloads":1}')
+L2T=$(echo "$L2" | py "d['url'].rsplit('/s/',1)[1]"); L2P=$(echo "$L2" | py "d['password']")
+GC2=$(unlock $L2T "$L2P")
+ok "a link to it: the guest sees the study" "$(curl -s -H "Cookie: share_session=$GC2" -H "$H" "$G/api/share/$L2T/study" | py "d['study']['uid']")" "$UID_"
+Z0=$(zips)
+ok "...downloads it from that server" "$(curl -s -o /dev/null -w '%{http_code}' -H "Cookie: share_session=$GC2" -H "$H" "$G/api/share/$L2T/download")/$(( $(zips) - Z0 ))" "200/1"
+PROXY_BEFORE=$(cat "$WORK/m2/proxy.log" 2>/dev/null | wc -l)
+ok "...and views it from that server" "$(curl -s -o /dev/null -w '%{http_code}' -H "Cookie: share_session=$GC2" "$G/dicom-web/studies/$UID_/series")/$(( $(cat "$WORK/m2/proxy.log" | wc -l) - PROXY_BEFORE ))" "200/1"
+ok "switched off: its studies are not reachable (404)" "$(put $A "{\"orthanc_servers\":[$ARCHIVE,\"enabled\":false}]}" | tail -1)/$(code $F $A GET /api/studies/$AID/series)" "200/404"
+ok "...and its password was kept" "$(body $F $A /api/admin/settings | py "d['settings']['orthanc_servers'][0]['password_set']")" "True"
+put $A '{"orthanc_servers":[]}' > /dev/null
+stop_pid mock2
+
 echo; echo "RESULT: $PASS passed, $FAIL failed$([ "$SKIP" -gt 0 ] && echo ", $SKIP skipped")"
 stack_stop
 [ "$FAIL" -eq 0 ]

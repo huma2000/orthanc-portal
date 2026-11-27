@@ -22,8 +22,9 @@ use crate::auth::AuthUser;
 use crate::error::{AppError, AppResult};
 use crate::models::{SeriesSummary, StudySummary};
 use crate::permissions::Permission;
+use crate::servers::ResourceRef;
 use crate::state::AppState;
-use crate::util::{contains_pattern, dicom_date, is_valid_dicom_uid, is_valid_orthanc_id, non_empty};
+use crate::util::{contains_pattern, dicom_date, is_valid_dicom_uid, non_empty};
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use futures_util::{stream, StreamExt};
@@ -319,13 +320,12 @@ pub async fn study_series(
     Path(id): Path<String>,
 ) -> AppResult<Json<Vec<SeriesSummary>>> {
     user.require(Permission::Read)?;
-    if !is_valid_orthanc_id(&id) {
-        return Err(AppError::BadRequest("Invalid study id".into()));
-    }
-
-    let value = state.orthanc.get_json(&format!("/studies/{id}/series")).await?;
-    let mut series: Vec<SeriesSummary> =
-        value.as_array().map(|items| items.iter().map(SeriesSummary::from_orthanc).collect()).unwrap_or_default();
+    let study = ResourceRef::parse(&id)?;
+    let value = state.orthancs.of(&study)?.get_json(&format!("/studies/{}/series", study.id)).await?;
+    let mut series: Vec<SeriesSummary> = value
+        .as_array()
+        .map(|items| items.iter().map(|s| SeriesSummary::from_orthanc(s).on_server(&study.server)).collect())
+        .unwrap_or_default();
     // SeriesNumber is a string in DICOM: sort it as a number ("2" before "10").
     series.sort_by_key(|s| s.series_number.parse::<i64>().unwrap_or(i64::MAX));
     Ok(Json(series))

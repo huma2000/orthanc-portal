@@ -19,7 +19,7 @@ use crate::models::{SeriesSummary, StudySummary};
 use crate::orthanc::ArchiveKind;
 use crate::permissions::Permission;
 use crate::state::AppState;
-use crate::util::{is_valid_orthanc_id, sanitize_filename};
+use crate::util::sanitize_filename;
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
@@ -56,22 +56,19 @@ pub async fn download_study(
     Query(params): Query<DownloadParams>,
 ) -> AppResult<Response> {
     user.require(Permission::Download)?;
-    if !is_valid_orthanc_id(&id) {
-        return Err(AppError::BadRequest("Invalid study id".into()));
-    }
+    let (orthanc, resource) = state.orthancs.resolve(&id)?;
+    let id = resource.id.clone();
 
     // Read the study (for a nice file name) while Orthanc already starts building the ZIP:
     // the two requests run at the same time. A study that does not exist fails both (404).
     let dicomdir = params.dicomdir.unwrap_or(false);
     let study_path = format!("/studies/{id}");
-    let (study, upstream) = tokio::try_join!(
-        state.orthanc.get_json(&study_path),
-        state.orthanc.archive(ArchiveKind::Study, &id, dicomdir)
-    )?;
+    let (study, upstream) =
+        tokio::try_join!(orthanc.get_json(&study_path), orthanc.archive(ArchiveKind::Study, &id, dicomdir))?;
     let study = StudySummary::from_orthanc(&study);
     let file_name = crate::routes::files::study_file_name(&state.settings.get().download_name_template, &study, &id);
 
-    state.db.audit(&user.username, "download_study", &format!("{id} ({file_name})"));
+    state.db.audit(&user.username, "download_study", &format!("{resource} ({file_name})"));
     zip_response(upstream, &file_name)
 }
 
@@ -82,17 +79,14 @@ pub async fn download_series(
     Query(params): Query<DownloadParams>,
 ) -> AppResult<Response> {
     user.require(Permission::Download)?;
-    if !is_valid_orthanc_id(&id) {
-        return Err(AppError::BadRequest("Invalid series id".into()));
-    }
+    let (orthanc, resource) = state.orthancs.resolve(&id)?;
+    let id = resource.id.clone();
 
     // As for a study: the details (file name) and the ZIP are requested at the same time.
     let dicomdir = params.dicomdir.unwrap_or(false);
     let series_path = format!("/series/{id}");
-    let (series, upstream) = tokio::try_join!(
-        state.orthanc.get_json(&series_path),
-        state.orthanc.archive(ArchiveKind::Series, &id, dicomdir)
-    )?;
+    let (series, upstream) =
+        tokio::try_join!(orthanc.get_json(&series_path), orthanc.archive(ArchiveKind::Series, &id, dicomdir))?;
     let series = SeriesSummary::from_orthanc(&series);
     let file_name = format!(
         "series_{}_{}_{}.zip",

@@ -20,7 +20,6 @@ use crate::error::{AppError, AppResult};
 use crate::permissions::Permission;
 use crate::state::AppState;
 use crate::thumbnails::{self, Thumb};
-use crate::util::is_valid_orthanc_id;
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
@@ -73,15 +72,15 @@ async fn serve(
     if !settings.thumbnails_enabled {
         return Err(AppError::NotFound);
     }
-    if !is_valid_orthanc_id(&id) {
-        return Err(AppError::BadRequest("Invalid id".into()));
-    }
+    let (orthanc, resource) = state.orthancs.resolve(&id)?;
+    let id = resource.id.clone();
     let width = normalised_width(query.size);
     let prefix = match kind {
         Kind::Study => "study",
         Kind::Series => "series",
     };
-    let key = format!("{prefix}:{id}:{width}");
+    // The server is part of the key: the same ID on two servers may be two different copies.
+    let key = format!("{prefix}:{}:{id}:{width}", resource.server);
 
     // 1. Already known?
     if let Some(known) = state.thumbs.get(&key) {
@@ -94,8 +93,8 @@ async fn serve(
         return image_response(known);
     }
     let made = match kind {
-        Kind::Study => thumbnails::study_thumbnail(&state.orthanc, &id, width).await?,
-        Kind::Series => thumbnails::series_thumbnail(&state.orthanc, &id, width).await?,
+        Kind::Study => thumbnails::study_thumbnail(&orthanc, &id, width).await?,
+        Kind::Series => thumbnails::series_thumbnail(&orthanc, &id, width).await?,
     };
     let made = made.map(Arc::new);
     state.thumbs.put(key, made.clone(), settings.thumbnail_cache_bytes());

@@ -43,6 +43,12 @@ pub struct StudySummary {
 }
 
 impl StudySummary {
+    /// The IDs written for the server it comes from (`key:id` unless it is the default one).
+    pub fn on_server(mut self, server: &str) -> Self {
+        self.id = crate::servers::compound(server, &self.id);
+        self
+    }
+
     /// Builds a summary from an *expanded* Orthanc study (`GET /studies/{id}` or
     /// `/tools/find` with `"Expand": true`).
     pub fn from_orthanc(v: &Value) -> Self {
@@ -103,6 +109,14 @@ pub struct SeriesSummary {
 }
 
 impl SeriesSummary {
+    /// The IDs (its own, its study's) written for the server it comes from.
+    pub fn on_server(mut self, server: &str) -> Self {
+        self.id = crate::servers::compound(server, &self.id);
+        self.study_id = crate::servers::compound(server, &self.study_id);
+        self.study = self.study.map(|s| s.on_server(server));
+        self
+    }
+
     /// Builds a summary from an *expanded* Orthanc series.
     pub fn from_orthanc(v: &Value) -> Self {
         let main = &v["MainDicomTags"];

@@ -1085,6 +1085,26 @@ All JSON. State-changing calls need the header `X-Requested-With: portal`.
 "intranet" = only registered on the staff listener (default `:8080`); "internet" = only on the invitation listener
 (default `:8081`).
 
+**IDs and several Orthanc servers.** `{id}` is Orthanc's own ID of a study, series, image or job. Besides the
+default Orthanc (the *Orthanc connection* settings, key `main`), the portal can reach other Orthanc servers, set
+in the `orthanc_servers` setting (*being built*: no page for them yet, and searching, sending, the staff viewers
+and the admin pages still use the default server):
+
+```json
+"orthanc_servers": [
+  { "key": "archive", "label": "Archive 2015-2020", "url": "http://archive:8042",
+    "username": "portal", "password": "...", "enabled": true, "searched_by_default": true }
+]
+```
+
+Orthanc makes its IDs from the DICOM UIDs, so the same study has the **same ID on every server** that holds
+it. The IDs of another server are therefore written **`key:id`** (`archive:8a5f3e0b-...`) in every answer,
+link and stored record, and accepted that way in every `{id}` below; a plain ID is the default server's, as
+before. An unknown or switched-off server answers 404. Studies that one Orthanc must handle together (one ZIP,
+one patient CD, one share link) must all be on the same server. A server's password is write-only, like the
+others (`password_set` in the answers; an empty password keeps the saved one, `"clear_password": true`
+removes it), and must be typed again when its address moves to another server.
+
 **Staff (intranet)**
 
 | Method & path | Permission | Purpose |

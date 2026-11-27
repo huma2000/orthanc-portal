@@ -24,7 +24,7 @@ use crate::models::StudySummary;
 use crate::permissions::Permission;
 use crate::settings::Language;
 use crate::state::AppState;
-use crate::util::{civil_from_days, feature, now_unix, orthanc_id, random_token, temp_file_download, TempFile};
+use crate::util::{civil_from_days, feature, now_unix, random_token, temp_file_download, TempFile};
 use axum::extract::{Query, State};
 use axum::response::Response;
 use futures_util::StreamExt;
@@ -71,15 +71,14 @@ pub async fn cd_export(
     if ids.is_empty() || ids.len() > 100 {
         return Err(AppError::BadRequest("Choose 1 to 100 studies".into()));
     }
-    for id in &ids {
-        orthanc_id(id)?;
-    }
+    let raw: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let (orthanc, _, ids) = state.orthancs.resolve_together(&raw)?;
     let _slot = EXPORT_GATE.try_acquire().map_err(|_| {
         AppError::TooManyRequests("Two exports are being prepared already: try again in a minute".into())
     })?;
 
     // The studies (for the patient's page and the file name); this also checks that they exist.
-    let orthanc = &state.orthanc;
+    let orthanc = &orthanc;
     let read: Vec<AppResult<serde_json::Value>> = futures_util::stream::iter(ids.clone())
         .map(|id| async move { orthanc.get_json(&format!("/studies/{id}")).await })
         .buffered(6)
@@ -98,7 +97,7 @@ pub async fn cd_export(
 
     // 1. Orthanc's DICOMDIR archive, to disk.
     let upstream =
-        state.orthanc.post_stream("/tools/create-media", &json!({ "Resources": ids, "Synchronous": true })).await?;
+        orthanc.post_stream("/tools/create-media", &json!({ "Resources": ids, "Synchronous": true })).await?;
     {
         let mut file = tokio::fs::File::create(&media.0)
             .await

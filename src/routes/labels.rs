@@ -15,9 +15,10 @@
 use crate::auth::AuthUser;
 use crate::db::User;
 use crate::error::{AppError, AppResult};
+use crate::orthanc::OrthancClient;
 use crate::permissions::Permission;
+use crate::servers::ResourceRef;
 use crate::state::AppState;
-use crate::util::is_valid_orthanc_id;
 use axum::extract::{Path, State};
 use axum::Json;
 use futures_util::{stream, StreamExt};
@@ -84,24 +85,23 @@ pub async fn list_labels(State(state): State<AppState>, AuthUser(user): AuthUser
     })))
 }
 
-fn check_target(user: &User, id: &str, label: &str) -> AppResult<()> {
+/// Checks the request and gives the client of the study's server and the study.
+fn check_target(state: &AppState, user: &User, id: &str, label: &str) -> AppResult<(OrthancClient, ResourceRef)> {
     if !can_edit_labels(user) {
         return Err(AppError::Forbidden("labels"));
     }
-    if !is_valid_orthanc_id(id) {
-        return Err(AppError::BadRequest("Invalid study id".into()));
-    }
+    let target = state.orthancs.resolve(id)?;
     if !valid_label(label) {
         return Err(AppError::BadRequest(
             "A label can have 1 to 64 letters, digits, '-' or '_' (no spaces or accents)".into(),
         ));
     }
-    Ok(())
+    Ok(target)
 }
 
 /// The labels of a study after a change.
-async fn labels_of(state: &AppState, id: &str) -> AppResult<Json<Value>> {
-    let labels = state.orthanc.get_json(&format!("/studies/{id}/labels")).await?;
+async fn labels_of(orthanc: &OrthancClient, id: &str) -> AppResult<Json<Value>> {
+    let labels = orthanc.get_json(&format!("/studies/{id}/labels")).await?;
     Ok(Json(json!({ "labels": labels })))
 }
 
@@ -110,7 +110,7 @@ pub async fn add_label(
     AuthUser(user): AuthUser,
     Path((id, label)): Path<(String, String)>,
 ) -> AppResult<Json<Value>> {
-    check_target(&user, &id, &label)?;
+    let (orthanc, study) = check_target(&state, &user, &id, &label)?;
     labels_on(&state)?;
     let allowed = &state.settings.get().available_labels;
     if !allowed.is_empty() && !allowed.contains(&label) {
@@ -119,9 +119,9 @@ pub async fn add_label(
             allowed.join(", ")
         )));
     }
-    state.orthanc.put_empty(&format!("/studies/{id}/labels/{label}")).await?;
-    state.db.audit(&user.username, "label_added", &format!("{label} on study {id}"));
-    labels_of(&state, &id).await
+    orthanc.put_empty(&format!("/studies/{}/labels/{label}", study.id)).await?;
+    state.db.audit(&user.username, "label_added", &format!("{label} on study {study}"));
+    labels_of(&orthanc, &study.id).await
 }
 
 pub async fn remove_label(
@@ -129,11 +129,11 @@ pub async fn remove_label(
     AuthUser(user): AuthUser,
     Path((id, label)): Path<(String, String)>,
 ) -> AppResult<Json<Value>> {
-    check_target(&user, &id, &label)?;
+    let (orthanc, study) = check_target(&state, &user, &id, &label)?;
     labels_on(&state)?;
-    state.orthanc.delete(&format!("/studies/{id}/labels/{label}")).await?;
-    state.db.audit(&user.username, "label_removed", &format!("{label} from study {id}"));
-    labels_of(&state, &id).await
+    orthanc.delete(&format!("/studies/{}/labels/{label}", study.id)).await?;
+    state.db.audit(&user.username, "label_removed", &format!("{label} from study {study}"));
+    labels_of(&orthanc, &study.id).await
 }
 
 #[cfg(test)]

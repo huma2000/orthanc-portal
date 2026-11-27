@@ -158,6 +158,74 @@ impl fmt::Debug for Secret {
     }
 }
 
+/// The key of the default Orthanc server: the one of `orthanc_url`, `orthanc_username`...
+/// Its resources keep their plain Orthanc IDs; those of the other servers are written `key:id`
+/// (see `util::ResourceRef`).
+pub const MAIN_SERVER: &str = "main";
+
+/// At most this many Orthanc servers besides the default one.
+pub const MAX_EXTRA_SERVERS: usize = 7;
+
+/// One Orthanc server the portal works with. The default server is described by the
+/// `orthanc_*` settings (so older versions and the environment variables keep working); the
+/// others are in `orthanc_servers`. [`Settings::servers`] lists them all as this type.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OrthancServer {
+    /// Short name used in IDs and links: `a-z`, `0-9` and `-`, 1 to 24 characters, never `main`.
+    pub key: String,
+    /// The name people see ("Archive 2015-2020"). Empty = the key.
+    #[serde(default)]
+    pub label: String,
+    /// REST API of that Orthanc, no trailing slash.
+    pub url: String,
+    /// Account the portal uses there. Empty = no account (see `orthanc_username`).
+    #[serde(default)]
+    pub username: String,
+    /// Its password: write-only, like `orthanc_password`.
+    #[serde(default)]
+    pub password: Secret,
+    /// The folder of that Orthanc's log files, as seen by the portal (empty = not shown).
+    #[serde(default)]
+    pub log_dir: String,
+    /// Colour of its badge, `#rrggbb` (empty = the default).
+    #[serde(default)]
+    pub color: String,
+    /// Switched off: kept in the settings, but the portal does not use it.
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    /// Included when people search without choosing servers.
+    #[serde(default = "yes")]
+    pub searched_by_default: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl OrthancServer {
+    /// The name to show: the label, or the key when there is none.
+    pub fn name(&self) -> &str {
+        if self.label.is_empty() {
+            &self.key
+        } else {
+            &self.label
+        }
+    }
+}
+
+/// Checks the address and account of an Orthanc server (the default one or another).
+fn validate_orthanc_access(url: &str, username: &str, password: &str) -> Result<(), String> {
+    let url_ok = (url.starts_with("http://") || url.starts_with("https://"))
+        && !url.chars().any(|c| c.is_whitespace() || c.is_control());
+    if !url_ok {
+        return Err("The Orthanc address must look like http://orthanc:8042 or https://...".into());
+    }
+    if username.chars().any(|c| c.is_control()) || username.len() > 128 || password.len() > 256 {
+        return Err("The Orthanc user name or password is not valid".into());
+    }
+    Ok(())
+}
+
 /// How the portal talks to the mail server (Settings > Email).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -402,6 +470,12 @@ pub struct Settings {
     /// Empty = the System page cannot show Orthanc's log (Orthanc's REST API cannot read it).
     #[serde(default)]
     pub orthanc_log_dir: String,
+    /// The name of the default Orthanc server when there are several ("Main PACS"). Empty = "Main".
+    #[serde(default)]
+    pub orthanc_label: String,
+    /// The other Orthanc servers (the default one is described above, with the key `main`).
+    #[serde(default)]
+    pub orthanc_servers: Vec<OrthancServer>,
 
     // ---- Network ------------------------------------------------------------
     /// INTRANET listener, e.g. `0.0.0.0:8080`: the whole portal, for staff.
@@ -885,6 +959,8 @@ impl Settings {
             orthanc_username: String::new(),
             orthanc_password: Secret::default(),
             orthanc_log_dir: String::new(),
+            orthanc_label: String::new(),
+            orthanc_servers: Vec::new(),
             bind_addr: "0.0.0.0:8080".into(),
             remote_enabled: true,
             remote_bind_addr: "0.0.0.0:8081".into(),
@@ -1123,6 +1199,18 @@ impl Settings {
         if self.orthanc_username.is_empty() {
             self.orthanc_password = Secret::default();
         }
+        self.orthanc_label = self.orthanc_label.trim().to_string();
+        for server in self.orthanc_servers.iter_mut() {
+            server.key = server.key.trim().to_ascii_lowercase();
+            server.label = server.label.trim().to_string();
+            server.url = server.url.trim().trim_end_matches('/').to_string();
+            server.username = server.username.trim().to_string();
+            server.log_dir = server.log_dir.trim().to_string();
+            server.color = server.color.trim().to_ascii_lowercase();
+            if server.username.is_empty() {
+                server.password = Secret::default();
+            }
+        }
         self.bind_addr = self.bind_addr.trim().to_string();
         self.remote_bind_addr = self.remote_bind_addr.trim().to_string();
         self.public_base_url = self.public_base_url.trim().trim_end_matches('/').to_string();
@@ -1225,16 +1313,41 @@ impl Settings {
         }
 
         // --- Orthanc
-        let url_ok = (self.orthanc_url.starts_with("http://") || self.orthanc_url.starts_with("https://"))
-            && !self.orthanc_url.chars().any(|c| c.is_whitespace() || c.is_control());
-        if !url_ok {
-            return bad("The Orthanc address must look like http://orthanc:8042 or https://...".into());
+        validate_orthanc_access(&self.orthanc_url, &self.orthanc_username, &self.orthanc_password.0)
+            .map_err(AppError::BadRequest)?;
+        if self.orthanc_label.chars().count() > 60 || has_control(&self.orthanc_label) {
+            return bad("The name of an Orthanc server can have at most 60 characters".into());
         }
-        if has_control(&self.orthanc_username)
-            || self.orthanc_username.len() > 128
-            || self.orthanc_password.0.len() > 256
-        {
-            return bad("The Orthanc user name or password is not valid".into());
+        if self.orthanc_servers.len() > MAX_EXTRA_SERVERS {
+            return bad(format!("At most {} Orthanc servers can be added", MAX_EXTRA_SERVERS));
+        }
+        let mut keys: Vec<&str> = vec![MAIN_SERVER];
+        for server in &self.orthanc_servers {
+            let key_ok = !server.key.is_empty()
+                && server.key.len() <= 24
+                && server.key.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+            if !key_ok {
+                return bad(format!(
+                    "The key of the Orthanc server '{}' must have 1 to 24 letters a-z, digits or '-'",
+                    server.key
+                ));
+            }
+            if keys.contains(&server.key.as_str()) {
+                return bad(format!("Two Orthanc servers have the key '{}'", server.key));
+            }
+            keys.push(&server.key);
+            let name = server.name();
+            if server.label.chars().count() > 60 || has_control(&server.label) {
+                return bad("The name of an Orthanc server can have at most 60 characters".into());
+            }
+            validate_orthanc_access(&server.url, &server.username, &server.password.0)
+                .map_err(|e| AppError::BadRequest(format!("{name}: {e}")))?;
+            if server.log_dir.chars().count() > 300 || has_control(&server.log_dir) {
+                return bad("The folder of Orthanc's log files can have at most 300 characters".into());
+            }
+            if !valid_color(&server.color) {
+                return bad(format!("The colour of the Orthanc server '{name}' must look like #1a2b3c"));
+            }
         }
 
         // --- network
@@ -1613,6 +1726,10 @@ impl Settings {
                         obj.insert(key.clone(), value.clone());
                     }
                 }
+                // The other Orthanc servers: their passwords are write-only too.
+                "orthanc_servers" => {
+                    obj.insert(key.clone(), self.servers_with_saved_passwords(value)?);
+                }
                 _ if obj.contains_key(key) => {
                     obj.insert(key.clone(), value.clone());
                 }
@@ -1632,6 +1749,30 @@ impl Settings {
         self.check_secret_destinations(&updated, patch, clear_password, clear_smtp_password)?;
         updated.validate()?;
         Ok(updated)
+    }
+
+    /// The `orthanc_servers` of a save, with each server's saved password kept when the form sends
+    /// none (the page never receives passwords), unless `"clear_password": true` removes it.
+    fn servers_with_saved_passwords(&self, value: &Value) -> Result<Value, AppError> {
+        let list =
+            value.as_array().ok_or_else(|| AppError::BadRequest("orthanc_servers must be a list of servers".into()))?;
+        let mut out = Vec::with_capacity(list.len());
+        for entry in list {
+            let mut server = entry
+                .as_object()
+                .cloned()
+                .ok_or_else(|| AppError::BadRequest("Each Orthanc server must be an object".into()))?;
+            server.remove("password_set");
+            let clear = server.remove("clear_password").and_then(|v| v.as_bool()).unwrap_or(false);
+            let typed = server.get("password").and_then(Value::as_str).is_some_and(|p| !p.is_empty());
+            if !typed {
+                let key = server.get("key").and_then(Value::as_str).unwrap_or_default().trim().to_ascii_lowercase();
+                let saved = self.orthanc_servers.iter().find(|s| s.key == key).map(|s| s.password.0.clone());
+                server.insert("password".into(), json!(if clear { String::new() } else { saved.unwrap_or_default() }));
+            }
+            out.push(Value::Object(server));
+        }
+        Ok(Value::Array(out))
     }
 
     /// A saved secret is only sent to the server it was entered for: when that server's address
@@ -1674,6 +1815,30 @@ impl Settings {
         {
             return bad("The token address changed: enter the client secret again (a saved secret is only sent to the server it was entered for)");
         }
+        // The other Orthanc servers, each with its own saved password.
+        let typed: Vec<String> = patch
+            .get("orthanc_servers")
+            .and_then(Value::as_array)
+            .map(|list| {
+                list.iter()
+                    .filter(|s| s.get("password").and_then(Value::as_str).is_some_and(|p| !p.is_empty()))
+                    .filter_map(|s| s.get("key").and_then(Value::as_str).map(|k| k.trim().to_ascii_lowercase()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for after in &updated.orthanc_servers {
+            let Some(before) = self.orthanc_servers.iter().find(|s| s.key == after.key) else { continue };
+            if !before.password.0.is_empty()
+                && !after.password.0.is_empty()
+                && !typed.contains(&after.key)
+                && origin(&before.url) != origin(&after.url)
+            {
+                return Err(AppError::BadRequest(format!(
+                    "The address of the Orthanc server '{}' changed: enter its password again, or remove it (a saved password is only sent to the server it was entered for)",
+                    after.name()
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -1688,6 +1853,12 @@ impl Settings {
             obj.insert("smtp_password_set".into(), json!(!self.smtp_password.0.is_empty()));
             obj.remove("smtp_oauth_client_secret");
             obj.insert("smtp_oauth_client_secret_set".into(), json!(!self.smtp_oauth_client_secret.0.is_empty()));
+            if let Some(Value::Array(servers)) = obj.get_mut("orthanc_servers") {
+                for server in servers.iter_mut().filter_map(Value::as_object_mut) {
+                    let set = server.remove("password").and_then(|p| p.as_str().map(|p| !p.is_empty()));
+                    server.insert("password_set".into(), json!(set.unwrap_or(false)));
+                }
+            }
         }
         value
     }
@@ -1751,6 +1922,22 @@ impl Settings {
             (Some(a), Some(b)) => a.iter().filter(|(k, v)| b.get(*k) != Some(v)).map(|(k, _)| k.clone()).collect(),
             _ => Vec::new(),
         }
+    }
+
+    /// Every Orthanc server, the default one (`main`) first, switched-off ones included.
+    pub fn servers(&self) -> Vec<OrthancServer> {
+        let main = OrthancServer {
+            key: MAIN_SERVER.into(),
+            label: if self.orthanc_label.is_empty() { "Main".into() } else { self.orthanc_label.clone() },
+            url: self.orthanc_url.clone(),
+            username: self.orthanc_username.clone(),
+            password: self.orthanc_password.clone(),
+            log_dir: self.orthanc_log_dir.clone(),
+            color: String::new(),
+            enabled: true,
+            searched_by_default: true,
+        };
+        std::iter::once(main).chain(self.orthanc_servers.iter().cloned()).collect()
     }
 
     // ---- convenience getters used by the handlers ----------------------------
@@ -1945,6 +2132,90 @@ mod tests {
         assert!(m365(json!({ "smtp_oauth_token_url": "https://login.microsoftonline.us/x/oauth2/v2.0/token" })).is_ok());
         // Email switched off: nothing is asked for.
         assert!(m365(json!({ "smtp_host": "", "smtp_oauth_client_id": "" })).is_ok());
+    }
+
+    /// Other Orthanc servers: checked, tidied, their passwords write-only and kept with them.
+    #[test]
+    fn other_orthanc_servers() {
+        let base = Settings::defaults();
+        let with = |servers: Value| base.with_patch(&json!({ "orthanc_servers": servers }));
+        let saved = with(json!([
+            { "key": " Archive ", "label": "Archive 2015", "url": "http://archive:8042/", "username": "portal",
+              "password": "pw1", "color": "#1A2B3C" },
+            { "key": "research", "url": "https://research.local", "enabled": false }
+        ]))
+        .unwrap();
+        let archive = &saved.orthanc_servers[0];
+        assert_eq!(
+            (archive.key.as_str(), archive.url.as_str(), archive.color.as_str()),
+            ("archive", "http://archive:8042", "#1a2b3c")
+        );
+        assert!(archive.enabled && archive.searched_by_default, "on by default");
+        assert!(!saved.orthanc_servers[1].enabled);
+        let keys: Vec<String> = saved.servers().into_iter().map(|s| s.key).collect();
+        assert_eq!(keys, ["main", "archive", "research"], "the default server first");
+        assert_eq!(saved.servers()[0].label, "Main");
+
+        // Write-only passwords: never in the view, kept when the form sends none.
+        let view = saved.to_view();
+        assert!(view["orthanc_servers"][0].get("password").is_none());
+        assert_eq!(view["orthanc_servers"][0]["password_set"], json!(true));
+        assert_eq!(view["orthanc_servers"][1]["password_set"], json!(false));
+        let echoed = view["orthanc_servers"].clone();
+        let again = saved.with_patch(&json!({ "orthanc_servers": echoed })).unwrap();
+        assert_eq!(again.orthanc_servers[0].password.0, "pw1", "the form's echo keeps the password");
+        let mut cleared = view["orthanc_servers"].clone();
+        cleared[0]["clear_password"] = json!(true);
+        assert_eq!(saved.with_patch(&json!({ "orthanc_servers": cleared })).unwrap().orthanc_servers[0].password.0, "");
+        // Another address needs the password again; another path of the same server does not.
+        let mut moved = view["orthanc_servers"].clone();
+        moved[0]["url"] = json!("http://evil.example:8042");
+        assert!(saved.with_patch(&json!({ "orthanc_servers": moved.clone() })).is_err());
+        moved[0]["password"] = json!("pw2");
+        assert_eq!(
+            saved.with_patch(&json!({ "orthanc_servers": moved })).unwrap().orthanc_servers[0].password.0,
+            "pw2"
+        );
+        let mut path = view["orthanc_servers"].clone();
+        path[0]["url"] = json!("http://archive:8042/orthanc");
+        assert!(saved.with_patch(&json!({ "orthanc_servers": path })).is_ok());
+        // A password is never moved from one server to another by renaming keys.
+        let mut renamed = view["orthanc_servers"].clone();
+        renamed[0]["key"] = json!("other");
+        assert_eq!(saved.with_patch(&json!({ "orthanc_servers": renamed })).unwrap().orthanc_servers[0].password.0, "");
+
+        // Refused.
+        let one = |extra: Value| {
+            let mut server = json!({ "key": "archive", "url": "http://archive:8042" });
+            for (k, v) in extra.as_object().unwrap() {
+                server[k] = v.clone();
+            }
+            with(json!([server]))
+        };
+        assert!(one(json!({ "key": "main" })).is_err(), "the default server's key");
+        assert!(one(json!({ "key": "" })).is_err());
+        assert!(one(json!({ "key": "a_b" })).is_err());
+        assert!(one(json!({ "key": "k".repeat(25) })).is_err());
+        assert!(one(json!({ "url": "ftp://archive" })).is_err());
+        assert!(one(json!({ "url": "http://a b" })).is_err());
+        assert!(one(json!({ "color": "red" })).is_err());
+        assert!(one(json!({ "label": "x".repeat(61) })).is_err());
+        assert!(one(json!({})).is_ok());
+        assert!(with(json!([{ "key": "a", "url": "http://a" }, { "key": "a", "url": "http://b" }])).is_err(), "twice");
+        let eight: Vec<Value> = (0..8).map(|i| json!({ "key": format!("s{i}"), "url": "http://x" })).collect();
+        assert!(with(json!(eight)).is_err(), "at most 7 more servers");
+        assert!(with(json!("archive")).is_err());
+    }
+
+    /// Settings saved by a version without several servers load unchanged.
+    #[test]
+    fn settings_from_before_several_servers() {
+        let stored = json!({ "orthanc_url": "http://pacs:8042", "orthanc_username": "u", "orthanc_password": "p" });
+        let loaded = Settings::merged_with_stored(Settings::defaults(), Some(stored.to_string()));
+        assert_eq!(loaded.orthanc_url, "http://pacs:8042");
+        assert!(loaded.orthanc_servers.is_empty());
+        assert_eq!(loaded.servers().len(), 1);
+        assert_eq!(loaded.servers()[0].password.0, "p");
     }
 
     /// A saved secret never follows a changed address to another server without being typed again.
