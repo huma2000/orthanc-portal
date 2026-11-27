@@ -124,18 +124,22 @@ async fn run_job(
 ) -> AppResult<Json<Value>> {
     let (orthanc, resource) = on;
     let job = resource.sibling(&orthanc.start_job(path, &body).await?).compound();
-    state.db.audit(&user.username, audit.0, &format!("{} (job {job})", audit.1));
+    // The audit log names the study with its server (`key:id`), like every entry about a study.
+    let text = audit.1.replacen(&resource.id, &resource.compound(), 1);
+    state.db.audit(&user.username, audit.0, &format!("{text} (job {job})"));
     Ok(Json(json!({ "job_id": job })))
 }
 
 /// A short description of a study for the audit log.
-async fn describe_study(orthanc: &OrthancClient, id: &str) -> String {
-    match orthanc.get_json(&format!("/studies/{id}")).await {
+/// A study as the audit log writes it: `key:id (patient | date | description)`.
+async fn describe_study(orthanc: &OrthancClient, study: &ResourceRef) -> String {
+    let shown = study.compound();
+    match orthanc.get_json(&format!("/studies/{}", study.id)).await {
         Ok(v) => {
             let s = StudySummary::from_orthanc(&v);
-            format!("{id} ({} | {} | {})", s.patient_name.replace('^', " "), s.study_date, s.study_description)
+            format!("{shown} ({} | {} | {})", s.patient_name.replace('^', " "), s.study_date, s.study_description)
         }
-        Err(_) => id.to_string(),
+        Err(_) => shown,
     }
 }
 
@@ -155,7 +159,7 @@ async fn delete(state: AppState, user: User, level: Level, id: String) -> AppRes
     feature(state.settings.get().allow_delete, "Deleting is switched off")?;
     let (orthanc, resource) = state.orthancs.resolve(&user, &id)?;
     let id = resource.id.clone();
-    let what = if level == Level::Study { describe_study(&orthanc, &id).await } else { id.clone() };
+    let what = if level == Level::Study { describe_study(&orthanc, &resource).await } else { resource.compound() };
     orthanc.delete(&format!("/{}/{id}", level.path())).await?;
     state.db.audit(&user.username, &format!("delete_{}", level.path()), &what);
     Ok(Json(json!({ "deleted": resource.compound() })))
@@ -462,7 +466,7 @@ pub async fn add_series(
     };
 
     // The study must exist (and gives the line of the audit log).
-    let what = describe_study(&orthanc, &id).await;
+    let what = describe_study(&orthanc, &resource).await;
     orthanc.get_json(&format!("/studies/{id}")).await?;
 
     let series_uid = new_uid();

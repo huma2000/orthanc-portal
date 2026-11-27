@@ -95,6 +95,6 @@ pub async fn download_series(
         short_id(&id)
     );
 
-    state.db.audit(&user.username, "download_series", &format!("{id} ({file_name})"));
+    state.db.audit(&user.username, "download_series", &format!("{resource} ({file_name})"));
     zip_response(upstream, &file_name)
 }

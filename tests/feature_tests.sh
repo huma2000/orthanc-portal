@@ -402,7 +402,10 @@ ok "...not on the default server's" "$(grep -c second-server "$WORK/labels.log")
 zips() { grep -c "/studies/$SID/archive" "$WORK/m2/auth.log"; }
 Z0=$(zips)
 ok "downloading it asks that server for the ZIP" "$(code $F $A GET /api/studies/$AID/download)/$(( $(zips) - Z0 ))" "200/1"
+R0=$(cat "$WORK/m2/rendered.log" 2>/dev/null | wc -l)
 ok "its thumbnail" "$(code $F $A GET /api/studies/$AID/thumbnail)" "200"
+ok "...drawn by that server, not taken from the default server's cached one (same Orthanc ID)" "$(code $F $A GET /api/studies/$SID/thumbnail)/$(( $(cat "$WORK/m2/rendered.log" 2>/dev/null | wc -l) - R0 > 0 ))" "200/1"
+has "the audit log names that server's study as key:id" "$(body $F $A /api/admin/audit | py "' '.join(e['detail'] for e in d['entries'] if e['action'] == 'download_study')")" "archive:$SID"
 put $A '{"allow_modify":true}' > /dev/null
 MJ=$(body $F $A /api/studies/$AID/modify -X POST -H "$J" -d '{"replace":{"StudyDescription":"ON ARCHIVE"}}' | py "d['job_id']")
 ok "editing it starts a job on that server, and the job's ID says so" "$(echo "$MJ" | cut -d: -f1)/$([ -s "$WORK/m2/modify.log" ] && echo asked)" "archive/asked"

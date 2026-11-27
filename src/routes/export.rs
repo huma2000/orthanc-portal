@@ -72,6 +72,8 @@ pub async fn cd_export(
         return Err(AppError::BadRequest("Choose 1 to 100 studies".into()));
     }
     let raw: Vec<&str> = ids.iter().map(String::as_str).collect();
+    // The audit log names the studies with their server (`key:id`).
+    let named = raw.join(",");
     let (orthanc, _, ids) = state.orthancs.resolve_together(&user, &raw)?;
     let _slot = EXPORT_GATE.try_acquire().map_err(|_| {
         AppError::TooManyRequests("Two exports are being prepared already: try again in a minute".into())
@@ -128,7 +130,7 @@ pub async fn cd_export(
     state.db.audit(
         &user.username,
         "export_cd",
-        &format!("{} studies: {} ({file_name}, viewer files: {viewer_files})", ids.len(), ids.join(",")),
+        &format!("{} studies: {named} ({file_name}, viewer files: {viewer_files})", ids.len()),
     );
 
     // 3. Stream it, then delete it.

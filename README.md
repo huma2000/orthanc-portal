@@ -1102,6 +1102,11 @@ All JSON. State-changing calls need the header `X-Requested-With: portal`.
 "intranet" = only registered on the staff listener (default `:8080`); "internet" = only on the invitation listener
 (default `:8081`).
 
+**Adding another Orthanc server (for now through the API).** There is no settings page for the servers yet:
+an administrator adds them with `PUT /api/admin/settings` and `"orthanc_servers": [...]` (below). Each needs
+`key` (fixed once created, used in IDs and links), `url`, and its account. With two or more servers the
+pages show their server controls; Settings > Users and Security & roles choose who may use which server.
+
 **IDs and several Orthanc servers.** `{id}` is Orthanc's own ID of a study, series, image or job. Besides the
 default Orthanc (the *Orthanc connection* settings, key `main`), the portal can reach other Orthanc servers, set
 in the `orthanc_servers` setting. *Being built*: searching, viewing, downloads, labels, edits, links and
@@ -1284,13 +1289,20 @@ The code compiles without warnings on Rust 1.91, passes `cargo clippy --all-targ
 formatted with `rustfmt` (see `rustfmt.toml`), and its dependencies were checked against the RustSec advisory
 database (no known vulnerable version in `Cargo.lock`). The automated tests live in the **`tests/`** folder:
 
-* `tests/feature_tests.sh`: **195 checks** of the features of section 9c on a fresh portal: two-step sign-in
+* `tests/feature_tests.sh`: **281 checks** of the features of section 9c on a fresh portal: two-step sign-in
   (set-up, codes used once, recovery codes, required mode, reset), My account, link notifications (and that they
   never name the patient), anonymized copies (made, shown, deleted on revocation), whole-patient links, QR codes,
   upload links (password, nothing leaked, size limit, non-DICOM files, revocation), the patient CD export (with
   and without a viewer folder), backups, statistics, recently viewed and an auto-forward rule fired by Orthanc's
-  change list, and that every feature can be switched off (also for what is already under way).
-* `tests/server_tests.sh`: **630 checks** of the server against a fake Orthanc (`tests/mock_orthanc.py`) and a
+  change list, and that every feature can be switched off (also for what is already under way). **Several
+  Orthanc servers**: a second fake Orthanc (port 18043) holding the same studies under the same IDs, and checks
+  for every part: `key:id` IDs, searches merged with one row per study, the distinct study count, a server
+  that does not answer, viewers routed by study UID, downloads, labels, edits and their jobs, links and their
+  guests, sending from each server, copying between servers (and from an auto-forward rule), uploads and
+  upload links into a chosen server, auto-forward per server, the audit log naming the server, the thumbnail
+  cache kept apart, and **accounts limited to some servers** (searches, IDs, viewers, bulk send, uploads and
+  the pages that only work with the default server).
+* `tests/server_tests.sh`: **654 checks** of the server against a fake Orthanc (`tests/mock_orthanc.py`) and a
   fake mail server (`tests/mock_smtp.py`):
   the two doors (staff portal vs invitation links only, Cloudflare headers refused on the intranet port), creating
   links with the default and the limited validity/downloads, the password gate and its throttling, what a guest
@@ -1303,15 +1315,22 @@ database (no known vulnerable version in `Cargo.lock`). The automated tests live
   one, and when it refuses the portal** (what is sent, what is not, the message for each case), an
   administrator changing their own password (every other session of that account is signed out), and the
   portal in Spanish (the setting, the dictionary on both listeners, the pages and the invitation emails);
-* `tests/ui_tests.js`: **215 checks** of both web pages in a simulated browser (jsdom): the Share dialog and the
+* `tests/ui_tests.js`: **235 checks** of both web pages in a simulated browser (jsdom): the Share dialog and the
   Shares tab, the guest page (password, study, series, countdown, downloads left, expiry, revoked, 0-download
   links, no OHIF), what each kind of staff account sees, search, the with/without-account choice in Settings,
   and the translations (every `t()` text translated, the language menu, the portal's language, the server's
-  messages and the invitation page in Spanish);
-* `cargo test`: **46 unit tests** (image validation; password and link generation; the rules that confine a guest
+  messages and the invitation page in Spanish), and with two Orthanc servers: the server buttons of the
+  searches, the Server column and its badges, "Open the copy on...", "Copy to server...", "Upload to", the
+  study count per server, and the server choice of users and roles;
+* `cargo test`: **88 unit tests** (image validation; password and link generation; the rules that confine a guest
   to one study; account / no account and the wording of Orthanc refusals; the thumbnail cache; tokens and sessions;
   the role of a user, settings saved by earlier versions, the appearance settings; email addresses, invitation texts (English and Spanish), the hourly email limit and
   the rule that the mail server password never travels unencrypted).
+
+**Against real Orthanc servers: `tests/real_orthanc/`.** How the portal was checked against two real Orthanc
+servers with the real DICOMweb and OHIF plugins, in a real browser (OHIF drawing each server's copy of a
+study, accounts limited to one server, a study copied between servers): what was downloaded, the set-up, the
+scripts and the results.
 
 **Trying it by hand: `tests/dev_env.sh`.** It builds the portal and starts it with the fake Orthanc in a demo
 mode (14 studies with preview images; every uploaded file becomes a new study), on its own ports and in its own
