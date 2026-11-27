@@ -546,6 +546,19 @@ ok "...and its password was kept" "$(body $F $A /api/admin/settings | py "d['set
 put $A '{"orthanc_servers":[]}' > /dev/null
 stop_pid mock2
 
+echo "== new versions on GitHub (the fake one: tests never ask GitHub)"
+curl -s -X POST -d '{"status":200,"release":{"tag_name":"v99.1.0","name":"V","html_url":"https://github.com/huma2000/orthanc-portal/releases/tag/v99.1.0","published_at":"2030-01-01T00:00:00Z","body":"x","draft":false,"prerelease":false}}' http://127.0.0.1:18042/__mock/github > /dev/null
+ok "Check now finds the newer version" "$(body $F $A /api/admin/updates/check -X POST | py "(d['newer'], d['latest']['tag'], d['current'] != '')")" "(True, 'v99.1.0', True)"
+ok "...with the instructions for this installation (built from source)" "$(body $F $A /api/admin/updates | py "(d['install']['kind'], 'cargo build --release' in [s.get('command') for s in d['instructions']])")" "('source', True)"
+ok "...administrators are told on every page" "$(body $F $A /api/me | py "d['features']['update']['version']")" "v99.1.0"
+ok "...other accounts are not, and cannot ask (403)" "$(body $F $V /api/me | py "'update' in d['features']")/$(code $F $V GET /api/admin/updates)" "False/403"
+ok "switched off: no notice (Check now still works)" "$(put $A '{"update_check":false}' | tail -1)/$(body $F $A /api/me | py "'update' in d['features']")" "200/False"
+put $A '{"update_check":true}' > /dev/null
+curl -s -X POST -d '{"status":403}' http://127.0.0.1:18042/__mock/github > /dev/null
+ok "GitHub refusing: said, and the release found before is kept" "$(body $F $A /api/admin/updates/check -X POST | py "(d['error'] is not None, d['latest']['tag'])")" "(True, 'v99.1.0')"
+curl -s -X POST -d '{"status":200,"release":{"tag_name":"v0.0.1","name":"Old","html_url":"https://x","published_at":"","body":""}}' http://127.0.0.1:18042/__mock/github > /dev/null
+ok "an older release: nothing to tell" "$(body $F $A /api/admin/updates/check -X POST | py "d['newer']")/$(body $F $A /api/me | py "'update' in d['features']")" "False/False"
+
 echo; echo "RESULT: $PASS passed, $FAIL failed$([ "$SKIP" -gt 0 ] && echo ", $SKIP skipped")"
 stack_stop
 [ "$FAIL" -eq 0 ]

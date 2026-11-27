@@ -124,7 +124,7 @@ async function newLink(admin, body) {
     admin.$$(".subtabs [role=tab]").map((b) => b.textContent).join());
   check("no stray 'null' text on the page (it used to appear under the title)",
     !admin.$$("main *").some((el) => Array.from(el.childNodes).some((n) => n.nodeType === 3 && n.textContent.trim() === "null")));
-  check("General shows Branding and Viewers", visibleSections().join() === "Branding,Viewers and uploads", visibleSections().join());
+  check("General shows Branding, Viewers and New versions", visibleSections().join() === "Branding,New versions,Viewers and uploads", visibleSections().join());
   admin.click(subtab("Search & labels"));
   check("Search & labels shows the modality buttons, the lists and search options, and the labels", visibleSections().join() === "Modality buttons,Studies lists and search,Labels", visibleSections().join());
   admin.click(subtab("Orthanc"));
@@ -790,6 +790,30 @@ async function newLink(admin, body) {
       && c.$$(".modbtn-row input[type=color]").length >= 1 && c.$$(".label-color-row").length >= 1);
     await admin.call("PUT", "/api/admin/settings", { modality_buttons: cur.modality_buttons, label_colors: {} });
     all_extra.push(c);
+  }
+
+  console.log("--- new versions on GitHub");
+  {
+    // The fake GitHub publishes a newer version; Check now finds it.
+    await fetch("http://127.0.0.1:18042/__mock/github", { method: "POST", body: JSON.stringify({ status: 200, release: {
+      tag_name: "v99.0.0", name: "Version 99", html_url: "https://github.com/huma2000/orthanc-portal/releases/tag/v99.0.0",
+      published_at: "2030-01-01T00:00:00Z", body: "Everything is better.", draft: false, prerelease: false,
+      assets: [{ name: "orthanc-portal-v99.0.0-windows-x64.zip", browser_download_url: "https://github.com/x/a.zip" }] } }) });
+    await admin.call("POST", "/api/admin/updates/check");
+    const u = await makeDom(STAFF); await u.login("admin", "SuperSecret123");
+    check("administrators are told about the new version", /Version 99\.0\.0 of the portal is available/.test(u.text()));
+    await u.tab("Settings"); await sleep(1000);
+    const panel = u.$(".update-panel");
+    check("Settings > General: the version, the newer one and how to update THIS installation (built from source here)",
+      !!panel && /A newer version is published: 99\.0\.0/.test(panel.textContent) && /Built from the source code/.test(panel.textContent)
+      && u.$$(".update-steps code").map((c) => c.textContent).includes("cargo build --release"), panel && panel.textContent.slice(0, 300));
+    u.click(u.button(u.$(".update-notice") || u.$("main"), "Hide")); await sleep(200);
+    check("...the notice can be hidden for that version", !u.$(".update-notice"));
+    const v = await makeDom(STAFF); await v.login("reader", "ReaderPass123");
+    check("...other accounts are not told", !/of the portal is available/.test(v.text()));
+    await fetch("http://127.0.0.1:18042/__mock/github", { method: "POST", body: JSON.stringify({ release: { tag_name: "v0.0.1", name: "Old", html_url: "https://x", published_at: "", body: "" } }) });
+    await admin.call("POST", "/api/admin/updates/check");
+    all_extra.push(u, v);
   }
 
   console.log("--- several Orthanc servers");

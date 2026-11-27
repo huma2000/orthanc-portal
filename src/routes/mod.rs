@@ -246,6 +246,8 @@ fn staff_router(state: AppState) -> Router {
         // --- configuration from the web interface ---
         .route("/admin/settings", get(settings::get_settings).put(settings::update_settings))
         .route("/admin/orthanc/test", post(settings::test_orthanc))
+        .route("/admin/updates", get(settings::updates))
+        .route("/admin/updates/check", post(settings::check_updates))
         .route("/admin/email/test", post(settings::test_email))
         .route("/admin/nodes", get(settings::list_nodes))
         .route("/admin/nodes/{alias}", put(settings::put_node).delete(settings::delete_node))

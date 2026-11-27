@@ -355,6 +355,25 @@ only*, a search box, *Refresh* and *Download the file*. Only plain log-file name
   container read-only and enter its path in the setting (or set `ORTHANC_LOG_DIR` before the first start).
 * **Option C** (bare metal): enter Orthanc's log folder; the portal's account must be allowed to read it.
 
+### New versions: the update check
+
+Once a day the portal asks GitHub's public list of releases (`huma2000/orthanc-portal`) whether a newer version
+is published; nothing about the installation is sent. **Administrators** then see a notice on every page (it can
+be hidden for that version), and *Settings > General > New versions* shows this version, the latest one, its
+notes and **how to update this very installation**, step by step, with the commands to copy. **Nothing is
+installed by itself.** The portal works out how it was installed:
+
+| Installed | How it knows | The steps it gives |
+|---|---|---|
+| **Docker Compose** (options A and B) | the image says so (`PORTAL_INSTALL=docker`), and each compose file names its folder (`PORTAL_COMPOSE_DIR`) | `cd <source>/<that folder>`, `git pull`, `docker compose up -d --build` (the image is built from the source: `docker compose pull` would not update it), `docker compose ps` |
+| **Built from the source** (option C) | the program runs from cargo's `target/.../release` folder | `cd <source folder>`, `git pull`, `cargo build --release`, then restart (`systemctl restart` when it runs as a systemd service) |
+| **A program file from a release** | anything else | download the zip for this operating system, check its SHA-256, stop the portal, replace the program, start it again; when the release has no program for this system, build it from the source |
+
+Users, settings, links and studies are always kept (database, Docker volumes, Orthanc). Untick *Check for new
+versions once a day* where the portal must not reach the internet; **Check now** still works.
+`UPDATE_CHECK_URL` replaces GitHub's address (a mirror; the tests point it at their fake server). API:
+`GET /api/admin/updates`, `POST /api/admin/updates/check` (administrators).
+
 ### Languages: English and Spanish
 
 The portal speaks **English** and **Spanish (Spain)**. *Settings > Appearance > Language* sets the language for

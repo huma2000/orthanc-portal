@@ -611,6 +611,11 @@ pub struct Settings {
     #[serde(default = "default_backup_keep")]
     pub backup_keep: u64,
 
+    // ---- New versions (Settings > General) -----------------------------------------------
+    /// Ask GitHub once a day whether a newer version of the portal is published (`updates.rs`).
+    #[serde(default = "default_true")]
+    pub update_check: bool,
+
     // ---- Home page: what each person looked at last -------------------------------------
     #[serde(default = "default_true")]
     pub recently_viewed: bool,
@@ -1037,6 +1042,7 @@ impl Settings {
             backup_interval_hours: default_backup_hours(),
             backup_keep: default_backup_keep(),
             recently_viewed: true,
+            update_check: true,
             recently_viewed_count: default_recently_viewed_count(),
             stats_page: true,
             smtp_host: String::new(),

@@ -253,6 +253,8 @@ PATIENT_ID = "77777777-66666666-55555555-44444444-33333333"   # the patient of S
 ANON = {}       # anonymized copies made by POST /studies/{id}/anonymize without "Asynchronous": id -> study
 OAUTH = []      # token requests received by /__mock/oauth/token (Microsoft 365 email tests)
 CHANGES = []    # Orthanc's list of changes (GET /changes); the tests add to it (POST /__mock/change)
+GITHUB = {"status": 200, "release": {"tag_name": "v0.0.1", "name": "Old", "html_url": "https://github.com/huma2000/orthanc-portal/releases/tag/v0.0.1",
+                                     "published_at": "2020-01-01T00:00:00Z", "body": "", "draft": False, "prerelease": False}}
 
 
 def all_studies():
@@ -506,6 +508,10 @@ class H(BaseHTTPRequestHandler):
         return self.rfile.read(n) if n else b""   # always consumed BEFORE answering, like a real server
 
     def do_GET(self):
+        # Stands in for GitHub's latest release (the portal's update check); no Orthanc account.
+        if self.path == "/__mock/github/latest":
+            if GITHUB.get("status", 200) != 200: return self._json({"message": "x"}, GITHUB["status"])
+            return self._json(GITHUB["release"])
         if not self._gate(): return
         p = self.path.split("?")[0]
         if p == "/system": return self._json({"Version": VERSION, "Capabilities": ["HasExtendedFind", "HasExtendedChanges"]})
@@ -573,6 +579,8 @@ class H(BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = self._body()
+        if self.path == "/__mock/github":   # test control: the release the fake GitHub publishes, or its HTTP status
+            GITHUB.update(json.loads(body)); return self._json(GITHUB)
         if self.path == "/__mock/auth":   # test control, not part of Orthanc: switches the protection mode
             MODE["auth"] = json.loads(body)["mode"]; return self._json({"mode": MODE["auth"]})
         if self.path == "/__mock/change":   # test control: Orthanc records a change (e.g. a study became stable)

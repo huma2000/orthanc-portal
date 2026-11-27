@@ -867,7 +867,7 @@ function renderSimplified() {
 
   // Red notice (administrators only) when Orthanc is unreachable or too old.
   const banner = h("div", { id: "orthanc-banner", class: "banner", role: "alert", hidden: true });
-  const main = h("main", { class: "simple-main" }, banner, current.build());
+  const main = h("main", { class: "simple-main" }, banner, updateNotice(), current.build());
 
   root.append(h("div", { class: options.show_labels ? "simple labels" : "simple" }, head, side, main));
   paintOrthancBanner();
@@ -3979,6 +3979,70 @@ function paintOrthancBanner() {
   }
 }
 
+/* ---- New versions (administrators): a notice, and Settings > General > New versions ---- */
+
+const UPDATE_HIDDEN_KEY = "portal-update-hidden";
+/** "Version 0.2.0 of the portal is available (this one is 0.1.2). What's new · Hide" (hidden per version). */
+function updateNotice() {
+  const update = state.user && state.user.features.update;
+  if (!update || !update.version) return null;
+  let hidden = "";
+  try { hidden = localStorage.getItem(UPDATE_HIDDEN_KEY) || ""; } catch { /* not kept */ }
+  if (hidden === update.version) return null;
+  const notice = h("div", { class: "notice update-notice", role: "status" },
+    h("span", null, t("Version {version} of the portal is available.", { version: update.version.replace(/^v/i, "") }), " ",
+      h("a", { href: update.url, target: "_blank", rel: "noopener noreferrer" }, "What's new"), " · ",
+      h("button", { class: "btn small", type: "button", onclick: () => openSettings("general") }, "Details"), " ",
+      h("button", {
+        class: "btn small", type: "button",
+        onclick: () => { try { localStorage.setItem(UPDATE_HIDDEN_KEY, update.version); } catch { /* not kept */ } notice.remove(); },
+      }, "Hide")));
+  return notice;
+}
+
+/** This version, the latest release, when it was checked, and Check now (Settings > General). */
+function buildUpdatePanel() {
+  const box = h("div", { class: "setting wide update-panel" }, h("div", { class: "muted" }, "Loading..."));
+  const paint = (u) => {
+    const latest = u.latest ? u.latest.tag.replace(/^v/i, "") : null;
+    const lines = [h("div", null, t("This portal: version {version}.", { version: u.current }))];
+    if (latest) {
+      lines.push(h("div", null, u.newer
+        ? h("b", null, t("A newer version is published: {version}.", { version: latest }))
+        : t("It is the latest version (published: {version}).", { version: latest }),
+        " ", h("a", { href: u.latest.url, target: "_blank", rel: "noopener noreferrer" }, "Release page")));
+      if (u.newer && u.latest.notes) lines.push(h("details", null, h("summary", null, "What's new"), h("pre", { class: "release-notes" }, u.latest.notes)));
+    }
+    if (u.checked_at) lines.push(h("div", { class: "muted" }, t("Last checked: {date}.", { date: formatTimestamp(u.checked_at) })));
+    if (u.error) lines.push(h("div", { class: "form-error" }, translateMessage(u.error)));
+    // How THIS installation is updated: Docker, built from the source code, or a program file.
+    const install = u.install || {};
+    const how = install.kind === "docker"
+      ? t("Installed with Docker Compose ({folder}).", { folder: install.compose_dir || "deploy" })
+      : install.kind === "source"
+        ? t("Built from the source code in {folder}.", { folder: install.source_dir })
+        : t("Installed as a program file: {file}.", { file: install.exe });
+    const steps = h("ol", { class: "update-steps" }, (u.instructions || []).map((s) => h("li", null,
+      h("div", null, translateMessage(s.text), s.link ? [" ", h("a", { href: s.link, target: "_blank", rel: "noopener noreferrer" }, "Download")] : null),
+      s.command ? h("div", { class: "secret-box" }, h("code", null, s.command), copyButton("Copy", () => s.command)) : null)));
+    const guide = [h("div", null, how), steps];
+    lines.push(u.newer
+      ? h("div", { class: "update-guide" }, h("b", null, t("How to update this installation to {version}:", { version: latest })), ...guide)
+      : h("details", null, h("summary", null, "How to update this installation"), ...guide));
+    const check = h("button", {
+      class: "btn", type: "button",
+      onclick: async () => {
+        check.disabled = true;
+        try { paint(await api("POST", "/api/admin/updates/check")); } catch (e) { toastError(e); check.disabled = false; }
+      },
+    }, "Check now");
+    box.replaceChildren(...lines, h("div", { class: "filter-actions" }, check,
+      h("a", { class: "btn", href: u.releases, target: "_blank", rel: "noopener noreferrer" }, "All releases")));
+  };
+  api("GET", "/api/admin/updates").then(paint).catch((e) => box.replaceChildren(h("div", { class: "form-error" }, e.message)));
+  return box;
+}
+
 /* ---- Pages that show one Orthanc server at a time (Jobs, System, DICOM nodes, worklists, query /
    retrieve, Statistics): with several servers, a choice at the top, remembered per page. ---- */
 
@@ -4548,7 +4612,7 @@ function buildLabelColorsEditor(colors) {
  * in buildSettingsView). The others are separate screens whose changes apply at once.
  */
 const SETTINGS_TABS = [
-  { id: "general", label: "General", sections: ["branding", "viewers"] },
+  { id: "general", label: "General", sections: ["branding", "viewers", "updates"] },
   { id: "appearance", label: "Appearance", sections: ["theme", "simplified", "formatting"] },
   { id: "search", label: "Search & labels", sections: ["search", "lists", "labels"] },
   { id: "features", label: "Features", sections: ["features", "moreviewers"] },
@@ -4922,6 +4986,10 @@ function buildSettingsView() {
         SETTINGS_FIELDS.portal.map(field),
         buildBrandImagePicker("logo", "Logo", "PNG, JPEG, WebP, GIF or SVG, up to 1 MB. Shown in the top bar (about 32 px high, on a light plate so any logo is readable) and on the login page.", "image/png,image/jpeg,image/webp,image/gif,image/svg+xml"),
         buildBrandImagePicker("favicon", "Website icon", "PNG, ICO, SVG, JPEG, WebP or GIF, up to 256 KB. Square, at least 64 x 64 pixels. Shown in the browser tab and in bookmarks.", "image/png,image/x-icon,image/vnd.microsoft.icon,image/svg+xml,image/jpeg,image/webp,image/gif")),
+      section("updates", "New versions", "The portal can ask GitHub once a day whether a newer version is published. Administrators are told; nothing is installed by itself.",
+        field({ key: "update_check", label: "Check for new versions once a day", type: "checkbox", wide: true,
+          hint: "Asks GitHub's public list of releases of the portal (it sends nothing about this installation). Untick it where the portal must not reach the internet; Check now still works." }),
+        buildUpdatePanel()),
       section("search", "Modality buttons", "The quick filters above the Studies and Series lists. Put them in the order your staff use them and hide the ones nobody needs. Each button searches for one or more DICOM modality codes (RX = CR + DX). The \"Other codes\" box is always shown, so any code can still be searched.",
         modalityEditor.node),
       section("viewers", "Viewers and uploads", null, SETTINGS_FIELDS.viewers.map(field)),

@@ -241,6 +241,20 @@ pub async fn update_settings(
     Ok(Json(document))
 }
 
+// ------------------------------------------------------------- new versions
+
+/// `GET /api/admin/updates`: this version, the latest release on GitHub, whether it is newer.
+pub async fn updates(State(state): State<AppState>, AuthUser(admin): AuthUser) -> AppResult<Json<Value>> {
+    admin.require(Permission::Admin)?;
+    Ok(Json(crate::updates::status_json(&state)))
+}
+
+/// `POST /api/admin/updates/check`: asks GitHub now (also when the daily check is switched off).
+pub async fn check_updates(State(state): State<AppState>, AuthUser(admin): AuthUser) -> AppResult<Json<Value>> {
+    admin.require(Permission::Admin)?;
+    Ok(Json(crate::updates::check(&state).await))
+}
+
 // ----------------------------------------------------------- test connection
 
 /// Optional values to try. Anything omitted falls back to the SAVED setting, so

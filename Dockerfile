@@ -42,6 +42,7 @@ USER portal
 ENV BIND_ADDR=0.0.0.0:8080 \
     REMOTE_BIND_ADDR=0.0.0.0:8081 \
     LISTENERS_FROM_ENV=true \
+    PORTAL_INSTALL=docker \
     DATABASE_PATH=/data/portal.db
 VOLUME /data
 # Default ports: 8080 = intranet (staff portal), 8081 = internet (invitation links only,

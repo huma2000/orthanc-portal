@@ -62,6 +62,8 @@ services:
     depends_on:
       - orthanc
     environment:
+      # Where this compose file is: the update instructions (Settings > General) name it.
+      PORTAL_COMPOSE_DIR: deploy
       # INITIAL values only: after the first start, change them from the web
       # interface (sign in as admin > Settings). The saved values then win.
       ORTHANC_URL: http://orthanc:8042          # "orthanc" = service name above

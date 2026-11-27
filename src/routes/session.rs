@@ -126,6 +126,9 @@ pub struct Features {
     two_factor: TwoFactorMode,
     /// The "Recently viewed" list of the home page: how many (0 = not shown).
     recently_viewed: u64,
+    /// Administrators only: a newer version published on GitHub (`{ version, url, name }`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    update: Option<serde_json::Value>,
 }
 
 /// Answer of `/api/login` and `/api/me`: the user fields (id, username,
@@ -249,6 +252,7 @@ async fn me_response(state: &AppState, user: User) -> Me {
             upload_links,
             two_factor: settings.two_factor,
             recently_viewed: if settings.recently_viewed && user_may_read { settings.recently_viewed_count } else { 0 },
+            update: if is_admin { crate::updates::newer_release(state) } else { None },
         },
     }
 }

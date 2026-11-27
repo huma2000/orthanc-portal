@@ -50,7 +50,9 @@ mock_start() {
 mock_auth() { curl -s -X POST -d "{\"mode\":\"$1\"}" http://127.0.0.1:18042/__mock/auth > /dev/null; }
 # portal_start [ENV=value ...]  (first start: environment values seed the settings)
 portal_start() {
+  # UPDATE_CHECK_URL: the update check asks the fake Orthanc's stand-in, never GitHub.
   env ORTHANC_URL=http://127.0.0.1:18042 ORTHANC_USERNAME=orthanc ORTHANC_PASSWORD=s3cr3tpw DATABASE_PATH="$WORK/portal.db" \
+      UPDATE_CHECK_URL=http://127.0.0.1:18042/__mock/github/latest \
       BIND_ADDR=127.0.0.1:18080 REMOTE_BIND_ADDR=127.0.0.1:18081 ADMIN_PASSWORD=SuperSecret123 "$@" "$PORTAL_BIN" >> "$WORK/portal.log" 2>&1 &
   remember portal $!
   sleep 2.5

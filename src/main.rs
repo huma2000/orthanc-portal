@@ -70,6 +70,7 @@ mod sharing;
 mod state;
 mod thumbnails;
 mod totp;
+mod updates;
 mod util;
 
 use crate::auth::{LoginThrottle, TokenStore};
@@ -158,6 +159,8 @@ async fn main() -> anyhow::Result<()> {
 
     // 5b. Auto-forward rules (Settings > Auto-forward): follows Orthanc's changes in the background.
     tokio::spawn(forward::run(state.clone()));
+    // 5c. New versions on GitHub (Settings > General): once a day, administrators are told.
+    tokio::spawn(updates::run(state.clone()));
     // Patient CD exports interrupted by the last stop leave files behind: remove them.
     routes::export::clean_export_dir(&routes::export::export_dir(&state));
 
