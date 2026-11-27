@@ -87,10 +87,13 @@ pub struct SendRequest {
     target: String,
 }
 
-/// Starts the job that sends one study to `node`; records it in the Transfers list.
+/// Starts the job that sends one study to `node`; records it in the Transfers list. `person` is
+/// who asks (checked: they must be allowed to use the study's server); `None` for a background
+/// task (an auto-forward rule), whose study comes from the server it watches.
 pub(crate) async fn start_send(
     state: &AppState,
     username: &str,
+    person: Option<&crate::db::User>,
     node: &ModalityNode,
     id: &str,
 ) -> AppResult<(i64, String)> {
@@ -102,8 +105,12 @@ pub(crate) async fn start_send(
             "Sending is only available for the studies of the default Orthanc server for now".into(),
         ));
     }
+    let orthanc = match person {
+        Some(user) => state.orthancs.of(user, &study_ref)?,
+        None => state.orthancs.stored(&study_ref.server)?,
+    };
     let id = study_ref.id.as_str();
-    let study = StudySummary::from_orthanc(&state.orthanc.get_json(&format!("/studies/{id}")).await?);
+    let study = StudySummary::from_orthanc(&orthanc.get_json(&format!("/studies/{id}")).await?);
     let label: String =
         format!("{} | {} | {}", study.patient_name.replace('^', " "), study.study_date, study.study_description)
             .chars()
@@ -111,13 +118,13 @@ pub(crate) async fn start_send(
             .collect();
 
     let job_id = match node.kind {
-        "dicom" => state.orthanc.store_to_modality(&node.id, id).await?,
+        "dicom" => orthanc.store_to_modality(&node.id, id).await?,
         kind => {
             let name = node.id.split_once(':').map(|(_, n)| n).unwrap_or_default();
             let name = utf8_percent_encode(name, NON_ALPHANUMERIC);
             let path =
                 if kind == "peer" { format!("/peers/{name}/store") } else { format!("/dicom-web/servers/{name}/stow") };
-            state.orthanc.start_job(&path, &json!({ "Resources": [id], "Synchronous": false })).await?
+            orthanc.start_job(&path, &json!({ "Resources": [id], "Synchronous": false })).await?
         }
     };
     let transfer_id = state.db.add_transfer(username, id, &label, &node.id, &job_id, "send")?;
@@ -141,9 +148,9 @@ pub async fn send_study(
     Json(req): Json<SendRequest>,
 ) -> AppResult<Json<Value>> {
     user.require(Permission::Send)?;
-    let (_, study) = state.orthancs.resolve(&id)?;
+    let (_, study) = state.orthancs.resolve(&user, &id)?;
     let node = find_destination(&state, &req.target).await?;
-    let (transfer_id, job_id) = start_send(&state, &user.username, &node, &study.compound()).await?;
+    let (transfer_id, job_id) = start_send(&state, &user.username, Some(&user), &node, &study.compound()).await?;
     Ok(Json(json!({ "transfer_id": transfer_id, "job_id": job_id })))
 }
 
@@ -171,7 +178,7 @@ pub async fn send_many(
     let (state, user, node) = (&state, &user, &node);
     let outcomes: Vec<(String, AppResult<(i64, String)>)> = stream::iter(req.studies.clone())
         .map(|id| async move {
-            let outcome = start_send(state, &user.username, node, &id).await;
+            let outcome = start_send(state, &user.username, Some(user), node, &id).await;
             (id, outcome)
         })
         .buffered(PARALLEL_STARTS)

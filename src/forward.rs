@@ -232,7 +232,7 @@ async fn forward_study(state: &AppState, rules: &[ForwardRule], id: &str) {
         let who = format!("auto: {}", rule.name);
         let outcome = async {
             let node = find_destination(state, &rule.target).await?;
-            start_send(state, &who, &node, id).await
+            start_send(state, &who, None, &node, id).await
         }
         .await;
         match outcome {

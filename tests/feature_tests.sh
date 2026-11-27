@@ -422,6 +422,59 @@ Z0=$(zips)
 ok "...downloads it from that server" "$(curl -s -o /dev/null -w '%{http_code}' -H "Cookie: share_session=$GC2" -H "$H" "$G/api/share/$L2T/download")/$(( $(zips) - Z0 ))" "200/1"
 PROXY_BEFORE=$(cat "$WORK/m2/proxy.log" 2>/dev/null | wc -l)
 ok "...and views it from that server" "$(curl -s -o /dev/null -w '%{http_code}' -H "Cookie: share_session=$GC2" "$G/dicom-web/studies/$UID_/series")/$(( $(cat "$WORK/m2/proxy.log" | wc -l) - PROXY_BEFORE ))" "200/1"
+echo "== several Orthanc servers: searching them all, and who may use which"
+# Both fake Orthancs hold the same studies (same UIDs, same Orthanc IDs).
+ok "the page is told about both servers" "$(body $F $A /api/me | py "[s['key'] for s in d['orthanc_servers']]")" "['main', 'archive']"
+ok "a search asks both by default: one row per study, naming both servers" "$(body $F $A "/api/studies?patient_name=DOE" | py "(d['servers'], sorted({tuple(s['servers']) for s in d['items']}), all(':' not in s['id'] for s in d['items']))")" "(['main', 'archive'], [('main', 'archive')], True)"
+ok "...with the ID of each copy (for Open the copy on)" "$(body $F $A "/api/studies?patient_name=DOE" | py "[c['id'] for s in d['items'] if s['id'] == '$SID' for c in s['copies']]")" "['$SID', 'archive:$SID']"
+ok "...each study once" "$(body $F $A "/api/studies?patient_name=DOE" | py "len(d['items']) == len({s['study_instance_uid'] for s in d['items']})")" "True"
+ok "only the archive: its IDs say so" "$(body $F $A "/api/studies?servers=archive" | py "(d['servers'], len(d['items']) > 0 and all(s['id'].startswith('archive:') and s['server'] == 'archive' for s in d['items']))")" "(['archive'], True)"
+ok "an unknown server is refused (400)" "$(code $F $A GET "/api/studies?servers=nowhere")" "400"
+ok "series of the archive: series and study IDs say so" "$(body $F $A "/api/series?servers=archive" | py "len(d['items']) > 0 and all(x['id'].startswith('archive:') and x['study']['id'].startswith('archive:') for x in d['items'])")" "True"
+ok "series of both: each series once, naming both" "$(body $F $A "/api/series" | py "sorted({tuple(x['servers']) for x in d['items']})")" "[('main', 'archive')]"
+ok "too deep a page over several servers is refused (400)" "$(code $F $A GET "/api/studies?offset=6000")" "400"
+ok "the number of studies: in all and on each server" "$(body $F $A /api/stats | py "(d['studies'] == sum(s['studies'] for s in d['servers']), [s['key'] for s in d['servers']])")" "(True, ['main', 'archive'])"
+M1=$(wc -l < "$WORK/proxy.log"); M2=$(wc -l < "$WORK/m2/proxy.log")
+ok "a viewer's search naming no study asks both servers, and gives each study once" "$(body $F $A "/dicom-web/studies?00100020=P-001" | py "len(d)")/$(( $(wc -l < "$WORK/proxy.log") - M1 ))/$(( $(wc -l < "$WORK/m2/proxy.log") - M2 ))" "1/1/1"
+
+# An account that may use the archive only.
+ok "an account cannot be limited to no server (400)" "$(code $F $A POST /api/admin/users -H "$J" -d '{"username":"nosrv","password":"LongPassword123","permissions":["read"],"servers":[]}')" "400"
+ok "...nor to a server that does not exist (400)" "$(code $F $A POST /api/admin/users -H "$J" -d '{"username":"nosrv","password":"LongPassword123","permissions":["read"],"servers":["nowhere"]}')" "400"
+mkuser arch LongPassword123 '"read","visualize","download","upload","send"' ',"servers":["archive"]'
+AR=$(login $F arch LongPassword123)
+ok "the account is limited to the archive" "$(body $F $A /api/admin/users | py "[u['servers'] for u in d['users'] if u['username'] == 'arch']")" "[['archive']]"
+ok "...its page offers the archive only" "$(body $F $AR /api/me | py "[s['key'] for s in d['orthanc_servers']]")" "['archive']"
+ok "...it searches the archive only" "$(body $F $AR /api/studies | py "(d['servers'], all(s['id'].startswith('archive:') and s.get('servers', ['archive']) == ['archive'] for s in d['items']))")" "(['archive'], True)"
+ok "...the default server cannot be searched (400, like an unknown one)" "$(code $F $AR GET "/api/studies?servers=main")" "400"
+ok "...a study of the default server does not exist for it (404)" "$(code $F $AR GET /api/studies/$SID/series)/$(code $F $AR GET /api/studies/$SID/download)/$(code $F $AR GET /api/studies/$SID/thumbnail)" "404/404/404"
+ok "...the same study on the archive does" "$(code $F $AR GET /api/studies/$AID/series)" "200"
+ok "...it cannot share or send the default server's study (404)" "$(code $F $AR POST /api/studies/$SID/send -H "$J" -d '{"target":"ris"}')" "404"
+ok "...bulk sending refuses the default server's studies" "$(body $F $AR /api/send -X POST -H "$J" -d "{\"target\":\"ris\",\"studies\":[\"$SID\"]}" | py "(d.get('started'), len(d.get('errors', [])))" 2>/dev/null || echo refused)" "(0, 1)"
+has "...uploading (into the default server) is refused" "$(body $F $AR /api/upload -X POST -H "Content-Type: application/dicom" --data-binary "DICM")" "cannot use the Orthanc server"
+ok "...only the archive's counts" "$(body $F $AR /api/stats | py "[s['key'] for s in d['servers']]")" "['archive']"
+M1=$(wc -l < "$WORK/proxy.log"); M2=$(wc -l < "$WORK/m2/proxy.log")
+ok "...its viewer reads the study from the archive, never from the default server" "$(code $F $AR GET "/dicom-web/studies/$UID_/series")/$(( $(wc -l < "$WORK/proxy.log") - M1 ))/$(( $(wc -l < "$WORK/m2/proxy.log") - M2 ))" "200/0/1"
+M1=$(wc -l < "$WORK/proxy.log"); M2=$(wc -l < "$WORK/m2/proxy.log")
+ok "...and its viewer's searches too" "$(code $F $AR GET "/dicom-web/studies?00100020=P-001")/$(( $(wc -l < "$WORK/proxy.log") - M1 ))/$(( $(wc -l < "$WORK/m2/proxy.log") - M2 ))" "200/0/1"
+ARID=$(body $F $A /api/admin/users | py "[u['id'] for u in d['users'] if u['username'] == 'arch'][0]")
+ok "back to every server" "$(code $F $A PUT /api/admin/users/$ARID -H "$J" -d '{"servers":null}')/$(code $F $AR GET /api/studies/$SID/series)" "200/200"
+ok "...an update without servers keeps them" "$(code $F $A PUT /api/admin/users/$ARID -H "$J" -d '{"servers":["archive"]}')/$(code $F $A PUT /api/admin/users/$ARID -H "$J" -d '{"email":""}')/$(code $F $AR GET /api/studies/$SID/series)" "200/200/404"
+
+# Roles give their servers to their users.
+ROLES=$(body $F $A /api/admin/settings | py "json.dumps([dict(r, servers=['archive']) if r['key'] == 'viewer' else r for r in d['settings']['roles']])")
+ok "a role limited to the archive" "$(put $A "{\"roles\":$ROLES}" | tail -1)" "200"
+mkuser rolev LongPassword123 '"read","visualize"' ',"role":"viewer"'
+ok "...a new account with that role gets it" "$(body $F $A /api/admin/users | py "[u['servers'] for u in d['users'] if u['username'] == 'rolev']")" "[['archive']]"
+ok "...a server a role uses cannot be removed (400)" "$(put $A '{"orthanc_servers":[]}' | tail -1)" "400"
+ROLES=$(body $F $A /api/admin/settings | py "json.dumps([dict(r, servers=None) for r in d['settings']['roles']])")
+ok "...back to every server: its users follow" "$(put $A "{\"roles\":$ROLES}" | tail -1)/$(body $F $A /api/admin/users | py "[u['servers'] for u in d['users'] if u['username'] == 'rolev']")" "200/[None]"
+
+# A server that does not answer: the others' results, and a notice.
+stop_pid mock2
+ok "a server down: the other's results, and which one did not answer" "$(body $F $A /api/studies | py "(len(d['items']) > 0, [u['server'] for u in d.get('unavailable', [])])")" "(True, ['archive'])"
+ok "...the count leaves it out" "$(body $F $A /api/stats | py "([s['key'] for s in d['servers']], [u['server'] for u in d.get('unavailable', [])])")" "(['main'], ['archive'])"
+ok "...only that server chosen: its error (502)" "$(code $F $A GET "/api/studies?servers=archive")" "502"
+ok "...an account limited to it gets the error too, not the other server's studies" "$(code $F $AR GET /api/studies)" "502"
 ok "switched off: its studies are not reachable (404)" "$(put $A "{\"orthanc_servers\":[$ARCHIVE,\"enabled\":false}]}" | tail -1)/$(code $F $A GET /api/studies/$AID/series)" "200/404"
 ok "...and its password was kept" "$(body $F $A /api/admin/settings | py "d['settings']['orthanc_servers'][0]['password_set']")" "True"
 put $A '{"orthanc_servers":[]}' > /dev/null

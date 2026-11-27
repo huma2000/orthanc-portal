@@ -46,6 +46,31 @@ fn validate_role(state: &AppState, role: &str) -> AppResult<String> {
     }
 }
 
+/// `"servers"` in a user form: absent = keep (`None`), `null` = every server (`Some(None)`),
+/// a list = only those (`Some(Some(list))`).
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<Vec<String>>>, D::Error> {
+    Option::<Vec<String>>::deserialize(d).map(Some)
+}
+
+/// The Orthanc servers of a user form, tidied and checked.
+fn validate_servers(state: &AppState, servers: Option<Vec<String>>) -> AppResult<Option<Vec<String>>> {
+    let servers = servers.map(|mut list| {
+        crate::settings::tidy_server_keys(&mut list);
+        list
+    });
+    state.settings.get().validate_server_access(&servers).map_err(|e| {
+        let mut chars = e.chars();
+        let first = chars.next().map(|c| c.to_uppercase().collect::<String>()).unwrap_or_default();
+        AppError::BadRequest(first + chars.as_str())
+    })?;
+    Ok(servers)
+}
+
+/// How the servers of an account are written in the audit log.
+fn servers_text(servers: &Option<Vec<String>>) -> String {
+    servers.as_ref().map_or_else(|| "all".into(), |list| list.join(","))
+}
+
 /// Lists all users together with the metadata the admin form needs.
 pub async fn list_users(State(state): State<AppState>, AuthUser(admin): AuthUser) -> AppResult<Json<Value>> {
     admin.require(Permission::Admin)?;
@@ -69,6 +94,12 @@ pub async fn list_users(State(state): State<AppState>, AuthUser(admin): AuthUser
         "permissions": permissions,
         // Roles are a setting: edited in Settings > Roles.
         "presets": settings.roles,
+        // Every Orthanc server, for the "Servers this account can use" choice.
+        "orthanc_servers": settings
+            .servers()
+            .iter()
+            .map(|s| json!({ "key": s.key, "label": s.name(), "enabled": s.enabled }))
+            .collect::<Vec<_>>(),
     })))
 }
 
@@ -84,6 +115,9 @@ pub struct CreateUser {
     /// Where the portal writes to this person (optional).
     #[serde(default)]
     email: String,
+    /// The Orthanc servers it may use: `null` = all; absent = those of its role (all without one).
+    #[serde(default, deserialize_with = "present")]
+    servers: Option<Option<Vec<String>>>,
 }
 
 pub async fn create_user(
@@ -99,6 +133,10 @@ pub async fn create_user(
     let permissions = PermissionSet::parse_list(&req.permissions)?;
     let role = validate_role(&state, &req.role)?;
     let email = mailer::single_address(&req.email).map_err(AppError::BadRequest)?;
+    let servers = match req.servers {
+        Some(servers) => validate_servers(&state, servers)?,
+        None => state.settings.get().roles.iter().find(|r| r.key == role).and_then(|r| r.servers.clone()),
+    };
 
     let hash = auth::hash_password(req.password).await?;
     let mut user = state.db.create_user(&username, &hash, &permissions, &role)?;
@@ -106,14 +144,19 @@ pub async fn create_user(
         state.db.set_user_email(user.id, &email)?;
         user.email = email;
     }
+    if servers.is_some() {
+        state.db.set_user_servers(user.id, &servers)?;
+        user.servers = servers;
+    }
     state.db.audit(
         &admin.username,
         "user_created",
         &format!(
-            "{} [{}] role={}",
+            "{} [{}] role={} servers={}",
             user.username,
             permissions.to_db_string(),
-            if role.is_empty() { "custom" } else { &role }
+            if role.is_empty() { "custom" } else { &role },
+            servers_text(&user.servers)
         ),
     );
     Ok(Json(user))
@@ -134,6 +177,9 @@ pub struct UpdateUser {
     /// or sets it up again at the next sign-in when it is required.
     #[serde(default)]
     reset_two_factor: bool,
+    /// The Orthanc servers it may use: `null` = all. Leave out to keep them.
+    #[serde(default, deserialize_with = "present")]
+    servers: Option<Option<Vec<String>>>,
 }
 
 pub async fn update_user(
@@ -172,6 +218,7 @@ pub async fn update_user(
     }
 
     let email = req.email.as_deref().map(mailer::single_address).transpose().map_err(AppError::BadRequest)?;
+    let servers = req.servers.map(|s| validate_servers(&state, s)).transpose()?;
 
     let hash = match password {
         Some(p) => Some(auth::hash_password(p).await?),
@@ -180,6 +227,9 @@ pub async fn update_user(
     state.db.update_user(id, new_permissions.as_ref(), req.active, hash.as_deref(), role.as_deref())?;
     if let Some(email) = &email {
         state.db.set_user_email(id, email)?;
+    }
+    if let Some(servers) = &servers {
+        state.db.set_user_servers(id, servers)?;
     }
     if req.reset_two_factor && (target.two_factor || target.totp_pending.is_some()) {
         state.db.disable_totp(id)?;
@@ -204,10 +254,11 @@ pub async fn update_user(
         &admin.username,
         "user_updated",
         &format!(
-            "{} [{}] role={} active={}{}",
+            "{} [{}] role={} servers={} active={}{}",
             updated.username,
             updated.permissions.to_db_string(),
             if updated.role.is_empty() { "custom" } else { &updated.role },
+            servers_text(&updated.servers),
             updated.active,
             if hash.is_some() { " password reset" } else { "" }
         ),

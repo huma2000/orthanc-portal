@@ -40,12 +40,31 @@ pub struct StudySummary {
     pub other_patient_ids: String,
     /// Orthanc labels of the study (`urgent`, `insurance`...).
     pub labels: Vec<String>,
+    /// The key of the Orthanc server `id` is on (`main` = the default one).
+    pub server: String,
+    /// Search results only: every server searched that holds this study (same StudyInstanceUID),
+    /// in the configured order. `id` is the copy on the first of them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub servers: Vec<String>,
+    /// Search results only, for a study on several servers: the ID of its copy on each of them
+    /// (what "Open the copy on..." switches to).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub copies: Vec<Copy>,
+}
+
+/// One copy of a study found on several Orthanc servers.
+#[derive(Debug, Clone, Serialize)]
+pub struct Copy {
+    pub server: String,
+    /// Its ID, written for its server (`key:id`, or plain on the default one).
+    pub id: String,
 }
 
 impl StudySummary {
     /// The IDs written for the server it comes from (`key:id` unless it is the default one).
     pub fn on_server(mut self, server: &str) -> Self {
         self.id = crate::servers::compound(server, &self.id);
+        self.server = server.to_string();
         self
     }
 
@@ -85,6 +104,9 @@ impl StudySummary {
                 .as_array()
                 .map(|a| a.iter().filter_map(|l| l.as_str().map(str::to_string)).collect())
                 .unwrap_or_default(),
+            server: crate::settings::MAIN_SERVER.to_string(),
+            servers: Vec::new(),
+            copies: Vec::new(),
         }
     }
 }
@@ -106,6 +128,11 @@ pub struct SeriesSummary {
     /// patient / study context is needed to make sense of a lone series.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub study: Option<StudySummary>,
+    /// The key of the Orthanc server `id` is on.
+    pub server: String,
+    /// Search results only: every server searched that holds this series (see `StudySummary`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub servers: Vec<String>,
 }
 
 impl SeriesSummary {
@@ -114,6 +141,7 @@ impl SeriesSummary {
         self.id = crate::servers::compound(server, &self.id);
         self.study_id = crate::servers::compound(server, &self.study_id);
         self.study = self.study.map(|s| s.on_server(server));
+        self.server = server.to_string();
         self
     }
 
@@ -130,6 +158,8 @@ impl SeriesSummary {
             series_number: text(&main["SeriesNumber"]),
             instances_count: v["Instances"].as_array().map(|a| a.len()).unwrap_or(0),
             study: None,
+            server: crate::settings::MAIN_SERVER.to_string(),
+            servers: Vec::new(),
         }
     }
 }

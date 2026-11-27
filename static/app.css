@@ -225,6 +225,8 @@ tr.series-row > td { padding: 0; background: var(--panel-alt); }
   border: 1px solid var(--line);
   color: var(--ink-soft);
 }
+/* A study on several Orthanc servers: the badge of the copy its buttons use. */
+.chip.server-current { outline: 2px solid currentColor; outline-offset: 1px; font-weight: 600; }
 .chip[data-m="CT"]  { background: #e3ecfb; border-color: #bfd1f3; color: #1f3f8f; }
 .chip[data-m="MR"]  { background: #efe6fa; border-color: #d8c5f1; color: #5a2c94; }
 .chip[data-m="US"]  { background: #def4f1; border-color: #b3e3dd; color: #0d6b61; }

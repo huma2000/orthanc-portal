@@ -545,6 +545,23 @@ or resetting their password also ends their sessions and Weasis tokens. An admin
 > intranet too, do not grant `visualize`. Note that `share` lets a person hand a study to somebody outside
 > (limited by the number of downloads you allow), so grant it as you would `download`.
 
+### Which Orthanc servers an account can use
+
+With several Orthanc servers (section 12, API reference), each account, and each role, can be limited to some of them:
+*Settings > Users* (the user form) and *Settings > Security & roles* (each role) offer **All servers** or
+**Only these**. For such an account the other servers do not exist: their studies are not found by its
+searches, not counted, cannot be opened by ID (404, exactly like an ID that does not exist), and its viewers
+never read them. It is checked by the server on every request, like the permissions. Notes:
+
+* **Administrators always use every server** (they could give themselves access anyway).
+* A role gives its servers to its users like its permissions (a new account with a role and no servers of its
+  own gets the role's).
+* A server a role still uses cannot be removed (the save says which one). A removed server leaves the lists of
+  the accounts that had it; an account limited to some servers stays limited, it never becomes "all".
+* Pages that only work with the default server for now (upload, upload links, query / retrieve, worklists)
+  are refused, with an explanation, to an account that may not use it. Share links keep working whoever made
+  them: a link is tied to its server when it is made.
+
 **Adding a permission** (e.g. `delete`): add a variant in `src/permissions.rs` (`ALL`, `as_str`,
 `description`), then call `user.require(Permission::Delete)?` in the new route and register that route in
 `staff_router` of `src/routes/mod.rs`.
@@ -1087,8 +1104,9 @@ All JSON. State-changing calls need the header `X-Requested-With: portal`.
 
 **IDs and several Orthanc servers.** `{id}` is Orthanc's own ID of a study, series, image or job. Besides the
 default Orthanc (the *Orthanc connection* settings, key `main`), the portal can reach other Orthanc servers, set
-in the `orthanc_servers` setting (*being built*: no page for them yet, and searching, sending, the staff viewers
-and the admin pages still use the default server):
+in the `orthanc_servers` setting. *Being built*: searching, viewing, downloads, labels, edits and links work
+with every server; there is no settings page for the servers yet, and sending, upload, query / retrieve,
+worklists and the admin pages still use the default server:
 
 ```json
 "orthanc_servers": [
@@ -1105,13 +1123,35 @@ one patient CD, one share link) must all be on the same server. A server's passw
 others (`password_set` in the answers; an empty password keeps the saved one, `"clear_password": true`
 removes it), and must be typed again when its address moves to another server.
 
+* **Searching.** `GET /api/studies` and `GET /api/series` take `servers=main,archive` (keys); without it they
+  search the servers marked `searched_by_default`. Only servers the account may use (section 5) count:
+  any other key is "unknown" (400). The servers are asked at the same time (10 s each at most) and their
+  answers merged in the chosen order. The same study (or series) on several servers is **one row**, with
+  `server` (the copy its `id` names: the first server in the configured order) and `servers` (every server
+  searched that holds it), and a study also `copies: [{ "server", "id" }]` (each copy's own ID). Its
+  menu **Open the copy on...** switches the row (or the study window) to another copy, so every button then
+  uses that server. The page adds `servers` (those searched) and, when some did not answer,
+  `unavailable: [{ "server", "label", "error" }]`: the results then come from the others. A search over
+  several servers cannot page beyond the first 5,000 results (400: narrow it).
+* **`GET /api/stats`** gives the total and `servers: [{ "key", "label", "studies" }]` (a study on two servers
+  counts on each).
+* **`GET /api/me`** lists the servers the account may use (`orthanc_servers`: key, label, colour); the page
+  shows its server controls only with two or more. Users (`/api/admin/users`) and roles have `servers`:
+  `null` = every server, or a list of keys (at least one).
+* **Viewers.** OHIF and Weasis keep using `/dicom-web`, `/wado` and `/ohif`. Each request names a study UID,
+  and goes to the server it was opened from (`server=` on the OHIF page and on `/api/weasis/link`, among the
+  account's servers), otherwise to the first of the account's servers that holds that study. A study search
+  that names no study (OHIF's list of the patient's other studies) asks every server of the account and merges
+  the answers. Prefixed paths per server cannot work: the DICOMweb plugin writes absolute links to
+  `/dicom-web/` into its answers.
+
 **Staff (intranet)**
 
 | Method & path | Permission | Purpose |
 |---|---|---|
 | `POST /api/login`, `POST /api/logout`, `GET /api/me` | none / session | Session (`/me` returns the permissions, the `role` and `features`: `ohif`, `thumbnails`, `share`, `simplified` (home page and icon options)) |
 | `GET /api/studies?patient_name=&patient_id=&accession_number=&description=&modality=&date_from=&date_to=&order=&limit=&offset=` | read | Search studies (`modality=ct,rx`; `order=received` = last received first, otherwise newest study date) |
-| `GET /api/stats` | read | `{ "studies": N }`: number of studies in Orthanc |
+| `GET /api/stats` | read | `{ "studies": N, "servers": [...] }`: number of studies in Orthanc (in all, and per server) |
 | `GET /api/studies?...&birth_from=&birth_to=&patient_sex=&referring_physician=&requesting_physician=&institution=&other_patient_ids=&study_uid=&labels=a,b&labels_mode=any\|all&no_labels=true&sort=&dir=asc\|desc` | read | The other filters and the sort of the Studies search (`sort`: patient, patient_id, birth_date, sex, other_ids, study_date, description, accession, referring, requesting, institution, received) |
 | `GET /api/labels` | read | Every label with its number of studies, the allowed ones, and whether the caller may change them |
 | `PUT/DELETE /api/studies/{id}/labels/{label}` | labels or admin | Put a label on a study / take it off; answers the study's labels |

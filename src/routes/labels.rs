@@ -34,9 +34,9 @@ pub fn can_edit_labels(user: &User) -> bool {
     user.permissions.contains(Permission::Labels) || user.permissions.contains(Permission::Admin)
 }
 
-/// Every label Orthanc knows (`GET /tools/labels`).
-pub async fn all_labels(state: &AppState) -> AppResult<Vec<String>> {
-    let value = state.orthanc.get_json("/tools/labels").await?;
+/// Every label one Orthanc server knows (`GET /tools/labels`).
+pub async fn server_labels(orthanc: &OrthancClient) -> AppResult<Vec<String>> {
+    let value = orthanc.get_json("/tools/labels").await?;
     Ok(value.as_array().map(|a| a.iter().filter_map(|l| l.as_str().map(str::to_string)).collect()).unwrap_or_default())
 }
 
@@ -55,7 +55,29 @@ pub async fn list_labels(State(state): State<AppState>, AuthUser(user): AuthUser
     user.require(Permission::Read)?;
     labels_on(&state)?;
     let settings = state.settings.get();
-    let mut names = all_labels(&state).await?;
+    // The labels of every server this person may use (one that does not answer is left out,
+    // unless none answers).
+    let servers: Vec<OrthancClient> = state.orthancs.usable(&user).into_iter().map(|(_, client)| client).collect();
+    let answers = futures_util::future::join_all(servers.iter().map(server_labels)).await;
+    let mut names: Vec<String> = Vec::new();
+    let mut first_error = None;
+    let mut answered = false;
+    for answer in answers {
+        match answer {
+            Ok(list) => {
+                answered = true;
+                for name in list {
+                    if !names.contains(&name) {
+                        names.push(name);
+                    }
+                }
+            }
+            Err(e) => first_error = first_error.or(Some(e)),
+        }
+    }
+    if let (false, Some(e)) = (answered, first_error) {
+        return Err(e);
+    }
     for allowed in &settings.available_labels {
         if !names.contains(allowed) {
             names.push(allowed.clone());
@@ -63,13 +85,18 @@ pub async fn list_labels(State(state): State<AppState>, AuthUser(user): AuthUser
     }
     names.sort_by_key(|n| n.to_lowercase());
 
-    let orthanc = &state.orthanc;
+    let servers = &servers;
     let counting = settings.label_counts;
     let labels: Vec<Value> = stream::iter(names)
         .map(|name| async move {
+            // The studies with that label on every server (none when no server can count).
             let count = if counting {
                 let body = json!({ "Level": "Study", "Query": {}, "Labels": [name], "LabelsConstraint": "All" });
-                orthanc.post_json("/tools/count-resources", &body).await.ok().and_then(|v| v["Count"].as_u64())
+                let counts = futures_util::future::join_all(servers.iter().map(|orthanc| async {
+                    orthanc.post_json("/tools/count-resources", &body).await.ok().and_then(|v| v["Count"].as_u64())
+                }))
+                .await;
+                counts.into_iter().flatten().reduce(|a, b| a + b)
             } else {
                 None
             };
@@ -90,7 +117,7 @@ fn check_target(state: &AppState, user: &User, id: &str, label: &str) -> AppResu
     if !can_edit_labels(user) {
         return Err(AppError::Forbidden("labels"));
     }
-    let target = state.orthancs.resolve(id)?;
+    let target = state.orthancs.resolve(user, id)?;
     if !valid_label(label) {
         return Err(AppError::BadRequest(
             "A label can have 1 to 64 letters, digits, '-' or '_' (no spaces or accents)".into(),

@@ -26,7 +26,9 @@ use serde_json::{json, Map, Value};
 
 fn allowed(state: &AppState, user: &User) -> AppResult<()> {
     user.require_or_admin(Permission::Retrieve)?;
-    feature(state.settings.get().query_retrieve, "Query / retrieve is switched off")
+    feature(state.settings.get().query_retrieve, "Query / retrieve is switched off")?;
+    // Studies are retrieved into the default server (a choice comes in multi-server phase 4).
+    state.orthancs.default_for(user).map(|_| ())
 }
 
 /// DICOM nodes that answer C-FIND, and the DICOMweb servers of Orthanc.

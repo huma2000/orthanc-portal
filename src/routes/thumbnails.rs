@@ -72,7 +72,7 @@ async fn serve(
     if !settings.thumbnails_enabled {
         return Err(AppError::NotFound);
     }
-    let (orthanc, resource) = state.orthancs.resolve(&id)?;
+    let (orthanc, resource) = state.orthancs.resolve(user, &id)?;
     let id = resource.id.clone();
     let width = normalised_width(query.size);
     let prefix = match kind {

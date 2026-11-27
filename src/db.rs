@@ -53,6 +53,9 @@ pub struct User {
     /// A secret being set up (shown once as a QR code, confirmed with a first code).
     #[serde(skip)]
     pub totp_pending: Option<String>,
+    /// The Orthanc servers this account may use, by key: `None` = all of them. Administrators
+    /// always reach every server (they could give themselves access anyway).
+    pub servers: Option<Vec<String>>,
 }
 
 impl User {
@@ -77,6 +80,13 @@ impl User {
     /// Does the user have the permission, or are they an administrator?
     pub fn may(&self, permission: Permission) -> bool {
         self.permissions.contains(permission) || self.permissions.contains(Permission::Admin)
+    }
+
+    /// May this account use the Orthanc server `key`? Checked by `servers::OrthancPool` on
+    /// every request: the studies of the other servers do not exist for this person.
+    pub fn may_use_server(&self, key: &str) -> bool {
+        self.permissions.contains(Permission::Admin)
+            || self.servers.as_ref().is_none_or(|servers| servers.iter().any(|s| s == key))
     }
 }
 
@@ -362,7 +372,7 @@ pub struct Db {
 
 /// Columns read for a user, always in this order (see [`row_to_user`]).
 const USER_COLUMNS: &str = "id, username, password_hash, permissions, active, created_at, last_login, role, \
-                            email, totp_enabled, totp_secret, totp_pending, recovery_codes";
+                            email, totp_enabled, totp_secret, totp_pending, recovery_codes, servers";
 
 /// Converts one SQL row into a [`User`].
 fn row_to_user(row: &Row) -> rusqlite::Result<User> {
@@ -380,7 +390,19 @@ fn row_to_user(row: &Row) -> rusqlite::Result<User> {
         totp_secret: row.get(10)?,
         totp_pending: row.get(11)?,
         recovery_codes_left: json_list::<String>(row.get(12)?).len(),
+        servers: server_list(row.get(13)?),
     })
+}
+
+/// The stored list of servers of an account: NULL = every server, otherwise a JSON list. A list
+/// that cannot be read gives NO server rather than all of them.
+fn server_list(stored: Option<String>) -> Option<Vec<String>> {
+    stored.map(|s| serde_json::from_str(&s).unwrap_or_default())
+}
+
+/// How [`server_list`] reads it back.
+fn stored_server_list(servers: &Option<Vec<String>>) -> Option<String> {
+    servers.as_ref().map(|list| serde_json::to_string(list).unwrap_or_else(|_| "[]".into()))
 }
 
 /// Adds the columns a table lacks (databases created by older versions). `columns` = (name, type).
@@ -546,6 +568,8 @@ impl Db {
                 ("totp_pending", "TEXT"),
                 ("totp_last_step", "INTEGER"),
                 ("recovery_codes", "TEXT"),
+                // The Orthanc servers the account may use (NULL = all).
+                ("servers", "TEXT"),
             ],
         )?;
         add_missing_columns(
@@ -734,14 +758,25 @@ impl Db {
         Ok(())
     }
 
-    /// Gives several accounts new permissions and role (a role edited in Settings), all or none.
-    pub fn set_users_role_permissions(&self, changes: &[(i64, &str, &PermissionSet)]) -> Result<(), AppError> {
+    /// The Orthanc servers an account may use (`None` = all).
+    pub fn set_user_servers(&self, id: i64, servers: &Option<Vec<String>>) -> Result<(), AppError> {
+        let conn = self.lock();
+        conn.prepare_cached("UPDATE users SET servers = ?1 WHERE id = ?2")?
+            .execute(params![stored_server_list(servers), id])?;
+        Ok(())
+    }
+
+    /// Gives several accounts new permissions, servers and role (a role edited in Settings), all or none.
+    pub fn set_users_role_permissions(
+        &self,
+        changes: &[(i64, &str, &PermissionSet, &Option<Vec<String>>)],
+    ) -> Result<(), AppError> {
         let conn = self.lock();
         let tx = conn.unchecked_transaction()?;
-        for (id, role, permissions) in changes {
+        for (id, role, permissions, servers) in changes {
             tx.execute(
-                "UPDATE users SET permissions = ?1, role = ?2 WHERE id = ?3",
-                params![permissions.to_db_string(), role, id],
+                "UPDATE users SET permissions = ?1, role = ?2, servers = ?3 WHERE id = ?4",
+                params![permissions.to_db_string(), role, stored_server_list(servers), id],
             )?;
         }
         tx.commit()?;

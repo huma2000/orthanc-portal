@@ -265,7 +265,7 @@ async fn anonymized_copies(
 pub async fn delete_copies(state: &AppState, copies: &[String]) -> bool {
     let mut all = true;
     for copy in copies.iter().filter_map(|c| ResourceRef::try_parse(c)) {
-        let Ok(orthanc) = state.orthancs.of(&copy) else {
+        let Ok(orthanc) = state.orthancs.stored(&copy.server) else {
             tracing::warn!("the anonymized copy {copy} could not be deleted: its Orthanc server is not available");
             all = false;
             continue;
@@ -330,7 +330,7 @@ pub async fn create_share(
 async fn create(state: AppState, user: crate::db::User, ids: Vec<String>, req: CreateShare) -> AppResult<Json<Value>> {
     // One link, one Orthanc server: from here on `ids` are that server's own IDs.
     let raw: Vec<&str> = ids.iter().map(String::as_str).collect();
-    let (orthanc, server, mut ids) = state.orthancs.resolve_together(&raw)?;
+    let (orthanc, server, mut ids) = state.orthancs.resolve_together(&user, &raw)?;
     let settings = state.settings.get();
     if settings.share_public_url.is_empty() {
         return Err(AppError::BadRequest(

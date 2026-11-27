@@ -103,6 +103,8 @@ pub async fn create(
     Json(req): Json<CreateUploadLink>,
 ) -> AppResult<Json<Value>> {
     require_creator(&state, &user)?;
+    // What is sent through the link goes into the default server (a choice comes in phase 3).
+    state.orthancs.default_for(&user)?;
     let settings = state.settings.get();
     if settings.share_public_url.is_empty() {
         return Err(AppError::BadRequest(
@@ -346,7 +348,7 @@ pub async fn studies(
     require_creator(&state, &user)?;
     user.require(Permission::Read)?;
     let link = managed(&state, &user, id)?;
-    let orthanc = &state.orthanc;
+    let orthanc = &state.orthancs.default_for(&user)?;
     let found: Vec<StudySummary> = futures_util::stream::iter(link.studies.into_iter().take(200))
         .map(|study| async move { orthanc.get_json(&format!("/studies/{study}")).await.ok() })
         .buffered(6)

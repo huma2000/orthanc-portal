@@ -116,3 +116,22 @@ Then `node ohif_check.js http://127.0.0.1:28090 <portal_session cookie> <output 
   require the study UID).
 * Seen in passing: the browser fetches `/ohif/manifest.json` without the session cookie, so it gets
   401 (a harmless console message).
+
+## Phase 2: the portal itself connected to both servers (2026-11-27)
+
+No router this time: the portal's default server is A (`ORTHANC_URL=http://127.0.0.1:28042`) and B is added
+as `archive` in the settings (`"orthanc_servers": [{ "key": "archive", "url": "http://127.0.0.1:28043", ... }]`).
+An account `onlyb` (read, visualize) may use the archive only (`"servers": ["archive"]`).
+`ohif_servers.js` opens real OHIF for each case: `node ohif_servers.js http://127.0.0.1:28090 <admin cookie> <onlyb cookie> <output folder>`.
+
+* **Search** (admin): 101 on main, 102 on the archive (`archive:...` ID), 103 **one row** naming both
+  (`servers: ["main", "archive"]`, its ID the main copy's). `onlyb` finds 102 and 103, both `archive:`
+  IDs, and nothing of main. `/api/stats`: 2 + 2.
+* **OHIF**, all with images drawn and every DICOMweb request answered 200:
+  * admin, 101 (only on A) and 102 (only on B, no `server=`: found by its UID);
+  * admin, 103 opened from the archive (`server=archive`): B's rings; from main: A's checkerboard;
+  * `onlyb`, 103: B's rings, also when the address asks for `server=main` (ignored: not one of its servers);
+  * `onlyb`, 101 (only on A): OHIF says the study is not available. Only B was asked.
+* OHIF accepts the extra `server=` parameter in its address.
+* OHIF's list of the patient's other studies (`studies?00100020=...`, no study UID) answered 200: the
+  portal asks every server of the account and merges the answers.

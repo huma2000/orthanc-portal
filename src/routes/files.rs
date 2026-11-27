@@ -54,7 +54,7 @@ pub async fn series_instances(
 ) -> AppResult<Json<Value>> {
     user.require(Permission::Read)?;
     browser_on(&state)?;
-    let (orthanc, resource) = state.orthancs.resolve(&id)?;
+    let (orthanc, resource) = state.orthancs.resolve(&user, &id)?;
     let id = resource.id.clone();
     let list = orthanc.get_json(&format!("/series/{id}/instances?requested-tags=SOPClassUID")).await?;
     let mut items: Vec<Value> = list
@@ -89,7 +89,7 @@ pub async fn instance_tags(
 ) -> AppResult<Json<Value>> {
     user.require(Permission::Read)?;
     browser_on(&state)?;
-    let (orthanc, resource) = state.orthancs.resolve(&id)?;
+    let (orthanc, resource) = state.orthancs.resolve(&user, &id)?;
     let id = resource.id.clone();
     Ok(Json(orthanc.get_json(&format!("/instances/{id}/tags?ignore-length=0")).await?))
 }
@@ -108,7 +108,7 @@ pub async fn instance_preview(
 ) -> AppResult<Response> {
     user.require(Permission::Visualize)?;
     browser_on(&state)?;
-    let (orthanc, resource) = state.orthancs.resolve(&id)?;
+    let (orthanc, resource) = state.orthancs.resolve(&user, &id)?;
     let id = resource.id.clone();
     let width = q.width.unwrap_or(1024).clamp(64, 2048);
     let Some((bytes, content_type)) = orthanc.rendered_image(&id, width).await? else {
@@ -129,7 +129,7 @@ pub async fn instance_pdf(
 ) -> AppResult<Response> {
     user.require(Permission::Visualize)?;
     browser_on(&state)?;
-    let (orthanc, resource) = state.orthancs.resolve(&id)?;
+    let (orthanc, resource) = state.orthancs.resolve(&user, &id)?;
     let id = resource.id.clone();
     let upstream = orthanc.get_stream(&format!("/instances/{id}/pdf")).await?;
     state.db.audit(&user.username, "open_pdf", &resource.to_string());
@@ -144,7 +144,7 @@ pub async fn instance_download(
 ) -> AppResult<Response> {
     user.require(Permission::Download)?;
     feature(state.settings.get().single_file_download, "Downloading single files is switched off")?;
-    let (orthanc, resource) = state.orthancs.resolve(&id)?;
+    let (orthanc, resource) = state.orthancs.resolve(&user, &id)?;
     let id = resource.id.clone();
     let upstream = orthanc.get_stream(&format!("/instances/{id}/file")).await?;
     let name = format!("{}.dcm", id.chars().take(17).collect::<String>());
@@ -160,7 +160,7 @@ pub async fn series_nifti(
 ) -> AppResult<Response> {
     user.require(Permission::Download)?;
     feature(state.settings.get().nifti_export, "The NIfTI export is switched off")?;
-    let (orthanc, resource) = state.orthancs.resolve(&id)?;
+    let (orthanc, resource) = state.orthancs.resolve(&user, &id)?;
     let id = resource.id.clone();
     let upstream = orthanc.get_stream(&format!("/series/{id}/nifti?compress")).await?;
     let name = format!("series_{}.nii.gz", id.chars().take(8).collect::<String>());
@@ -187,7 +187,7 @@ pub async fn download_many(
     if ids.is_empty() || ids.len() > 100 {
         return Err(AppError::BadRequest("Choose 1 to 100 studies".into()));
     }
-    let (orthanc, _, orthanc_ids) = state.orthancs.resolve_together(&ids)?;
+    let (orthanc, _, orthanc_ids) = state.orthancs.resolve_together(&user, &ids)?;
     let tool = if q.dicomdir.unwrap_or(false) { "/tools/create-media" } else { "/tools/create-archive" };
     let upstream = orthanc.post_stream(tool, &json!({ "Resources": orthanc_ids, "Synchronous": true })).await?;
     let file_name = format!("{}_studies.zip", ids.len());

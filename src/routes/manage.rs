@@ -153,7 +153,7 @@ fn same_server(resource: &ResourceRef, raw: &str) -> AppResult<String> {
 async fn delete(state: AppState, user: User, level: Level, id: String) -> AppResult<Json<Value>> {
     user.require_or_admin(Permission::Delete)?;
     feature(state.settings.get().allow_delete, "Deleting is switched off")?;
-    let (orthanc, resource) = state.orthancs.resolve(&id)?;
+    let (orthanc, resource) = state.orthancs.resolve(&user, &id)?;
     let id = resource.id.clone();
     let what = if level == Level::Study { describe_study(&orthanc, &id).await } else { id.clone() };
     orthanc.delete(&format!("/{}/{id}", level.path())).await?;
@@ -210,7 +210,7 @@ fn modify_body(replace: Map<String, Value>, keep_uids: bool, level: Level) -> Va
 async fn modify(state: AppState, user: User, level: Level, id: String, req: ModifyRequest) -> AppResult<Json<Value>> {
     user.require_or_admin(Permission::Edit)?;
     feature(state.settings.get().allow_modify, "Modifying is switched off")?;
-    let (orthanc, resource) = state.orthancs.resolve(&id)?;
+    let (orthanc, resource) = state.orthancs.resolve(&user, &id)?;
     let id = resource.id.clone();
     let replace = replacements(level, &req.replace)?;
     let changes =
@@ -254,7 +254,7 @@ pub async fn move_study(
 ) -> AppResult<Json<Value>> {
     user.require_or_admin(Permission::Edit)?;
     feature(state.settings.get().allow_modify, "Modifying is switched off")?;
-    let (orthanc, resource) = state.orthancs.resolve(&id)?;
+    let (orthanc, resource) = state.orthancs.resolve(&user, &id)?;
     let id = resource.id.clone();
     let other = same_server(&resource, &req.patient_from_study)?;
     if other == id {
@@ -302,7 +302,7 @@ pub async fn move_series(
 ) -> AppResult<Json<Value>> {
     user.require_or_admin(Permission::Edit)?;
     feature(state.settings.get().allow_modify, "Modifying is switched off")?;
-    let (orthanc, resource) = state.orthancs.resolve(&id)?;
+    let (orthanc, resource) = state.orthancs.resolve(&user, &id)?;
     let id = resource.id.clone();
     let mut replace = Map::new();
     let target_text = if req.study == "new" {
@@ -361,7 +361,7 @@ async fn anonymize(
 ) -> AppResult<Json<Value>> {
     user.require_or_admin(Permission::Edit)?;
     feature(state.settings.get().allow_anonymize, "Anonymizing is switched off")?;
-    let (orthanc, resource) = state.orthancs.resolve(&id)?;
+    let (orthanc, resource) = state.orthancs.resolve(&user, &id)?;
     let id = resource.id.clone();
     let mut replace = Map::new();
     for (tag, value) in [("PatientName", req.patient_name.trim()), ("PatientID", req.patient_id.trim())] {
@@ -436,7 +436,7 @@ pub async fn add_series(
 ) -> AppResult<Json<Value>> {
     user.require_or_admin(Permission::Edit)?;
     feature(state.settings.get().allow_add_series, "Adding a series is switched off")?;
-    let (orthanc, resource) = state.orthancs.resolve(&id)?;
+    let (orthanc, resource) = state.orthancs.resolve(&user, &id)?;
     let id = resource.id.clone();
     if req.files.is_empty() || req.files.len() > 50 {
         return Err(AppError::BadRequest("Choose 1 to 50 files".into()));
@@ -504,7 +504,7 @@ pub async fn job_status(
     if !may {
         return Err(AppError::Forbidden("edit"));
     }
-    let (orthanc, job_ref) = state.orthancs.resolve(&id).map_err(|e| match e {
+    let (orthanc, job_ref) = state.orthancs.resolve(&user, &id).map_err(|e| match e {
         AppError::BadRequest(_) => AppError::BadRequest("Invalid job id".into()),
         other => other,
     })?;

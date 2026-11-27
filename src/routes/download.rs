@@ -56,7 +56,7 @@ pub async fn download_study(
     Query(params): Query<DownloadParams>,
 ) -> AppResult<Response> {
     user.require(Permission::Download)?;
-    let (orthanc, resource) = state.orthancs.resolve(&id)?;
+    let (orthanc, resource) = state.orthancs.resolve(&user, &id)?;
     let id = resource.id.clone();
 
     // Read the study (for a nice file name) while Orthanc already starts building the ZIP:
@@ -79,7 +79,7 @@ pub async fn download_series(
     Query(params): Query<DownloadParams>,
 ) -> AppResult<Response> {
     user.require(Permission::Download)?;
-    let (orthanc, resource) = state.orthancs.resolve(&id)?;
+    let (orthanc, resource) = state.orthancs.resolve(&user, &id)?;
     let id = resource.id.clone();
 
     // As for a study: the details (file name) and the ZIP are requested at the same time.

@@ -72,7 +72,7 @@ pub async fn cd_export(
         return Err(AppError::BadRequest("Choose 1 to 100 studies".into()));
     }
     let raw: Vec<&str> = ids.iter().map(String::as_str).collect();
-    let (orthanc, _, ids) = state.orthancs.resolve_together(&raw)?;
+    let (orthanc, _, ids) = state.orthancs.resolve_together(&user, &raw)?;
     let _slot = EXPORT_GATE.try_acquire().map_err(|_| {
         AppError::TooManyRequests("Two exports are being prepared already: try again in a minute".into())
     })?;

@@ -792,6 +792,71 @@ async function newLink(admin, body) {
     all_extra.push(c);
   }
 
+  console.log("--- several Orthanc servers");
+  {
+    await admin.call("PUT", "/api/admin/settings", {
+      orthanc_servers: [{ key: "archive", label: "Archive", url: "http://127.0.0.1:18043", username: "orthanc", password: "s3cr3tpw", color: "#1971c2" }],
+    });
+    const m = await makeDom(STAFF); await m.login("admin", "SuperSecret123");
+    await m.tab("Studies"); await until(() => m.$("tr.study"), 6000);
+    const chips = () => m.$$(".server-picker .chip-toggle");
+    check("Studies: a choice of servers, every one searched", chips().map((b) => `${b.textContent}:${b.getAttribute("aria-pressed")}`).join() === "All:true,Main:true,Archive:true",
+      chips().map((b) => `${b.textContent}:${b.getAttribute("aria-pressed")}`).join());
+    check("...a Server column, where each study shows both servers", m.$$("main thead th").some((th) => th.textContent === "Server")
+      && m.$$("tr.study").every((tr) => tr.querySelectorAll(".server-chip").length === 2));
+    const badge = m.$$("tr.study .server-chip").find((b) => b.textContent === "Archive");
+    check("...each badge in its server's colour", !!badge && badge.style.getPropertyValue("--chip") === "#1971c2");
+    const ohif = m.$("tr.study a[href*='/ohif/viewer']");
+    check("...the viewer opens the study from its server", !!ohif && /[?&]server=main\b/.test(ohif.getAttribute("href")), ohif && ohif.getAttribute("href"));
+    // A study on both servers: "Open the copy on..." switches its row to the archive's copy.
+    const row = m.$$("tr.study").find((tr) => tr.querySelector("[data-name='Open the copy on...']"));
+    check("a study on both servers offers to open its other copy", !!row && row.dataset.server === "main");
+    m.click(Array.from(row.querySelectorAll(".menu-item")).find((b) => /Archive/.test(b.textContent))); await sleep(300);
+    const switched = m.$$("tr.study").find((tr) => tr.dataset.server === "archive");
+    check("...its row then uses the archive's copy: viewer, badge, downloads", !!switched
+      && /server=archive/.test(switched.querySelector("a[href*='/ohif/viewer']").getAttribute("href"))
+      && switched.querySelector(".server-chip.server-current").textContent === "Archive"
+      && switched.querySelectorAll("a[href*='archive:']").length > 0,
+      switched && switched.querySelector("a[href*='/ohif/viewer']").getAttribute("href"));
+    m.click(chips().find((b) => b.textContent === "Archive")); await sleep(1500);
+    check("unticking a server searches the others only", chips().map((b) => b.getAttribute("aria-pressed")).join() === "false,true,false"
+      && m.$$("tr.study").every((tr) => tr.querySelectorAll(".server-chip").length === 1));
+    m.click(chips().find((b) => b.textContent === "Main")); await sleep(300);
+    check("...the last one cannot be unticked", chips()[1].getAttribute("aria-pressed") === "true");
+    m.click(chips().find((b) => b.textContent === "All")); await sleep(1500);
+    check("...All ticks them all again", chips().map((b) => b.getAttribute("aria-pressed")).join() === "true,true,true");
+
+    // The Users page: which servers each account can use.
+    await m.tab("Settings"); await sleep(800);
+    m.click(m.$$(".subtabs [role=tab]").find((b) => b.textContent === "Users"));
+    await until(() => m.$$("main h2").some((e) => e.textContent === "Users") && m.$("main table.data"), 6000);
+    check("Users: a Servers column", m.$$("main thead th").some((th) => th.textContent === "Servers"));
+    m.click(m.button(m.$("main"), "New user")); await until(() => m.$("dialog[open] .server-access"), 6000);
+    const dialog = m.$("dialog[open]");
+    const radios = dialog.querySelectorAll(".server-access input[type=radio]");
+    check("...the user form offers All servers, or only some", radios.length === 2 && radios[0].checked && dialog.querySelector(".server-access .role-perms").hidden);
+    radios[1].checked = true; radios[1].dispatchEvent(new m.window.Event("change"));
+    const boxes = Array.from(dialog.querySelectorAll(".server-access input[type=checkbox]"));
+    boxes[1].checked = true; // Archive
+    dialog.querySelector("input[name=username]").value = "uiarchive";
+    dialog.querySelector("input[name=password]").value = "LongPassword123";
+    m.submit(dialog.querySelector("form")); await sleep(1500);
+    const made = (await (await admin.call("GET", "/api/admin/users")).json()).users.find((u) => u.username === "uiarchive");
+    check("...an account saved with the Archive only", !!made && JSON.stringify(made.servers) === '["archive"]', made && JSON.stringify(made.servers));
+    const limited = await makeDom(STAFF); await limited.login("uiarchive", "LongPassword123");
+    await limited.tab("Studies"); await until(() => limited.$("tr.study"), 6000);
+    check("...that account sees no choice of servers (it has one)", !limited.$(".server-picker") && !limited.$$("main thead th").some((th) => th.textContent === "Server"));
+    const its = limited.$("tr.study a[href*='/ohif/viewer']");
+    check("...and opens the archive's copies", !!its && !/server=/.test(its.getAttribute("href")) && (await (await limited.call("GET", "/api/studies")).json()).items.every((s) => s.server === "archive"));
+
+    // Roles: a server choice per role.
+    m.click(m.$$(".subtabs [role=tab]").find((b) => /Security/.test(b.textContent))); await sleep(1500);
+    check("Roles: each role can be limited to some servers", m.$$(".role-servers").length >= 3);
+    await admin.call("DELETE", `/api/admin/users/${made.id}`);
+    await admin.call("PUT", "/api/admin/settings", { orthanc_servers: [] });
+    all_extra.push(m, limited);
+  }
+
   const all = [...all_extra, admin, guest, revokedPage, ts, st, sender, viewOnlyPage, shortPage, expiredPage, nothing, garbage, unknown, noViewerPage, adminNoOhif, viewers, noButtons, sharer, viewer, reader, linked, viaUid, live, custom];
   check("no JavaScript errors anywhere", all.every((d) => d.errors.length === 0), all.flatMap((d) => d.errors).join("|"));
   console.log(`\nRESULT: ${results.filter(Boolean).length} passed, ${results.filter((r) => !r).length} failed`);

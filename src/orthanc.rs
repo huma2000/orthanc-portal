@@ -173,6 +173,12 @@ fn has_capability(capabilities: &Value, name: &str) -> bool {
 }
 
 impl OrthancClient {
+    /// Tests: is this the same client (the same server), not just one configured alike?
+    #[cfg(test)]
+    pub fn same_as(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.endpoint, &other.endpoint)
+    }
+
     fn build(endpoint: Endpoint) -> Result<Self, AppError> {
         let http = Client::builder()
             .connect_timeout(Duration::from_secs(5))

@@ -153,7 +153,7 @@ pub async fn unlock(
 
 /// What the guest's page shows about one study of the link.
 async fn study_details(state: &AppState, study_id: &str) -> AppResult<Value> {
-    let (orthanc, study_ref) = state.orthancs.resolve(study_id)?;
+    let (orthanc, study_ref) = state.orthancs.resolve_stored(study_id)?;
     let study_path = format!("/studies/{}", study_ref.id);
     let series_path = format!("{study_path}/series");
     let (study_json, series_json) = tokio::join!(orthanc.get_json(&study_path), orthanc.get_json(&series_path));
@@ -209,7 +209,7 @@ pub async fn study(
         .buffered(6)
         .collect::<Vec<_>>();
     // The viewer reads the link's studies from the link's server (see routes/viewer.rs).
-    let server = state.orthancs.resolve(&shared[0].id)?.0;
+    let server = state.orthancs.resolve_stored(&shared[0].id)?.0;
     let (details, viewer_available) = tokio::join!(details, server.ohif_available(ohif_mode));
     let mut studies = Vec::with_capacity(details.len());
     for (index, d) in details.into_iter().enumerate() {
@@ -261,7 +261,7 @@ pub async fn download(
     let Some(target) = shared.get(q.study) else { return Err(AppError::NotFound) };
 
     // Read the study FIRST: if it is gone, fail before a download is used up. Also gives the file name.
-    let (orthanc, target_ref) = state.orthancs.resolve(&target.id)?;
+    let (orthanc, target_ref) = state.orthancs.resolve_stored(&target.id)?;
     let study = StudySummary::from_orthanc(&orthanc.get_json(&format!("/studies/{}", target_ref.id)).await?);
 
     // Take the download atomically: two requests at the same moment cannot both use the last one.

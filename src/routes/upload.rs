@@ -38,7 +38,9 @@ pub async fn upload(
 
     // Convert axum's request body into a stream reqwest can send as it arrives.
     let stream = body.into_data_stream();
-    let result = state.orthanc.upload_instance(reqwest::Body::wrap_stream(stream), content_length).await?;
+    // Into the default server (a choice comes in multi-server phase 3).
+    let orthanc = state.orthancs.default_for(&user)?;
+    let result = orthanc.upload_instance(reqwest::Body::wrap_stream(stream), content_length).await?;
 
     // Audit: file name (cleaned), outcome and the study it landed in.
     let file_name = headers

@@ -24,7 +24,9 @@ use serde_json::{json, Value};
 
 fn allowed(state: &AppState, user: &User) -> AppResult<()> {
     user.require_or_admin(Permission::Worklists)?;
-    feature(state.settings.get().worklists_enabled, "Worklists are switched off")
+    feature(state.settings.get().worklists_enabled, "Worklists are switched off")?;
+    // The worklists of the default server (a choice comes in multi-server phase 4).
+    state.orthancs.default_for(user).map(|_| ())
 }
 
 fn check_id(id: &str) -> AppResult<()> {

@@ -28,7 +28,14 @@
 //!
 //! ## The read-only proxy
 //! `/dicom-web/*`, `/wado` and `/ohif/*` are forwarded to Orthanc with **GET only**, after
-//! checking who is asking. Paths are validated so nothing else of Orthanc is reachable, and
+//! checking who is asking.
+//!
+//! ## Several Orthanc servers
+//! A staff viewer's DICOMweb and WADO requests go to the server of the study they name, among the
+//! servers the person may use (`OrthancPool::for_study`). The viewer buttons pass the server the
+//! study was opened from: `server=` on the OHIF page and on the Weasis link. The viewers' own
+//! files (OHIF, Stone, VolView: programs, no patient data) come from the default server. A
+//! guest reads the server of their link only. Paths are validated so nothing else of Orthanc is reachable, and
 //! the DICOMweb plugin's other resources (such as queries to OTHER DICOMweb servers) are not
 //! relayed.
 
@@ -55,6 +62,9 @@ use serde_json::{json, Value};
 pub struct WeasisParams {
     /// DICOM StudyInstanceUID of the study to open.
     study_uid: String,
+    /// The key of the Orthanc server it is opened from (empty = found by its UID).
+    #[serde(default)]
+    server: String,
 }
 
 /// Builds the `weasis://` URI that opens one study in the Weasis viewer.
@@ -72,6 +82,9 @@ pub async fn weasis_link(
     // The UID goes inside a quoted command line: only digits and dots are allowed.
     if !is_valid_dicom_uid(&params.study_uid) {
         return Err(AppError::BadRequest("Invalid StudyInstanceUID".into()));
+    }
+    if !params.server.is_empty() {
+        state.orthancs.note_route(&user, &params.study_uid, &params.server);
     }
 
     // URL of OUR /dicom-web proxy as seen from the user's computer (intranet
@@ -167,15 +180,39 @@ async fn forward(
     // permission. Guest: the cookie set by an invitation's password; the viewer then only
     // gets what belongs to that invitation's study (checked below).
     // Which Orthanc answers: a guest's link is on one server (its studies' IDs say which);
-    // staff use the default server.
+    // staff, the server of the study the request names (see the module documentation).
     let (orthanc, guest): (OrthancClient, Option<(i64, Vec<String>)>) = match audience {
         Audience::Staff => {
-            authenticate_viewer(state, headers)?;
-            (state.orthanc.clone(), None)
+            let user = authenticate_viewer(state, headers)?;
+            // A search for studies that names none (OHIF's list of the patient's other studies):
+            // every server of the person is asked, and the answers are merged.
+            if area == Area::DicomWeb && path == "studies" && study_uid_of(area, path, query.as_deref()).is_none() {
+                let usable = state.orthancs.usable(&user);
+                if usable.len() > 1 {
+                    return merged_study_search(&usable, headers, query.as_deref()).await;
+                }
+            }
+            let client = match area {
+                Area::DicomWeb | Area::Wado => {
+                    let uid = study_uid_of(area, path, query.as_deref());
+                    state.orthancs.for_study(&user, uid.as_deref()).await?
+                }
+                // Whole-slide images: the tiles are images of the default server.
+                Area::App("/wsi") => state.orthancs.default_for(&user)?,
+                Area::Ohif | Area::App(_) => {
+                    // The OHIF page of a study opened from a server: its requests go there.
+                    if area == Area::Ohif {
+                        note_opened_from(state, &user, query.as_deref());
+                    }
+                    state.orthancs.stored(crate::settings::MAIN_SERVER)?
+                }
+            };
+            (client, None)
         }
         Audience::Guest => {
             let share = authenticate_share(state, headers)?;
-            let (server, _) = state.orthancs.resolve(&share.study_id)?;
+            // The server stored with the link (checked when the link was made).
+            let (server, _) = state.orthancs.resolve_stored(&share.study_id)?;
             (server, Some((share.id, share.study_uids())))
         }
     };
@@ -252,6 +289,125 @@ async fn forward(
     builder
         .body(Body::from_stream(answer.bytes_stream()))
         .map_err(|e| AppError::Internal(format!("cannot build proxy response: {e}")))
+}
+
+/// `GET /dicom-web/studies?...` on several servers: each answer (a DICOM JSON list) is read and the
+/// lists are joined, the same study (StudyInstanceUID `0020000D`) given once. A server that does
+/// not answer is left out, unless none does.
+async fn merged_study_search(
+    servers: &[(crate::servers::ServerInfo, OrthancClient)],
+    headers: &HeaderMap,
+    query: Option<&str>,
+) -> AppResult<Response> {
+    let mut upstream = "/dicom-web/studies".to_string();
+    if let Some(q) = query.filter(|q| !q.is_empty()) {
+        upstream.push('?');
+        upstream.push_str(q);
+    }
+    // Only `Accept` is passed on: the answers must come back plain to be read here.
+    let mut accept = HeaderMap::new();
+    if let Some(value) = headers.get(header::ACCEPT) {
+        accept.insert(header::ACCEPT, value.clone());
+    }
+    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
+    let proto = if is_https(headers) { "https" } else { "http" };
+    let answers = futures_util::future::join_all(servers.iter().map(|(info, client)| {
+        let (upstream, accept) = (&upstream, &accept);
+        async move {
+            let ask = async {
+                let answer = client.proxy_get(upstream, accept, host, proto).await?;
+                if answer.status() == axum::http::StatusCode::NO_CONTENT {
+                    return Ok(Vec::new());
+                }
+                if !answer.status().is_success() {
+                    return Err(AppError::Upstream(format!("HTTP {}", answer.status().as_u16())));
+                }
+                let bytes = answer.bytes().await.map_err(|e| AppError::Upstream(e.to_string()))?;
+                if bytes.is_empty() {
+                    return Ok(Vec::new());
+                }
+                serde_json::from_slice::<Vec<Value>>(&bytes).map_err(|e| AppError::Upstream(e.to_string()))
+            };
+            let result = tokio::time::timeout(crate::routes::studies::SERVER_TIMEOUT, ask)
+                .await
+                .unwrap_or_else(|_| Err(AppError::Upstream("did not answer in time".into())));
+            (info.key.clone(), result)
+        }
+    }))
+    .await;
+    let mut studies: Vec<Value> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    let mut first_error = None;
+    let mut answered = false;
+    for (server, result) in answers {
+        match result {
+            Ok(list) => {
+                answered = true;
+                for study in list {
+                    let uid = study["0020000D"]["Value"][0].as_str().unwrap_or_default().to_string();
+                    if !uid.is_empty() && seen.contains(&uid) {
+                        continue;
+                    }
+                    seen.push(uid);
+                    studies.push(study);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("viewer study search: Orthanc server '{server}' did not answer: {e}");
+                first_error = first_error.or(Some(e));
+            }
+        }
+    }
+    if let (false, Some(e)) = (answered, first_error) {
+        return Err(e);
+    }
+    let body = serde_json::to_vec(&studies).map_err(|e| AppError::Internal(e.to_string()))?;
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/dicom+json")
+        .header(header::CACHE_CONTROL, "private, no-store")
+        .body(Body::from(body))
+        .map_err(|e| AppError::Internal(format!("cannot build proxy response: {e}")))
+}
+
+/// The values of one parameter of a query string, decoded.
+fn query_values(query: Option<&str>, name: &str) -> Vec<String> {
+    query
+        .unwrap_or_default()
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .filter(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| {
+            percent_encoding::percent_decode_str(&value.replace('+', " ")).decode_utf8_lossy().into_owned()
+        })
+        .collect()
+}
+
+/// The StudyInstanceUID a viewer request names: `studies/{uid}/...` in a DICOMweb path, or the
+/// `StudyInstanceUID` (`0020000D`) of a DICOMweb search, or `studyUID` of a WADO-URI request.
+fn study_uid_of(area: Area, path: &str, query: Option<&str>) -> Option<String> {
+    let from_query = |names: &[&str]| names.iter().flat_map(|n| query_values(query, n)).next();
+    match area {
+        Area::DicomWeb => {
+            let mut segments = path.split('/');
+            match (segments.next(), segments.next()) {
+                (Some("studies"), Some(uid)) if !uid.is_empty() => Some(uid.to_string()),
+                _ => from_query(&["StudyInstanceUID", "0020000D"]),
+            }
+        }
+        Area::Wado => from_query(&["studyUID"]),
+        _ => None,
+    }
+    .filter(|uid| is_valid_dicom_uid(uid))
+}
+
+/// `/ohif/viewer?StudyInstanceUIDs=...&server=archive`: the studies are read from that server.
+fn note_opened_from(state: &AppState, user: &crate::db::User, query: Option<&str>) {
+    let Some(server) = query_values(query, "server").into_iter().next() else { return };
+    for uids in query_values(query, "StudyInstanceUIDs") {
+        for uid in uids.split(',').map(str::trim).filter(|u| is_valid_dicom_uid(u)) {
+            state.orthancs.note_route(user, uid, &server);
+        }
+    }
 }
 
 /// Does the series (and image) a guest names belong to the study written before it? Asked to

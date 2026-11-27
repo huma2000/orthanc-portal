@@ -342,6 +342,27 @@ function tint(el, color) {
   el.style.setProperty("--chip-ink", inkOn(color));
   return el;
 }
+/**
+ * The Orthanc servers this person may use (switched on, in order). Every server control of the page
+ * appears only with two or more: with one server the portal looks exactly as before.
+ */
+const orthancServers = () => (state.user && state.user.orthanc_servers) || [];
+const severalServers = () => orthancServers().length > 1;
+const serverInfo = (key) => orthancServers().find((x) => x.key === key);
+const serverName = (key) => (serverInfo(key) || { label: key }).label;
+/** A server's badge, in its colour (Settings). */
+const serverBadge = (key) => tint(h("span", { class: "chip server-chip", title: t("Stored on {server}", { server: serverName(key) }) }, serverName(key)),
+  (serverInfo(key) || {}).color);
+/** The badges of a study or series: every server holding it (search results), or its own. */
+const serverBadges = (item) => (item.servers && item.servers.length ? item.servers : [item.server || "main"]).map((key) => {
+  const badge = serverBadge(key);
+  // A study on several servers: the copy its buttons use is marked.
+  if (item.servers && item.servers.length > 1 && key === item.server) badge.classList.add("server-current");
+  return badge;
+});
+/** `&server=key` for the viewer addresses: their requests then read the study from that server. */
+const serverParam = (key) => (severalServers() && key ? `&server=${encodeURIComponent(key)}` : "");
+
 /** The colour of a modality code (Settings > Search & labels > Modality buttons), or undefined. */
 const modalityColor = (code) => ((state.brand && state.brand.modality_colors) || {})[code];
 /** The colour of a label (Settings > Search & labels > Label colours), or undefined. */
@@ -711,6 +732,7 @@ const ICONS = {
   account: [{ c: [12, 12, 9] }, { c: [12, 10, 3] }, "M6.6 18.3c1.3-2.1 3.1-3.1 5.4-3.1s4.1 1 5.4 3.1"], // my account
   qr: ["M4 4h6v6H4z", "M14 4h6v6h-6z", "M4 14h6v6H4z", "M14 14h2v2h-2z", "M18 18h2v2h-2z", "M14 18h2", "M18 14h2"],
   disc: [{ c: [12, 12, 9] }, { c: [12, 12, 2.5] }, "M12 3a9 9 0 0 1 9 9"],                    // patient CD / USB
+  servers: ["M4 4.5h16v6H4z", "M4 13.5h16v6H4z", "M7 7.5h.01", "M7 16.5h.01", "M10.5 7.5h6", "M10.5 16.5h6"], // Orthanc servers (the copies of a study)
   inbox: ["M3.5 13.5 6 5h12l2.5 8.5V19h-17z", "M3.5 13.5h5l1 2.5h5l1-2.5h5", "M12 6.5v5", "M9.8 9.4 12 11.6l2.2-2.2"], // files coming in
 };
 
@@ -859,13 +881,20 @@ function renderSimplified() {
  */
 const totalStudies = { text: "...", at: 0 };
 async function refreshTotalStudies(force = false) {
-  const show = () => { const slot = document.getElementById("total-studies"); if (slot) slot.textContent = totalStudies.text; };
+  const show = () => {
+    const slot = document.getElementById("total-studies");
+    if (slot) { slot.textContent = totalStudies.text; slot.title = totalStudies.title || ""; }
+  };
   show();
   if (!document.getElementById("total-studies") || (!force && Date.now() - totalStudies.at < 60000)) return;
   totalStudies.at = Date.now();
   try {
     const stats = await api("GET", "/api/stats");
     totalStudies.text = typeof stats.studies === "number" ? stats.studies.toLocaleString(i18n.locale) : "?";
+    // With several servers, the count of each one in the tooltip.
+    totalStudies.title = (stats.servers || []).length > 1
+      ? stats.servers.map((x) => `${x.label}: ${typeof x.studies === "number" ? x.studies.toLocaleString(i18n.locale) : "?"}`).join(" · ")
+      : "";
   } catch {
     totalStudies.text = "?"; // Orthanc unreachable: the administrators' red notice explains it
     totalStudies.at = 0;     // try again at the next page
@@ -1043,14 +1072,16 @@ function openStudyDialog(study) {
     modalities: study.modalities.length ? h("span", null, study.modalities.map(chip)) : null,
     series: study.instances_count != null ? `${seriesCount(study.series_count)}, ${imagesCount(study.instances_count)}` : seriesCount(study.series_count),
     study_uid: study.study_instance_uid,
+    server: severalServers() ? h("span", null, serverBadges(study)) : null,
   };
-  const fields = (opts().detail_fields || ["patient_id", "sex", "birth_date", "study_date", "description", "modalities", "series", "labels"])
+  const fields = [...(opts().detail_fields || ["patient_id", "sex", "birth_date", "study_date", "description", "modalities", "series", "labels"]), "server"]
     .filter((k) => k !== "labels" || labelsOn());
   const dialog = h("dialog", { class: "study-dialog" }, h("div", { class: "dialog-form" },
     h("h2", null, formatName(study.patient_name)),
     h("dl", { class: "share-details" },
       fields.map((k) => (k === "labels" ? [h("dt", null, "Labels"), labelsSlot] : detail(STUDY_DETAIL_TITLES[k], values[k])))),
-    h("div", { class: "actions" }, studyActions(study, () => labelsSlot.replaceChildren(...[labelChips(study.labels)].flat()))),
+    h("div", { class: "actions" }, studyActions(study, () => labelsSlot.replaceChildren(...[labelChips(study.labels)].flat()),
+      (copy) => { dialog.close(); openStudyDialog(copyOf(study, copy)); })),
     seriesSlot,
     h("div", { class: "dialog-actions" }, h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Close"))));
   dialog.addEventListener("close", () => dialog.remove());
@@ -1294,6 +1325,71 @@ function buildModalityPicker(initial, onChange, chips = modalityButtons()) {
   };
 }
 
+/* ---- Orthanc servers ---- */
+
+/** The servers this browser last chose to search (remembered per person, per browser). */
+const SERVERS_KEY = "portal-search-servers";
+function rememberedServers() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(`${SERVERS_KEY}-${state.user.id}`) || "null");
+    if (Array.isArray(saved)) return saved.filter((key) => serverInfo(key));
+  } catch { /* private window, or storage blocked */ }
+  return null;
+}
+function rememberServers(keys) {
+  try { localStorage.setItem(`${SERVERS_KEY}-${state.user.id}`, JSON.stringify(keys)); } catch { /* not kept */ }
+}
+
+/**
+ * "Servers: (All) (Main) (Archive)": which Orthanc servers a search asks. Starts from the address
+ * (a copied link), else this browser's last choice, else the servers "searched by default".
+ * `.value` = the chosen keys separated by commas ("" = the default ones).
+ */
+function buildServerPicker(initial, onChange) {
+  const defaults = () => orthancServers().filter((x) => x.searched_by_default).map((x) => x.key);
+  const chosen = new Set();
+  const load = (list) => {
+    chosen.clear();
+    const keys = list ? list.split(",").map((k) => k.trim()).filter((k) => serverInfo(k)) : (rememberedServers() || defaults());
+    (keys.length ? keys : defaults()).forEach((k) => chosen.add(k));
+    refresh();
+  };
+  const all = h("button", {
+    type: "button", class: "chip-toggle", "aria-pressed": "false", title: "Search every server",
+    onclick: () => { orthancServers().forEach((x) => chosen.add(x.key)); changed(); },
+  }, "All");
+  const buttons = orthancServers().map((server) => ({
+    key: server.key,
+    button: tint(h("button", {
+      type: "button", class: "chip-toggle", "aria-pressed": "false", title: t("Search {server}", { server: server.label }),
+      onclick: () => {
+        if (chosen.has(server.key)) { if (chosen.size > 1) chosen.delete(server.key); } else chosen.add(server.key);
+        changed();
+      },
+    }, server.label), server.color),
+  }));
+  function refresh() {
+    all.setAttribute("aria-pressed", String(chosen.size === orthancServers().length));
+    for (const { key, button } of buttons) button.setAttribute("aria-pressed", String(chosen.has(key)));
+  }
+  function changed() { refresh(); rememberServers([...chosen]); onChange(); }
+  load(initial);
+  return {
+    node: h("div", { class: "mod-picker server-picker" }, all, buttons.map((b) => b.button)),
+    get value() { return orthancServers().filter((x) => chosen.has(x.key)).map((x) => x.key).join(","); },
+    set value(list) { load(list); }, // "Clear filters" gives "": this browser's choice again
+  };
+}
+
+/** "Archive did not answer (...): results from the other servers only." above a list. */
+function unavailableNotice(page, retry) {
+  if (!page.unavailable || !page.unavailable.length) return null;
+  return h("p", { class: "login-notice server-notice", role: "status" },
+    page.unavailable.map((u) => t("{server} did not answer ({error}).", { server: u.label, error: translateMessage(u.error) })).join(" "),
+    " ", lookup("The results come from the other servers only."), " ",
+    h("button", { class: "btn small", type: "button", onclick: retry }, "Try again"));
+}
+
 /* ---- Labels ---- */
 
 /** The labels with their study counts, asked once and kept until a label changes. */
@@ -1484,6 +1580,14 @@ function buildSearchView(cfg) {
     }, 350);
   };
 
+  // With several Orthanc servers: which ones to search, first.
+  const serverNodes = [];
+  if (severalServers()) {
+    const picker = buildServerPicker(memory.servers || "", () => run(0));
+    inputs.servers = picker;
+    serverNodes.push(h("div", { class: "field wide" }, h("span", { class: "field-label" }, "Servers"), picker.node));
+  }
+
   // One labelled control per field, pre-filled from memory. Modality and label buttons search
   // again as soon as they are toggled.
   const fieldNodes = fields.map((field) => {
@@ -1556,10 +1660,11 @@ function buildSearchView(cfg) {
         shownCount += page.items.length;
         results.querySelector(".load-more").replaceWith(buildLoadMore());
       } else if (!page.items.length) {
-        results.replaceChildren(h("div", { class: "empty" }, offset > 0 ? "No more results." : "No results. Try fewer filters, or a wildcard such as DOE*."));
+        results.replaceChildren(unavailableNotice(page, () => run(0)) || "",
+          h("div", { class: "empty" }, offset > 0 ? "No more results." : "No results. Try fewer filters, or a wildcard such as DOE*."));
       } else {
         shownCount = page.items.length;
-        results.replaceChildren(cfg.renderTable(page.items, sorting()), options.infinite ? buildLoadMore() : buildPager(page));
+        results.replaceChildren(unavailableNotice(page, () => run(0)) || "", cfg.renderTable(page.items, sorting()), options.infinite ? buildLoadMore() : buildPager(page));
       }
     } catch (e) {
       if (thisSearch !== latestSearch) return;
@@ -1602,7 +1707,7 @@ function buildSearchView(cfg) {
     class: "panel filters",
     onsubmit: (event) => { event.preventDefault(); run(0); },
   },
-    h("div", { class: "filter-grid" }, fieldNodes),
+    h("div", { class: "filter-grid" }, serverNodes, fieldNodes),
     h("div", { class: "filter-actions" },
       h("button", { class: "btn primary", type: "submit" }, cfg.id === "series" ? "Search series" : "Search studies"),
       h("button", {
@@ -1655,15 +1760,21 @@ const STUDY_COLUMNS = {
   modalities: { title: "Modality", cell: (s) => h("td", null, s.modalities.length ? s.modalities.map(chip) : dash()) },
   series: { title: "Series / images", cell: (s) => h("td", null, seriesCount(s.series_count), s.instances_count != null ? h("div", { class: "sub" }, imagesCount(s.instances_count)) : null) },
   labels: { title: "Labels", cell: (s) => h("td", { class: "labels-cell" }, labelChips(s.labels)) },
+  server: { title: "Server", cell: (s) => h("td", null, serverBadges(s)) },
 };
 /** The fields the study window can show (Settings > Search & labels), and their titles. */
 const STUDY_DETAIL_TITLES = {
   patient_id: "Patient ID", birth_date: "Birth date", sex: "Sex", other_ids: "Other patient IDs", study_date: "Study date",
   description: "Description", accession: "Accession number", referring: "Referring physician", requesting: "Requesting physician",
   institution: "Institution", modalities: "Modalities", series: "Content", labels: "Labels", study_uid: "StudyInstanceUID",
+  server: "Stored on",
 };
 const DEFAULT_STUDY_COLUMNS = ["patient", "patient_id", "study_date", "description", "modalities", "series", "labels"];
-const studyColumnKeys = () => (searchOptions().columns || DEFAULT_STUDY_COLUMNS).filter((key) => STUDY_COLUMNS[key] && (key !== "labels" || labelsOn()));
+const studyColumnKeys = () => [
+  ...(searchOptions().columns || DEFAULT_STUDY_COLUMNS).filter((key) => STUDY_COLUMNS[key] && key !== "server" && (key !== "labels" || labelsOn())),
+  // With several Orthanc servers, the last column says where each study is.
+  ...(severalServers() ? ["server"] : []),
+];
 /** Number of cells in a study row: tick box, arrow, preview, the chosen columns, actions. */
 const studyColumnCount = () => 2 + (bulkOn() ? 1 : 0) + (showThumbs() ? 1 : 0) + studyColumnKeys().length;
 
@@ -1722,14 +1833,43 @@ function studyRows(study) {
     h("td", null, twisty),
     showThumbs() ? h("td", { class: "thumb-cell" }, thumb("studies", study.id, study.modalities[0])) : null,
     cells,
-    h("td", null, h("div", { class: "actions" }, studyActions(study, redrawLabels))));
+    h("td", null, h("div", { class: "actions" }, studyActions(study, redrawLabels, (copy) => {
+      const [main, series] = studyRows(copyOf(study, copy));
+      mainRow.replaceWith(main);
+      seriesRow.replaceWith(series);
+    }))));
+  if (severalServers() && study.copies && study.copies.length > 1) mainRow.dataset.server = study.server;
 
   return [mainRow, seriesRow];
 }
 
-/** Buttons shown for a study, according to the user's permissions. `onLabels` redraws after a label change. */
-function studyActions(study, onLabels = () => {}) {
+/** A study as its copy on another server: everything done with it then uses that server. */
+const copyOf = (study, copy) => ({ ...study, id: copy.id, server: copy.server });
+
+/**
+ * "Open the copy on...": a study found on several servers (search results) acts on the copy of the
+ * first server; this menu chooses another. `onCopy(copy)` redraws the study as that copy.
+ */
+function copiesMenu(study, onCopy) {
+  if (!onCopy || !severalServers() || !study.copies || study.copies.length < 2) return null;
+  return h("details", { class: "menu" },
+    actionButton("summary", "servers", "Open the copy on...", t("Stored on {servers}: choose which copy to work with", { servers: study.copies.map((c) => serverName(c.server)).join(", ") }), { class: "btn small" }),
+    h("div", { class: "menu-list" }, study.copies.map((copy) => {
+      const current = copy.server === study.server;
+      return h("button", {
+        class: "menu-item", type: "button", "aria-current": current ? "true" : null, disabled: current,
+        onclick: (event) => { closeMenu(event); onCopy(copy); },
+      }, current ? t("{server} (this copy)", { server: serverName(copy.server) }) : t("Open the copy on {server}", { server: serverName(copy.server) }));
+    })));
+}
+
+/**
+ * Buttons shown for a study, according to the user's permissions. `onLabels` redraws after a label
+ * change; `onCopy` (optional) redraws the study as its copy on another server.
+ */
+function studyActions(study, onLabels = () => {}, onCopy = null) {
   return [
+    copiesMenu(study, onCopy),
     can("visualize") ? viewButtons(study) : null,
     study.patient_id || study.patient_name
       ? actionButton("button", "patient", "Other studies of this patient", "All the studies of this patient", { class: "btn small", type: "button", onclick: () => openPatientStudies(study) })
@@ -1784,6 +1924,7 @@ function renderSeriesTable(seriesList, sorting = null) {
       h("thead", null, h("tr", null,
         showThumbs() ? h("th", null, "Preview") : null,
         SERIES_COLUMNS.map(([title, key]) => columnHeader(title, key, sorting, title === "Images" ? "num" : null)),
+        severalServers() ? h("th", null, "Server") : null,
         h("th", { class: "num" }, "Actions"))),
       h("tbody", null, seriesList.map(seriesRow))));
 }
@@ -1801,6 +1942,7 @@ function seriesRow(s) {
     h("td", null, s.description || dash()),
     h("td", null, s.body_part || dash()),
     h("td", { class: "num" }, s.instances_count),
+    severalServers() ? h("td", null, serverBadges(s)) : null,
     h("td", null, h("div", { class: "actions" }, [
       can("visualize") && study ? viewButtons(study) : null,
       study ? actionButton("button", "patient", "Other studies of this patient", "All the studies of this patient", { class: "btn small", type: "button", onclick: () => openPatientStudies(study) }) : null,
@@ -1825,11 +1967,11 @@ function closeMenu(event) {
  * token and hands it to the browser, which starts Weasis on this computer (the
  * browser may ask for confirmation the first time).
  */
-async function openInWeasis(studyUid, button) {
+async function openInWeasis(studyUid, button, server = "") {
   if (!studyUid) { toast("This study has no StudyInstanceUID.", "error"); return; }
   button.disabled = true;
   try {
-    const link = await api("GET", `/api/weasis/link?study_uid=${encodeURIComponent(studyUid)}`);
+    const link = await api("GET", `/api/weasis/link?study_uid=${encodeURIComponent(studyUid)}${serverParam(server)}`);
     toast("Opening Weasis. If nothing happens, check that Weasis is installed on this computer.", "info", 8000);
     window.location.href = link.uri;
   } catch (e) {
@@ -1840,7 +1982,7 @@ async function openInWeasis(studyUid, button) {
 }
 
 /** Address of the OHIF web viewer for a study (served by Orthanc's OHIF plugin through the portal). */
-const ohifUrl = (studyUid) => `/ohif/viewer?StudyInstanceUIDs=${encodeURIComponent(studyUid)}`;
+const ohifUrl = (studyUid, server = "") => `/ohif/viewer?StudyInstanceUIDs=${encodeURIComponent(studyUid)}${serverParam(server)}`;
 
 /**
  * The two viewer buttons of a study, each shown only when it is switched on in
@@ -1852,12 +1994,12 @@ function viewButtons(study) {
   if (hasWeasis()) {
     const weasis = actionButton("button", "weasis", "Weasis", "Open in Weasis (desktop viewer, must be installed on this computer)",
       { class: "btn small", type: "button", title: "Open in Weasis (desktop viewer, must be installed on this computer)" });
-    weasis.addEventListener("click", () => { noteViewed(study); openInWeasis(study.study_instance_uid, weasis); });
+    weasis.addEventListener("click", () => { noteViewed(study); openInWeasis(study.study_instance_uid, weasis, study.server); });
     buttons.push(weasis);
   }
   if (hasOhif() && (viewersOpt().ohif_modes || ["viewer"]).includes("viewer")) {
     buttons.push(actionButton("a", "ohif", "OHIF", "Open in the browser viewer (OHIF): new tab, nothing to install", {
-      class: "btn small", href: ohifUrl(study.study_instance_uid), target: "_blank", rel: "noopener",
+      class: "btn small", href: ohifUrl(study.study_instance_uid, study.server), target: "_blank", rel: "noopener",
       title: "Open in the browser viewer (OHIF): new tab, nothing to install", onclick: () => noteViewed(study),
     }));
   }
@@ -2462,13 +2604,16 @@ function buildUsersView() {
   };
 
   function renderUsersTable() {
+    const servers = (meta.orthanc_servers || []).length > 1;
+    const columns = ["User", "Role", "Access", ...(servers ? ["Servers"] : []), "Status", "Last sign-in", "Actions"];
     return h("div", { class: "table-wrap" },
       h("table", { class: "data" },
-        h("thead", null, h("tr", null, ["User", "Role", "Access", "Status", "Last sign-in", "Actions"].map((t) => h("th", { class: t === "Actions" ? "num" : null }, t)))),
+        h("thead", null, h("tr", null, columns.map((t) => h("th", { class: t === "Actions" ? "num" : null }, t)))),
         h("tbody", null, meta.users.map((u) => h("tr", null,
           h("td", null, h("span", { class: "patient" }, u.username), u.id === state.user.id ? h("span", { class: "sub" }, " (you)") : null),
           h("td", null, roleLabel(u.effective_role)),
           h("td", null, u.permissions.length ? u.permissions.map((p) => h("span", { class: "chip perm" }, p)) : h("span", { class: "muted" }, "no access")),
+          servers ? h("td", null, accountServers(u, meta)) : null,
           h("td", null, h("span", { class: `chip ${u.active ? "status-on" : "status-off"}` }, u.active ? "Active" : "Disabled"),
             u.two_factor ? [" ", h("span", { class: "chip", title: "Signs in with a code from a phone app too" }, "two-step")] : null,
             u.email ? h("div", { class: "sub" }, u.email) : null),
@@ -2490,6 +2635,49 @@ function buildUsersView() {
       h("h2", null, "Users"),
       h("button", { class: "btn primary", type: "button", onclick: () => meta && openUserDialog(null, meta, load) }, "New user")),
     container);
+}
+
+/** The servers column of the users list: "All", or the names of the account's servers. */
+function accountServers(user, meta) {
+  if (user.permissions.includes("admin") || user.servers == null) return h("span", { class: "muted" }, "All");
+  if (!user.servers.length) return h("span", { class: "muted" }, "none");
+  const name = (key) => ((meta.orthanc_servers || []).find((x) => x.key === key) || { label: key }).label;
+  return user.servers.map((key) => h("span", { class: "chip" }, name(key)));
+}
+
+/**
+ * "Servers this account can use: (o) All ( ) Only: [x] Main [ ] Archive". `initial` = null (all) or
+ * a list of keys. `.value` = null or the ticked keys. Hidden with a single server.
+ */
+function buildServerAccess(servers, initial, legend = "Servers this account can use") {
+  const name = `servers-${Math.random().toString(36).slice(2)}`;
+  const allRadio = h("input", { type: "radio", name, checked: initial == null });
+  const onlyRadio = h("input", { type: "radio", name, checked: initial != null });
+  const boxes = servers.map((server) => ({
+    key: server.key,
+    box: h("input", { type: "checkbox", checked: initial != null && initial.includes(server.key) }),
+    server,
+  }));
+  const list = h("div", { class: "role-perms" }, boxes.map(({ box, server }) => h("label", { class: "check" }, box,
+    server.label, server.enabled === false ? h("small", null, " ", lookup("(switched off)")) : null)));
+  const sync = () => { list.hidden = !onlyRadio.checked; };
+  allRadio.addEventListener("change", sync);
+  onlyRadio.addEventListener("change", sync);
+  sync();
+  const node = h("fieldset", { class: "perm-list server-access" }, h("legend", null, legend),
+    h("label", { class: "check" }, allRadio, "All servers"),
+    h("label", { class: "check" }, onlyRadio, "Only these:"),
+    list);
+  return {
+    node,
+    get value() { return allRadio.checked ? null : boxes.filter((b) => b.box.checked).map((b) => b.key); },
+    set value(keys) {
+      allRadio.checked = keys == null;
+      onlyRadio.checked = keys != null;
+      for (const b of boxes) b.box.checked = keys != null && keys.includes(b.key);
+      sync();
+    },
+  };
 }
 
 /**
@@ -2525,10 +2713,15 @@ function openUserDialog(user, meta, reload) {
     const current = meta.presets.find((p) => p.key === preset.value);
     return current && same(current) ? current.key : (meta.presets.find(same) || { key: "" }).key;
   }
+  // With several Orthanc servers: which ones the account may use (a role gives its own).
+  const serverAccess = (meta.orthanc_servers || []).length > 1
+    ? buildServerAccess(meta.orthanc_servers, user ? user.servers : (meta.presets.find((p) => p.key === initialRole) || {}).servers ?? null)
+    : null;
   const preset = h("select", {
     onchange: (event) => {
       const chosen = meta.presets.find((p) => p.key === event.target.value);
       if (chosen) for (const key of Object.keys(checks)) checks[key].checked = chosen.permissions.includes(key);
+      if (chosen && serverAccess) serverAccess.value = chosen.servers ?? null;
     },
   }, h("option", { value: "", selected: !initialRole }, "Custom (no role)"),
   meta.presets.map((p) => h("option", { value: p.key, selected: p.key === initialRole }, p.label)));
@@ -2542,11 +2735,17 @@ function openUserDialog(user, meta, reload) {
       event.preventDefault();
       error.hidden = true;
       const permissions = Object.keys(checks).filter((key) => checks[key].checked);
+      const servers = serverAccess ? { servers: serverAccess.value } : {};
+      if (serverAccess && servers.servers && !servers.servers.length) {
+        error.textContent = lookup("Tick at least one server, or choose All servers.");
+        error.hidden = false;
+        return;
+      }
       try {
         if (isNew) {
-          await api("POST", "/api/admin/users", { username: username.value.trim(), password: password.value, permissions, role: preset.value, email: email.value });
+          await api("POST", "/api/admin/users", { username: username.value.trim(), password: password.value, permissions, role: preset.value, email: email.value, ...servers });
         } else {
-          const body = { permissions, active: active.checked, role: preset.value, email: email.value };
+          const body = { permissions, active: active.checked, role: preset.value, email: email.value, ...servers };
           if (resetTwoFactor.checked) body.reset_two_factor = true;
           if (password.value) body.password = password.value;
           await api("PUT", `/api/admin/users/${user.id}`, body);
@@ -2574,6 +2773,8 @@ function openUserDialog(user, meta, reload) {
     h("label", null, "Role", preset),
     h("p", { class: "hint" }, "Choosing a role ticks its permissions. The user then follows the role: when the role is changed in Settings > Roles, this user changes too. Ticking other permissions by hand makes the account Custom."),
     h("fieldset", { class: "perm-list" }, h("legend", null, "Permissions"), permissionBoxes),
+    serverAccess ? serverAccess.node : null,
+    serverAccess ? h("p", { class: "hint" }, "The studies of the other servers do not exist for this account: they are not found, not shown and cannot be opened. Administrators can always use every server.") : null,
     isNew ? null : h("label", { class: "perm-list" }, h("span", null, active, " Account is active")),
     h("div", { class: "dialog-actions" },
       h("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "Cancel"),
@@ -3949,8 +4150,8 @@ function buildBrandImagePicker(kind, title, hint, accept) {
  * Editor for the list of roles (shortcuts that pre-tick permissions in the user
  * form). `get()` returns the roles as the server expects them.
  */
-function buildRolesEditor(roles, defaults, permissions) {
-  const clone = (list) => list.map((r) => ({ key: r.key, label: r.label, permissions: [...r.permissions] }));
+function buildRolesEditor(roles, defaults, permissions, servers = []) {
+  const clone = (list) => list.map((r) => ({ key: r.key, label: r.label, permissions: [...r.permissions], servers: r.servers ? [...r.servers] : null }));
   let rows = clone(roles);
   const list = h("div", { class: "roles" });
 
@@ -3962,7 +4163,20 @@ function buildRolesEditor(roles, defaults, permissions) {
         type: "checkbox", checked: role.permissions.includes(p.key),
         onchange: (e) => { role.permissions = e.target.checked ? [...new Set([...role.permissions, p.key])] : role.permissions.filter((k) => k !== p.key); },
       }), p.key))),
+    servers.length > 1 ? roleServers(role) : null,
     h("button", { class: "btn small danger", type: "button", onclick: () => { rows.splice(index, 1); draw(); } }, "Remove"))));
+  /** "Servers: [x] All  [ ] Main [ ] Archive" of one role (with several Orthanc servers). */
+  function roleServers(role) {
+    const all = h("input", { type: "checkbox", checked: role.servers == null });
+    const boxes = servers.map((server) => h("label", { class: "check" },
+      h("input", {
+        type: "checkbox", checked: role.servers != null && role.servers.includes(server.key), disabled: role.servers == null,
+        onchange: (e) => { role.servers = e.target.checked ? [...new Set([...(role.servers || []), server.key])] : (role.servers || []).filter((k) => k !== server.key); },
+      }), server.label));
+    all.addEventListener("change", () => { role.servers = all.checked ? null : []; draw(); });
+    return h("div", { class: "role-perms role-servers" }, h("span", { class: "muted" }, lookup("Servers:")),
+      h("label", { class: "check" }, all, "All servers"), boxes);
+  }
   draw();
 
   const node = h("div", { class: "wide" }, list,
@@ -3970,7 +4184,7 @@ function buildRolesEditor(roles, defaults, permissions) {
       h("button", { class: "btn small", type: "button", onclick: () => { rows.push({ key: "", label: "", permissions: ["read", "visualize"] }); draw(); } }, "Add role"),
       h("button", { class: "btn small", type: "button", onclick: () => { rows = clone(defaults); draw(); } }, "Restore default roles")));
 
-  return { node, get: () => rows.map((r) => ({ key: r.key.trim(), label: r.label.trim(), permissions: r.permissions })) };
+  return { node, get: () => rows.map((r) => ({ key: r.key.trim(), label: r.label.trim(), permissions: r.permissions, servers: r.servers ?? null })) };
 }
 
 /**
@@ -4299,7 +4513,8 @@ function buildSettingsView() {
       }
     });
 
-    const rolesEditor = buildRolesEditor(s.roles, doc.defaults.roles, doc.permissions);
+    const rolesEditor = buildRolesEditor(s.roles, doc.defaults.roles, doc.permissions,
+      [{ key: "main", label: s.orthanc_label || "Main" }, ...(s.orthanc_servers || []).map((x) => ({ key: x.key, label: x.label || x.key }))]);
     const forwardEditor = buildForwardRulesEditor(s.forward_rules || [], doc.destinations || []);
 
     // ---- Email: the mail server password is write-only (like Orthanc's), and a test button.
@@ -4740,7 +4955,8 @@ function viewerLinks(studies) {
   const list = [];
   if (hasOhif()) {
     for (const mode of v.ohif_modes || ["viewer"]) {
-      if (OHIF_MODES[mode]) list.push([OHIF_MODES[mode][0], OHIF_MODES[mode][1] + uids.map(encodeURIComponent).join(",")]);
+      // Studies opened together are on one server (the first one's): OHIF reads them all there.
+      if (OHIF_MODES[mode]) list.push([OHIF_MODES[mode][0], OHIF_MODES[mode][1] + uids.map(encodeURIComponent).join(",") + serverParam(studies[0].server)]);
     }
   }
   if (v.stone) list.push(["Stone Web Viewer", `/stone-webviewer/index.html?study=${uids.map(encodeURIComponent).join(",")}`]);

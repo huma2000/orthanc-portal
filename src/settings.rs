@@ -355,6 +355,10 @@ pub struct Role {
     /// Name shown in the user form.
     pub label: String,
     pub permissions: Vec<Permission>,
+    /// The Orthanc servers its users may use, by key: `None` = all of them. Given to the users
+    /// of the role like its permissions.
+    #[serde(default)]
+    pub servers: Option<Vec<String>>,
 }
 
 /// Value of a switch missing from an older stored copy of the settings.
@@ -413,6 +417,7 @@ pub fn default_roles() -> Vec<Role> {
         key: key.into(),
         label: label.into(),
         permissions: permissions.to_vec(),
+        servers: None,
     };
     vec![
         role("viewer", "Viewer (search + view)", &[Permission::Read, Permission::Visualize]),
@@ -941,6 +946,18 @@ fn forget_retired_permissions(stored: &mut Value) {
     }
 }
 
+/// A list of server keys as typed: trimmed, without empty entries or repeats (order kept).
+pub fn tidy_server_keys(keys: &mut Vec<String>) {
+    let mut seen: Vec<String> = Vec::new();
+    for key in keys.drain(..) {
+        let key = key.trim().to_string();
+        if !key.is_empty() && !seen.contains(&key) {
+            seen.push(key);
+        }
+    }
+    *keys = seen;
+}
+
 /// `#rrggbb` (or empty = the built-in colour).
 fn valid_color(value: &str) -> bool {
     value.is_empty()
@@ -1293,6 +1310,9 @@ impl Settings {
             role.label = role.label.trim().to_string();
             role.permissions.sort();
             role.permissions.dedup();
+            if let Some(servers) = &mut role.servers {
+                tidy_server_keys(servers);
+            }
         }
     }
 
@@ -1515,6 +1535,8 @@ impl Settings {
                 return bad(format!("The name of role '{}' must have 1 to 80 characters", role.key));
             }
             PermissionSet::from_slice(&role.permissions).validate()?;
+            self.validate_server_access(&role.servers)
+                .map_err(|e| AppError::BadRequest(format!("Role \"{}\": {e}", role.label)))?;
         }
 
         // --- appearance
@@ -1924,6 +1946,25 @@ impl Settings {
         }
     }
 
+    /// A list of servers an account or a role may use: `None` (all), or at least one server that
+    /// exists. The message names the problem.
+    pub fn validate_server_access(&self, servers: &Option<Vec<String>>) -> Result<(), String> {
+        let Some(servers) = servers else { return Ok(()) };
+        if servers.is_empty() {
+            return Err("choose at least one Orthanc server, or all of them".into());
+        }
+        if servers.len() > MAX_EXTRA_SERVERS + 1 {
+            return Err("too many Orthanc servers".into());
+        }
+        let known = self.servers();
+        match servers.iter().find(|key| !known.iter().any(|s| &s.key == *key)) {
+            Some(key) => Err(format!(
+                "there is no Orthanc server '{key}' (a server used by a role can only be removed once                  the role no longer uses it)"
+            )),
+            None => Ok(()),
+        }
+    }
+
     /// Every Orthanc server, the default one (`main`) first, switched-off ones included.
     pub fn servers(&self) -> Vec<OrthancServer> {
         let main = OrthancServer {
@@ -2135,6 +2176,31 @@ mod tests {
     }
 
     /// Other Orthanc servers: checked, tidied, their passwords write-only and kept with them.
+    /// Roles may be limited to servers that exist, and to at least one.
+    #[test]
+    fn roles_limited_to_some_servers() {
+        let base = Settings::defaults()
+            .with_patch(&json!({ "orthanc_servers": [{ "key": "archive", "url": "http://archive:8042" }] }))
+            .unwrap();
+        let with = |servers: Value| {
+            let mut roles = serde_json::to_value(&base.roles).unwrap();
+            roles[0]["servers"] = servers;
+            base.with_patch(&json!({ "roles": roles }))
+        };
+        assert_eq!(with(json!(null)).unwrap().roles[0].servers, None, "null = every server");
+        assert_eq!(
+            with(json!([" archive ", "archive", "main"])).unwrap().roles[0].servers,
+            Some(vec!["archive".to_string(), "main".to_string()]),
+            "tidied"
+        );
+        assert!(with(json!([])).is_err(), "no server at all");
+        assert!(with(json!(["research"])).is_err(), "a server that does not exist");
+        // A server a role uses cannot be removed.
+        let limited = with(json!(["archive"])).unwrap();
+        assert!(limited.with_patch(&json!({ "orthanc_servers": [] })).is_err());
+        assert_eq!(Settings::defaults().roles[0].servers, None, "roles start with every server");
+    }
+
     #[test]
     fn other_orthanc_servers() {
         let base = Settings::defaults();

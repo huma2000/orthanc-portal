@@ -34,7 +34,7 @@ pub async fn note(
 ) -> AppResult<Json<Value>> {
     user.require(Permission::Read)?;
     feature(state.settings.get().recently_viewed, "Recently viewed studies are switched off")?;
-    let (_, study) = state.orthancs.resolve(&id)?;
+    let (_, study) = state.orthancs.resolve(&user, &id)?;
     if !is_valid_dicom_uid(&req.uid) {
         return Err(AppError::BadRequest("Invalid StudyInstanceUID".into()));
     }
@@ -65,7 +65,7 @@ pub async fn list(State(state): State<AppState>, AuthUser(user): AuthUser) -> Ap
     // answering says nothing about its studies, which stay in the list.
     let mut answered: Vec<String> = Vec::new();
     for (server, uids) in by_server {
-        let Ok(orthanc) = state.orthancs.get(&server) else { continue };
+        let Ok(orthanc) = state.orthancs.get(&user, &server) else { continue };
         let body = json!({
             "Level": "Study",
             // A backslash-separated list of UIDs is DICOM's "any of".

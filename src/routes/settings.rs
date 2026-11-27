@@ -165,8 +165,8 @@ pub async fn update_settings(
     }
     // The users of the changed roles, in one transaction. If that fails, put everything back.
     if !role_changes.is_empty() {
-        let rows: Vec<(i64, &str, &PermissionSet)> =
-            role_changes.iter().map(|u| (u.user_id, u.role.as_str(), &u.permissions)).collect();
+        let rows: Vec<(i64, &str, &PermissionSet, &Option<Vec<String>>)> =
+            role_changes.iter().map(|u| (u.user_id, u.role.as_str(), &u.permissions, &u.servers)).collect();
         if let Err(e) = state.db.set_users_role_permissions(&rows) {
             if let Ok(previous) = serde_json::to_string(&*old) {
                 let _ = state.db.save_settings(&previous);
@@ -204,6 +204,7 @@ pub async fn update_settings(
     if changed.iter().any(|k| k.starts_with("orthanc_")) {
         state.orthancs.reconfigure(&new);
         messages.push("The connection to Orthanc was updated.".into());
+        forget_removed_servers(&state, &old, &new);
     }
     // Thumbnails: resize the cache, and empty it when they are switched off or when
     // Orthanc changes (the cached images would belong to another server).
@@ -464,6 +465,28 @@ struct RoleUpdate {
     username: String,
     role: String,
     permissions: PermissionSet,
+    /// The role's Orthanc servers (`None` = all).
+    servers: Option<Vec<String>>,
+}
+
+/// A removed Orthanc server leaves the lists of servers of the accounts that had it. An account
+/// limited to some servers stays limited (to those left, possibly none): it never becomes "all".
+fn forget_removed_servers(state: &AppState, old: &Settings, new: &Settings) {
+    let kept: Vec<String> = new.servers().into_iter().map(|s| s.key).collect();
+    let removed: Vec<String> = old.servers().into_iter().map(|s| s.key).filter(|k| !kept.contains(k)).collect();
+    if removed.is_empty() {
+        return;
+    }
+    let Ok(users) = state.db.list_users() else { return };
+    for user in users {
+        let Some(list) = &user.servers else { continue };
+        if list.iter().any(|k| removed.contains(k)) {
+            let left: Vec<String> = list.iter().filter(|k| !removed.contains(k)).cloned().collect();
+            if let Err(e) = state.db.set_user_servers(user.id, &Some(left)) {
+                tracing::error!("the servers of {} could not be updated: {e}", user.username);
+            }
+        }
+    }
 }
 
 /// Users follow their role: when a role's permissions change, every account with that role gets
@@ -473,14 +496,18 @@ struct RoleUpdate {
 /// Refused (nothing is saved) when the new permissions would leave no active administrator, or
 /// would take the administrator rights away from the person saving, as in the user form.
 fn role_updates(old: &Settings, new: &Settings, users: &[User], acting_admin: i64) -> AppResult<Vec<RoleUpdate>> {
-    // Roles that exist before and after with other permissions (a renamed key is a new role).
-    let changed: Vec<(&str, PermissionSet)> = new
+    // Roles that exist before and after with other permissions or servers (a renamed key is a new role).
+    let changed: Vec<(&str, PermissionSet, &Option<Vec<String>>)> = new
         .roles
         .iter()
         .filter_map(|r| {
             let before = old.roles.iter().find(|o| o.key == r.key)?;
             let after = PermissionSet::from_slice(&r.permissions);
-            (PermissionSet::from_slice(&before.permissions) != after).then_some((r.key.as_str(), after))
+            (PermissionSet::from_slice(&before.permissions) != after || before.servers != r.servers).then_some((
+                r.key.as_str(),
+                after,
+                &r.servers,
+            ))
         })
         .collect();
     if changed.is_empty() {
@@ -490,13 +517,13 @@ fn role_updates(old: &Settings, new: &Settings, users: &[User], acting_admin: i6
     let (mut admins_after, mut admin_removed) = (0, false);
     for user in users {
         let role = old.role_of(&user.role, &user.permissions).map(|r| r.key.as_str());
-        let follow = changed.iter().find(|(key, _)| Some(*key) == role);
-        let after = follow.map_or(&user.permissions, |(_, p)| p);
+        let follow = changed.iter().find(|(key, _, _)| Some(*key) == role);
+        let after = follow.map_or(&user.permissions, |(_, p, _)| p);
         let loses_admin = user.permissions.contains(Permission::Admin) && !after.contains(Permission::Admin);
         if user.active && after.contains(Permission::Admin) {
             admins_after += 1;
         }
-        if let Some((key, permissions)) = follow {
+        if let Some((key, permissions, servers)) = follow {
             if loses_admin && user.active {
                 if user.id == acting_admin {
                     return Err(AppError::Conflict(format!(
@@ -506,12 +533,13 @@ fn role_updates(old: &Settings, new: &Settings, users: &[User], acting_admin: i6
                 }
                 admin_removed = true;
             }
-            if *permissions != user.permissions || user.role != *key {
+            if *permissions != user.permissions || user.role != *key || **servers != user.servers {
                 updates.push(RoleUpdate {
                     user_id: user.id,
                     username: user.username.clone(),
                     role: key.to_string(),
                     permissions: permissions.clone(),
+                    servers: (*servers).clone(),
                 });
             }
         }
@@ -544,6 +572,7 @@ mod tests {
             recovery_codes_left: 0,
             totp_secret: None,
             totp_pending: None,
+            servers: None,
         }
     }
 
@@ -577,12 +606,29 @@ mod tests {
         assert!(updates.iter().all(|u| u.role == "viewer" && u.permissions == PermissionSet::from_slice(&VIEWER_PLUS)));
     }
 
+    /// A role limited to some servers gives that limit to its users, like its permissions.
+    #[test]
+    fn users_follow_the_servers_of_their_role() {
+        let old = Settings::defaults();
+        let mut new = old.clone();
+        new.roles[0].servers = Some(vec!["main".into()]);
+        let users = [user(2, "viewer", &VIEWER), user(3, "", &VIEWER_PLUS)];
+        let updates = role_updates(&old, &new, &users, 1).unwrap();
+        assert_eq!(updates.len(), 1);
+        assert_eq!((updates[0].user_id, updates[0].servers.clone()), (2, Some(vec!["main".to_string()])));
+        // Back to every server.
+        let back =
+            role_updates(&new, &old, &[User { servers: Some(vec!["main".into()]), ..user(2, "viewer", &VIEWER) }], 1)
+                .unwrap();
+        assert_eq!(back[0].servers, None);
+    }
+
     #[test]
     fn nothing_when_only_the_label_changes() {
         let old = Settings::defaults();
         let mut new = old.clone();
         new.roles[0].label = "Readers".into();
-        new.roles.push(Role { key: "new".into(), label: "New".into(), permissions: VIEWER.to_vec() });
+        new.roles.push(Role { key: "new".into(), label: "New".into(), permissions: VIEWER.to_vec(), servers: None });
         assert!(role_updates(&old, &new, &[user(2, "viewer", &VIEWER)], 1).unwrap().is_empty());
     }
 

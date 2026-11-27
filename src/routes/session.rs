@@ -135,6 +135,9 @@ pub struct Me {
     #[serde(flatten)]
     user: User,
     features: Features,
+    /// The Orthanc servers this person may use (switched-on ones, in order): what the search
+    /// page offers. The server controls appear only with two or more.
+    orthanc_servers: Vec<crate::servers::ServerInfo>,
 }
 
 async fn me_response(state: &AppState, user: User) -> Me {
@@ -227,8 +230,10 @@ async fn me_response(state: &AppState, user: User) -> Me {
         transfers_auto_refresh: settings.transfers_auto_refresh,
         refresh_seconds: settings.auto_refresh_seconds,
     };
+    let orthanc_servers = state.orthancs.usable(&user).into_iter().map(|(info, _)| info).collect();
     Me {
         user,
+        orthanc_servers,
         features: Features {
             weasis: settings.weasis_enabled,
             ohif,
