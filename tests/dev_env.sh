@@ -19,11 +19,16 @@
 # password, to tests/.dev-env/guest-links.txt. Links made in the portal (Share... on a study) also
 # work locally: the public address of the share links is this environment's invitation port.
 #
-# It uses its own ports (19042 Orthanc, 19080 staff portal, 19081 invitation links) and its own folder
+# Three Orthanc servers, to try several servers: Main PACS (19042, the default one), Archive (19043, older
+# studies) and Research (19044, teaching cases, not searched by default); a few studies are on two of them.
+# The account "researcher" may only use the Research server.
+#
+# It uses its own ports (19042-19044 Orthanc, 19080 staff portal, 19081 invitation links) and its own folder
 # (tests/.dev-env, not committed), so it never collides with the automated tests or a real installation.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIR="$ROOT/tests/.dev-env"
 ORTHANC_PORT="${ORTHANC_PORT:-19042}"; STAFF_PORT="${STAFF_PORT:-19080}"; GUEST_PORT="${GUEST_PORT:-19081}"
+ARCHIVE_PORT="${ARCHIVE_PORT:-19043}"; RESEARCH_PORT="${RESEARCH_PORT:-19044}"
 SMTP_PORT="${SMTP_PORT:-19025}"
 MAIL="$DIR/mail"
 F="http://127.0.0.1:$STAFF_PORT"
@@ -40,7 +45,7 @@ PY=python3; "$PY" -c "" 2>/dev/null || PY=python
 running() { [ -f "$DIR/$1.pid" ] && kill -0 "$(cat "$DIR/$1.pid")" 2>/dev/null; }
 
 stop() {
-  for name in portal mock smtp; do
+  for name in portal mock archive research smtp; do
     if running $name; then kill "$(cat "$DIR/$name.pid")" 2>/dev/null; echo "stopped $name"; fi
     rm -f "$DIR/$name.pid"
   done
@@ -60,6 +65,28 @@ seed() {
   api -X POST "$F/api/admin/users" -o /dev/null -d '{"username":"reception","password":"ReceptionPass123","permissions":["read","visualize","upload"],"role":"contributor"}'
   api -X POST "$F/api/admin/users" -o /dev/null -d '{"username":"viewer","password":"ViewerPass123","permissions":["read","visualize"],"role":"viewer"}'
   api -X POST "$F/api/admin/users" -o /dev/null -d '{"username":"doctor","password":"DoctorPass123","permissions":["read","visualize","download","send","share"],"role":"exporter"}'
+  servers
+  # May only use the Research server (Settings > Users > Servers this account can use).
+  api -X POST "$F/api/admin/users" -o /dev/null -d '{"username":"researcher","password":"ResearcherPass123","permissions":["read","visualize","download"],"servers":["research"]}'
+  api -X POST "$F/api/logout" -o /dev/null
+}
+
+# The two other Orthanc servers, added when they are not there yet (changes made in Settings are kept).
+servers() {
+  local have
+  have=$(api "$F/api/admin/settings" | "$PY" -c "import sys,json;print(','.join(s['key'] for s in json.load(sys.stdin)['settings'].get('orthanc_servers', [])))" 2>/dev/null)
+  case ",$have," in *,archive,*) return 0 ;; esac
+  api -X PUT "$F/api/admin/settings" -o /dev/null -d "{\"orthanc_label\":\"Main PACS\",\"orthanc_servers\":[
+    {\"key\":\"archive\",\"label\":\"Archive 2017-2022\",\"url\":\"http://127.0.0.1:$ARCHIVE_PORT\",\"username\":\"orthanc\",\"password\":\"s3cr3tpw\",\"color\":\"#1971c2\",\"searched_by_default\":true},
+    {\"key\":\"research\",\"label\":\"Research\",\"url\":\"http://127.0.0.1:$RESEARCH_PORT\",\"username\":\"orthanc\",\"password\":\"s3cr3tpw\",\"color\":\"#2f9e44\",\"searched_by_default\":false}]}"
+}
+
+# Adds the servers to an environment made before they existed (the first start does it in seed).
+ensure_servers() {
+  COOKIE=$(curl -s -D - -o /dev/null -H "$H" -H "$J" -d '{"username":"admin","password":"AdminPass123"}' "$F/api/login" \
+    | grep -i set-cookie | sed 's/.*portal_session=\([0-9a-f]*\);.*/\1/')
+  [ -n "$COOKIE" ] || return 0
+  servers
   api -X POST "$F/api/logout" -o /dev/null
 }
 
@@ -191,6 +218,17 @@ start() {
     echo $! > "$DIR/mock.pid"
   fi
   wait_for "http://127.0.0.1:$ORTHANC_PORT/system" || { echo "the fake Orthanc did not start (see $DIR/mock.out)"; exit 1; }
+  # The two other Orthanc servers (their own demo studies, logs and uploads).
+  local set port
+  for set in archive research; do
+    port=$ARCHIVE_PORT; [ $set = research ] && port=$RESEARCH_PORT
+    if ! running $set; then
+      mkdir -p "$DIR/$set"
+      MOCK_DEMO=1 MOCK_DEMO_SET=$set MOCK_LOG_DIR="$DIR/$set" "$PY" "$ROOT/tests/mock_orthanc.py" "$port" > "$DIR/$set.out" 2>&1 &
+      echo $! > "$DIR/$set.pid"
+    fi
+    wait_for "http://127.0.0.1:$port/system" || { echo "the fake Orthanc $set did not start (see $DIR/$set.out)"; exit 1; }
+  done
   if ! running smtp; then
     "$PY" "$ROOT/tests/mock_smtp.py" "$SMTP_PORT" "$MAIL" > "$DIR/smtp.out" 2>&1 &
     echo $! > "$DIR/smtp.pid"
@@ -204,7 +242,7 @@ start() {
     echo $! > "$DIR/portal.pid"
   fi
   wait_for "$F/healthz" || { echo "the portal did not start (see $DIR/portal.log)"; exit 1; }
-  [ $first = 1 ] && seed && demo_shares
+  if [ $first = 1 ]; then seed && demo_shares; else ensure_servers; fi
   use_local_mail
 
   cat <<EOF
@@ -212,7 +250,10 @@ start() {
 Test environment running.
   Staff portal:      $F
   Invitation links:  $GUEST_URL  (what people outside see: tests/dev_env.sh guest)
-  Fake Orthanc:      http://127.0.0.1:$ORTHANC_PORT  (demo data; uploads create new studies)
+  Fake Orthanc servers (demo data; uploads create new studies):
+    Main PACS          http://127.0.0.1:$ORTHANC_PORT  (the default server)
+    Archive 2017-2022  http://127.0.0.1:$ARCHIVE_PORT  (older studies; SMITH^JOHN and MULLER^HANS are on Main too)
+    Research           http://127.0.0.1:$RESEARCH_PORT  (teaching cases, not searched by default; JOHANSSON^ANNA is on Main too)
   Fake mail server:  127.0.0.1:$SMTP_PORT  (emails kept in $MAIL; read the last one: tests/dev_env.sh mail)
 
   Account / password             permissions
@@ -220,6 +261,7 @@ Test environment running.
   reception / ReceptionPass123   read, visualize, upload
   viewer / ViewerPass123         read, visualize
   doctor / DoctorPass123         read, visualize, download, send, share
+  researcher / ResearcherPass123 read, visualize, download - the Research server only
 
 Logs and database: $DIR
 Stop with: tests/dev_env.sh stop
@@ -234,6 +276,6 @@ case "${1:-start}" in
   shares) running portal || { echo "the environment is not running: tests/dev_env.sh start"; exit 1; }; db_clear_shares; demo_shares ;;
   guest) guest "$2" ;;
   mail) show_mail "$2" ;;
-  status) for n in mock smtp portal; do running $n && echo "$n: running" || echo "$n: stopped"; done ;;
+  status) for n in mock archive research smtp portal; do running $n && echo "$n: running" || echo "$n: stopped"; done ;;
   *) echo "usage: $0 start|stop|restart|reset|status|shares|guest [study]|mail [count]"; exit 1 ;;
 esac

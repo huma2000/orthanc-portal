@@ -93,13 +93,45 @@ def demo_add_study(n, name, pid, date, desc, modality, body, images, received, r
                          "MainDicomTags": {"StudyInstanceUID": f"1.2.999.{n}", "StudyDate": date, "StudyTime": "101500",
                                            "StudyDescription": desc, "AccessionNumber": f"ACC{n:04d}",
                                            "ReferringPhysicianName": referring, "InstitutionName": institution},
-                         "PatientMainDicomTags": {"PatientName": name, "PatientID": pid, "PatientBirthDate": f"19{50 + n * 3:02d}0{1 + n % 9}15",
+                         "PatientMainDicomTags": {"PatientName": name, "PatientID": pid, "PatientBirthDate": f"19{(50 + n * 3) % 100:02d}0{1 + n % 9}15",
                                                   "PatientSex": "F" if n % 2 else "M", "OtherPatientIDs": f"OLD-{n * 7}" if n % 3 == 0 else ""},
                          "RequestedTags": {"ModalitiesInStudy": modality, "NumberOfStudyRelatedInstances": str(images)}}
     return sid
 
 
-if DEMO:
+# Which demo archive this fake Orthanc holds (several run side by side to try several Orthanc servers,
+# see tests/dev_env.sh): "main" (default), "archive" (older studies) or "research" (teaching cases).
+# The same study number on two of them is the same study (same UID, same Orthanc ID), as on real
+# servers that both hold a study.
+DEMO_SET = os.environ.get("MOCK_DEMO_SET", "main")
+
+if DEMO and DEMO_SET == "archive":
+    for i, (name, pid, mod, desc, body, year) in enumerate([
+            ("SMITH^JOHN", "P-1001", "DX", "LUMBAR SPINE X-RAY (2019)", "LSPINE", "2019"),
+            ("GARCIA^MARIA", "P-1000", "CT", "CT HEAD (BASELINE)", "HEAD", "2021"),
+            ("THOMPSON^GEORGE", "P-2001", "MR", "MRI LEFT SHOULDER", "SHOULDER", "2018"),
+            ("LOPEZ^CARMEN", "P-2002", "US", "PELVIC ULTRASOUND", "PELVIS", "2020"),
+            ("IVANOV^DMITRI", "P-2003", "CT", "CT SINUSES", "HEAD", "2017"),
+            ("HANSEN^INGRID", "P-2004", "MG", "DIAGNOSTIC MAMMOGRAPHY", "BREAST", "2022"),
+            ("KIM^JISOO", "P-2005", "DX", "CHEST PA", "CHEST", "2019"),
+            ("ADEYEMI^TUNDE", "P-2006", "MR", "MRI CERVICAL SPINE", "CSPINE", "2021")]):
+        demo_add_study(101 + i, name, pid, f"{year}0{3 + i % 6}1{i}", desc, mod, body, 3 + i % 3, f"{year}0{3 + i % 6}1{i}T101500",
+                       ["HOUSE^GREGORY", "YANG^CRISTINA"][i % 2], "Riverside Vets")
+    # On the main server too (same study): one row with both badges, "Open the copy on..."
+    demo_add_study(15, "SMITH^JOHN", "P-1001", "20250310", "MRI LUMBAR SPINE (FOLLOW-UP)", "MR", "LSPINE", 4, "20250312T080000", "HOUSE^GREGORY", "Riverside Vets")
+    demo_add_study(4, "MULLER^HANS", "P-1003", "20261114", "CHEST PA AND LATERAL", "DX", "CHEST", 6, "20261115T080000", "SHEPHERD^DEREK", "Hilltop Animal Hospital")
+    LABELS[sorted(DEMO_STUDIES)[2]] = {"teaching"}
+elif DEMO and DEMO_SET == "research":
+    for i, (name, mod, desc, body) in enumerate([
+            ("ANON^CASE^001", "CT", "TEACHING: CT PULMONARY EMBOLISM", "CHEST"), ("ANON^CASE^002", "MR", "TEACHING: MRI MS PLAQUES", "HEAD"),
+            ("ANON^CASE^003", "CT", "TEACHING: CT APPENDICITIS", "ABDOMEN"), ("ANON^CASE^004", "DX", "TEACHING: PNEUMOTHORAX", "CHEST"),
+            ("ANON^CASE^005", "US", "TEACHING: GALLSTONES", "ABDOMEN"), ("ANON^CASE^006", "NM", "TEACHING: BONE METASTASES", "WHOLEBODY")]):
+        demo_add_study(201 + i, name, f"R-{300 + i}", f"2026{i + 1:02d}15", desc, mod, body, 4 + i % 3, f"2026{i + 1:02d}15T120000", "", "Research")
+    # A study copied here from the main server (same study): one row, two servers.
+    demo_add_study(12, "JOHANSSON^ANNA", "P-1011", "20261106", "MRI BRAIN", "MR", "HEAD", 3, "20261120T150000", "SHEPHERD^DEREK", "Riverside Vets")
+    for n in (0, 2):
+        LABELS[sorted(DEMO_STUDIES)[n]] = {"teaching"}
+elif DEMO:
     for i, (name, mod, desc, body) in enumerate([
             ("GARCIA^MARIA", "CT", "CT HEAD WITHOUT CONTRAST", "HEAD"), ("SMITH^JOHN", "MR", "MRI LUMBAR SPINE", "LSPINE"),
             ("NGUYEN^LINH", "US", "ABDOMEN ULTRASOUND", "ABDOMEN"), ("MULLER^HANS", "DX", "CHEST PA AND LATERAL", "CHEST"),
